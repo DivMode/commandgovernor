@@ -1,429 +1,447 @@
 # Command Governor technology review — 2026-08-31
 
-Status: **architecture input / pinned research snapshot**.
+Status: **reviewed architecture input / pinned public-source snapshot**.
 
-This report records public sources verified before V1 implementation. Dates,
-releases, and commits are intentional because browser, MCP, and agent surfaces
-change quickly.
+This report records the public sources re-verified before V1 implementation. It
+also records corrections found during the independent architecture review. Exact
+SHAs matter because several projects moved during the same day.
 
-## Executive findings
+No live Command Governor ChatGPT/Claude adapter result is claimed here. Live
+behavior remains gated separately.
 
-The original architecture hypothesis is substantially correct, with four important
-refinements discovered during review:
+## Executive conclusion
 
-1. **ChatGPT writes should remain browser-owned.** Current independent projects
-   converge on a hybrid: let the authenticated ChatGPT SPA perform sensitive
-   submission, while CDP/passive network evidence and narrowly bounded reads
-   provide observation/reconciliation. Command Governor should not become a
-   Sentinel/Turnstile/proof-of-work/private-write emulator.
-2. **Write-capable ChatGPT MCP is a deployment gate, not an assumption.** OpenAI's
-   current published developer-mode documentation limits full custom MCP actions by
-   plan/surface. Explicit foreman ACK is a mutation; the real target account must
-   pass a capability preflight. We will not disguise a write as a read or
-   substitute assistant settlement for ACK.
-3. **A Claude `Stop` hook firing is not definitive completion.** Current Claude
-   docs say matching hooks run in parallel and a Stop hook can block stopping,
-   causing Claude to continue. Managed V1 should use the structured programmatic
-   final `result` plus matching child-process completion as terminal success
-   evidence. Stop becomes bounded `stop_candidate` evidence.
-4. **Managed `claude -p` permission policy belongs at `PreToolUse`.** Current Claude
-   hook guidance explicitly says `PermissionRequest` hooks do not fire in
-   non-interactive `-p` mode and directs automated permission decisions to
-   `PreToolUse`. V1 must not build a durable managed-input path around an event that
-   is absent in its preferred execution mode.
+The strongest V1 design remains:
 
-The recommended V1 remains Rust daemon + CLI, one SQLite authority, dedicated
-headed Chrome + CDP, a small stable MCP ABI, explicit obligation/ACK semantics, and
-structured worker evidence that outranks stale PTY/runtime inference.
+- Rust daemon + CLI; no conventional GUI;
+- one authoritative daemon and one single-writer SQLite database (`rusqlite`);
+- immutable event/projection model plus durable obligations;
+- separate private result-artifact store;
+- managed Claude worker-host that parses structured output online but never
+  durably spools the complete provider stream;
+- official Rust MCP SDK (`rmcp`) with a four-tool stable foreman ABI;
+- dedicated headed system Chrome profile;
+- Rust CDP via `chromiumoxide` behind a replaceable browser trait;
+- real ChatGPT SPA performs sensitive browser submission;
+- CDP/network/message evidence is the primary observation/reconciliation plane;
+- no private protected ChatGPT write client or challenge bypass;
+- browser delivery uses deterministic dedupe identity plus a separate random
+  accepted-wake correlation ID;
+- explicit foreman ACK is the only normal closure of processed work.
 
-## Pinned source snapshot
+The independent review found important corrections rather than merely validating
+the first draft. Those corrections are now architectural requirements.
 
-| Project / source | Reviewed revision / release | Evidence used |
-| --- | --- | --- |
-| `DivMode/commandgovernor` | baseline `fd3e5a61425f00ee3b164d2a840708602f972342` | Pre-implementation docs baseline. |
-| `miuuyy/codex-chatgpt-web` | main `d7675fc7767a8f19b908f3e5d0e357699d1d9fdf`; release `v4.0.7` | Retained conversations, exact browser surface ownership, send/settlement separation, connector ABI, reconnect/no replay. |
-| `ChesterRa/CCCC` | main `5f0b83242d09c88b1e2267d1056fc5bf64feb626` | Append-only daemon authority and `claimed/accepted/failed/ambiguous` semantics. |
-| `DivMode/tandem` | main `afc3192e9caaa1affb7c9ed97c6c66df0605c2ee`; PR #6 head `af568233e1aae2d4cc343b38ca0e2a1a248e7857` | Claude lifecycle deposit, completion barriers, stale-runtime lessons. PR remained open/review-only. |
-| `Maxmedawar/tandem` | main `a98bcafd2c40ae5473b85fe41183e4f391933799` | Upstream Herdr/session/MCP/fleet baseline. |
-| OpenWeb (`imoonkey/openweb`) | main `a387b50c829d871839a613732e1b97bfa1946124` | Browser/session hybrid ChatGPT transport research. |
-| `Octo-Lex/ChatGPT-Web2API` | master `497527dceabfa3f95961e23c291e618c5570f1ac` | CDP/browser architecture, backend-read reconciliation, non-replay after uncertain send. |
-| `stufently/gpt-web-gateway` | main `efb01a32e9e4c7fbebb8acff204c8c2a448c476c`; app `2.14.1` | Real-browser writes, passive/backend observation, headed-browser field bias. |
-| `modelcontextprotocol/rust-sdk` / `rmcp` | main `3a2ebbc92034f6711e4eac9e93f5de0423be8dfe`; crate `3.1.4` | Official Rust MCP SDK/current protocol support. |
-| `mattsse/chromiumoxide` | main `afcc3a4313f2087249b4490d94e54bf8e3bfaccf`; crate `0.9.1` | Tokio CDP, attach/launch Chrome, Target/Page/Network. |
-| `rust-headless-chrome/rust-headless-chrome` | `0a5c307a85debc450378a1f19e4dac1838d7b22d`; `1.0.22` | Rust CDP fallback candidate. |
-| `tauri-apps/wry` | dev `bb69d628a905d65042c71a95e85f6921ec9b3264` | Platform WebView comparison. |
-| `tauri-apps/cef-rs` | dev `a2e15ae659c4b3957883e34de879bd8b38360ce5` | Embedded Chromium comparison. |
+## Independent-review corrections
 
-Pinned project links:
+### 1. Consumer ChatGPT Pro cannot currently satisfy the V1 ACK loop
 
-- <https://github.com/miuuyy/codex-chatgpt-web/tree/d7675fc7767a8f19b908f3e5d0e357699d1d9fdf>
-- <https://github.com/ChesterRa/CCCC/tree/5f0b83242d09c88b1e2267d1056fc5bf64feb626>
-- <https://github.com/DivMode/tandem/pull/6>
-- <https://github.com/Maxmedawar/tandem/tree/a98bcafd2c40ae5473b85fe41183e4f391933799>
-- <https://github.com/imoonkey/openweb/tree/a387b50c829d871839a613732e1b97bfa1946124>
-- <https://github.com/Octo-Lex/ChatGPT-Web2API/tree/497527dceabfa3f95961e23c291e618c5570f1ac>
-- <https://github.com/stufently/gpt-web-gateway/tree/efb01a32e9e4c7fbebb8acff204c8c2a448c476c>
-- <https://github.com/modelcontextprotocol/rust-sdk/tree/3a2ebbc92034f6711e4eac9e93f5de0423be8dfe>
-- <https://github.com/mattsse/chromiumoxide/tree/afcc3a4313f2087249b4490d94e54bf8e3bfaccf>
+Current OpenAI developer-mode documentation says full custom MCP support with
+modify/write actions is rolling out in beta to **ChatGPT Business, Enterprise, and
+Edu**. Consumer **Pro** may connect MCPs with read/fetch permissions, but cannot be
+assumed to execute the state-changing `foreman_resume`, `foreman_ack`, and
+`foreman_answer_input` contract.
 
-A same-day freshness pass rechecked codex-chatgpt-web main, CCCC main, Tandem PR #6,
-and rust-sdk main; the pinned revisions above were still current at that check.
+OpenAI sources:
 
-## ChatGPT Web transport research
+- <https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt>
+- <https://help.openai.com/en/articles/12003714-chatgpt-team-models-limits>
+- <https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/>
 
-### Private-write reality
+Business currently exposes the **Pro model option powered by GPT-5.6 Sol Pro**.
+Therefore a Business workspace can preserve the intended high-capability Pro-model
+foreman role while using a write-capable MCP plan surface, subject to the real
+Gate A action/confirmation test.
 
-Public reverse-engineering projects continue to encounter changing private
-browser/session/security machinery: authenticated browser state, Sentinel/challenge
-fields, proof-of-work behavior, Turnstile/Cloudflare responses, private request
-schema/model identifiers, and changing stream behavior.
+**Architecture consequence:** consumer Pro is not an end-to-end V1 target today.
+The invariant is not weakened and MCP mutations are not mislabeled as reads.
 
-The useful convergence is architectural:
+### 2. Claude `PermissionRequest` does run in non-interactive contexts
 
-- OpenWeb distinguishes browser/session-sensitive writes from more tractable
-  observation/read paths.
-- ChatGPT-Web2API uses Chrome/CDP for protected interaction and avoids blind replay
-  where send outcome is uncertain.
-- gpt-web-gateway uses real-browser interaction for sensitive writes and
-  passive/backend observation when cleaner evidence is available.
-- codex-chatgpt-web V4 owns exact browser surfaces/conversation identity, separates
-  submission from physical settlement, reconnects without replay, and treats
-  connector identity/schema as a compatibility boundary.
+The earlier draft incorrectly treated `PermissionRequest` as unavailable in
+`claude -p`. Current Claude Code hook documentation says it can run in sessions
+that cannot display a permission prompt, including non-interactive/background
+contexts; when no hook decides, the request is denied.
 
-### Decision implication
+At the same time, current `PermissionRequest` hook input does not expose the same
+exact `tool_use_id` correlation as `PreToolUse`. Current `PreToolUse` supports
+`permissionDecision: "defer"` in non-interactive mode and the managed result can
+report `tool_deferred`, preserving the call for same-session resume.
 
-`governor-chatgpt-web` may:
+Current documentation also states that non-interactive defer is ignored when
+Claude emits **multiple tool calls together**.
 
-- control a locally authenticated dedicated browser;
-- observe CDP Target/Page/Network events;
-- passively interpret SPA-generated requests/responses;
-- perform narrowly bounded authenticated reads where proven robust;
-- reconcile ambiguous delivery against exact conversation/message evidence.
-
-It must not:
-
-- reproduce/bypass Sentinel, Turnstile, proof-of-work, CAPTCHA, entitlements, rate
-  limits, or anti-abuse controls;
-- export browser credentials into a standalone unofficial write client as normal
-  architecture;
-- automatically replay an uncertain send.
-
-All unofficial ChatGPT behavior stays behind one replaceable crate.
-
-## Rust browser-control comparison
-
-### `chromiumoxide` — recommended first driver
-
-Strengths:
-
-- Rust/Tokio-native async model;
-- launch or attach to Chrome through CDP;
-- explicit target/page access;
-- generated CDP domains including Network events;
-- no GUI or embedded-browser packaging requirement.
-
-Costs: lower-level API, Command Governor owns selector/readiness/reconnect logic,
-and project cadence is smaller/slower than mainstream JS browser automation.
-Mitigation is a narrow internal `BrowserTransport` trait.
-
-### `headless_chrome` — fallback
-
-Credible Rust CDP fallback with headed operation/network interception, but its
-blocking/threading ergonomics are less natural for the Tokio daemon.
-
-### Wry — reject for V1 correctness
-
-Wry wraps platform WebViews. V1 has no GUI and needs a uniform Chrome/CDP
-Target/Network/profile model, so a cross-platform WebView abstraction is the wrong
-correctness boundary.
-
-### CEF — defer
-
-Full embedded Chromium ownership costs browser distribution, update/security,
-packaging/signing, sandboxing, and cross-platform lifecycle work. Do not pay that
-cost before system Chrome + CDP fails a real requirement.
-
-### Headed vs headless
-
-Current public ChatGPT browser projects provide enough field evidence to support
-headed system Chrome first. `--headless=new` is a separate live experiment; do not
-add stealth/challenge bypass to make it pass.
-
-## Claude Code research — corrected managed execution model
-
-Primary docs reviewed:
+Primary docs:
 
 - <https://code.claude.com/docs/en/hooks>
 - <https://code.claude.com/docs/en/hooks-guide>
-- <https://code.claude.com/docs/en/cli-usage>
 - <https://code.claude.com/docs/en/headless>
-- <https://code.claude.com/docs/en/settings>
+- <https://code.claude.com/docs/en/cli-usage>
 
-### Current lifecycle surface
+**Architecture consequence:** `PermissionRequest` is a real permission-decision
+signal; confirmed single-tool `PreToolUse` defer remains the preferred exact
+durable pause/resume fence. Multi-tool defer cannot fabricate `needs_input`.
 
-Current Claude documents events including UserPromptSubmit, PreToolUse,
-PermissionRequest, PermissionDenied, PostToolUse, PostToolUseFailure,
-PostToolBatch, Notification, subagent/task lifecycle, Stop, StopFailure,
-SessionStart/End, Elicitation/ElicitationResult, plus programmatic `system/init` and
-final `result` messages.
+### 3. Deterministic browser-delivery identity is not a possession secret
 
-Availability is mode-specific. In particular, the hook guide currently says
-`PermissionRequest` hooks **do not fire in non-interactive `-p` mode**.
+The first draft used an unkeyed deterministic hash of obligation/generation/
+revision and then called the result an unguessable possession fence. That was an
+internal security contradiction.
 
-### Stop-hook finding
-
-Current docs allow Stop hooks to block stopping and state that all matching hooks
-run in parallel. `stop_hook_active` exists to prevent continuation loops.
-
-Therefore:
+V1 now separates:
 
 ```text
-Stop callback -> stop_candidate only
-final structured `claude -p` result + matching child exit -> terminal success proof
+delivery_key = H("command-governor/wake-key/v1",
+                 obligation_id,
+                 binding_generation,
+                 delivery_revision)
+
+delivery_id = CSPRNG(>=192 bits)
 ```
 
-`SessionEnd` is strong session-termination evidence but not successful-result
-proof. `StopFailure` is strong failure evidence and must be reconciled with managed
-process outcome.
+The deterministic key is for idempotency/deduplication only. The random delivery
+ID is generated once, carried only in the exact browser wake, omitted from
+bootstrap/status, and required by `foreman_resume` in addition to connector auth
+and obligation/generation/version fences.
 
-This still fixes the reproduced stale-Herdr class: a **confirmed structured final
-or deferred** Claude state beats stale Herdr `working / idle:false`; a lone Stop
-callback does not.
+### 4. The complete Claude structured stream must not be durably spooled
 
-### Programmatic output is the stronger primitive
+Current structured programmatic output may contain intermediate tool-use/tool-
+result records. Persisting the whole stream to survive daemon restart would violate
+the explicit no-tool-arguments/no-command/no-transcript data boundary.
 
-Current Claude programmatic docs describe print/non-interactive operation,
-structured stream-json, session metadata/capabilities in the initialization stream,
-final result output, and process success/failure semantics. This is a better
-completion/result interface than PTY scraping and stronger than one vetoable hook.
+V1 worker-host instead parses the stream online and may durably keep only:
 
-### Worker-host/spool
+- sanitized run/lifecycle receipts;
+- one bounded complete final assistant-result candidate needed for independent
+  review;
+- sanitized child-exit receipt.
 
-If the daemon itself is the only stdout reader, daemon restart can still lose the
-final structured result while Claude continues. V1 therefore introduces a narrow
-Rust transport mode:
+Intermediate provider records are discarded after in-memory parsing.
 
-```text
-command-governor worker-host claude <opaque-turn-id>
-```
+### 5. Same-user file modes are privacy, not hostile-worker containment
 
-It launches/resumes managed Claude, writes the structured provider stream to an
-owner-private bounded spool, writes a sanitized child-exit receipt, and owns no
-orchestration state. The daemon later validates it and creates the bounded
-immutable result artifact.
+Claude/tools and Command Governor normally run as the same OS user in V1. Owner-
+only filesystem modes protect against other OS principals and accidental exposure,
+but do not sandbox a malicious same-user process. The general Governor state-root
+path is no longer intentionally exported to Claude; hostile-worker containment is
+a future separate-user/sandbox/broker problem and is not claimed by V1.
 
-### AskUserQuestion / durable input
+---
 
-Current `PreToolUse` supports `defer`; in non-interactive mode this can preserve a
-pending tool call such as `AskUserQuestion` for later same-session resume. V1
-should project `needs_input` only after the managed structured result confirms the
-defer actually occurred.
+## Pinned source revisions
 
-Unsupported multi-tool shapes remain reconciliation attention rather than a fake
-clean pause.
+The table distinguishes current repository head from the exact source blob or
+release whose architecture was inspected where they differ.
 
-### Permission decisions in managed `-p`
+| Project/source | Verified revision/release on 2026-08-31 | Relevance |
+| --- | --- | --- |
+| `anthropics/claude-code` | main `f275fa282e76c5e5456912268f2c367a7f4f4797`; latest release `v2.1.252` published 2026-08-31 | current worker CLI/release context; hook semantics are taken from current official docs |
+| `miuuyy/codex-chatgpt-web` | current main `06637f97a68faaa636986dad7514c7e2b3449347`; latest release `v4.0.7` published 2026-08-31 | strongest current public retained-conversation/browser ownership reference |
+| `miuuyy/codex-chatgpt-web` architecture blob | `4367828fae8ad0a53e4adb0af19c1589640cb37c` at current head | the architecture file inspected remained byte-identical while main advanced later that day |
+| `ChesterRa/CCCC` | main `5f0b83242d09c88b1e2267d1056fc5bf64feb626` | append-only event/delivery/read/reply semantics; claimed/accepted/failed/ambiguous inspiration |
+| `DivMode/tandem` | main `afc3192e9caaa1affb7c9ed97c6c66df0605c2ee` | current fork baseline / orchestration lessons |
+| `DivMode/tandem` PR #6 | open, head `af568233e1aae2d4cc343b38ca0e2a1a248e7857`; explicitly `DO NOT MERGE` | Stop-hook/lifecycle work and known stale-Herdr failure class |
+| `Maxmedawar/tandem` | main `a98bcafd2c40ae5473b85fe41183e4f391933799` | upstream runtime/fleet/MCP architecture reference |
+| `imoonkey/openweb` | main `a387b50c829d871839a613732e1b97bfa1946124` | browser-context authenticated operations and fail-closed rate behavior |
+| `Octo-Lex/ChatGPT-Web2API` | master `497527dceabfa3f95961e23c291e618c5570f1ac` | CDP navigation/send/reconciliation/stall lessons; never-auto-retry send on ambiguous phase |
+| `stufently/gpt-web-gateway` | main `efb01a32e9e4c7fbebb8acff204c8c2a448c476c`, version `2.14.1` | measured headed-real-Chrome bias and account pacing/anti-abuse lessons |
+| `modelcontextprotocol/rust-sdk` | main `ad9832ec212baf526e1a69d73ee04cd8305ae331`; workspace/crate version `3.1.4` | official Rust MCP SDK; main includes same-day protocol-negotiation fixes |
+| `mattsse/chromiumoxide` | main `afcc3a4313f2087249b4490d94e54bf8e3bfaccf` | selected Rust CDP driver candidate |
+| `rust-headless-chrome/rust-headless-chrome` | main/release `0a5c307a85debc450378a1f19e4dac1838d7b22d`, `1.0.22` | fallback Rust CDP driver |
+| `tauri-apps/wry` | dev `bb69d628a905d65042c71a95e85f6921ec9b3264` | OS-WebView alternative; rejected for V1 transport |
+| `tauri-apps/cef-rs` | dev `a2e15ae659c4b3957883e34de879bd8b38360ce5` | embedded Chromium alternative; deferred due packaging/security burden |
 
-Current Claude hook guidance says `PermissionRequest` hooks do not fire in
-non-interactive mode and directs automated permission decisions to `PreToolUse`.
-Therefore preferred managed V1 uses `PreToolUse` to classify the exact tool call
-before execution:
+Rust stable was re-verified as **1.98.0**, released 2026-08-20. The scaffold must
+pin the exact stable toolchain at the implementation commit rather than assume this
+report remains current.
 
-- already delegated work proceeds only as current settings/permission semantics
-  permit;
-- out-of-band decisions use confirmed defer when safely supported;
-- destructive, credential-sensitive, broader, or unknown actions remain user-owned.
+---
 
-Current docs also indicate a PreToolUse allow cannot necessarily override deny/ask
-settings, so Command Governor never treats hook output as authority to widen the
-user/managed permission model.
+## ChatGPT Web transport research
 
-`PermissionRequest` belongs only to a separate interactive/future adapter mode
-unless Claude changes the non-interactive contract.
+### codex-chatgpt-web V4/current architecture
 
-### Settings/hook source behavior
+The current public architecture retains one persistent authenticated Electron
+partition, owns exact task-bound surfaces, uses a connector ABI identity, maintains
+turn capabilities, and explicitly supervises browser/tunnel lifecycle. Current
+main moved after the initial inspection, but the architecture file remained the
+same blob at final verification.
 
-Current settings can merge hooks/configuration across scopes. `--settings` alone
-must not be assumed to isolate user/project/plugin hooks. Live Gate C must measure
-the actual settings/hook behavior of the selected invocation. The Stop-result model
-remains correct even with another Stop hook present.
+The important semantics to reimplement independently in Rust where useful are:
 
-## Tandem findings
+- exact surface ownership/leases;
+- retained logical agent/surface continuity;
+- explicit connector ABI identity rather than invisible schema mutation;
+- no replay across reconnect/repair boundaries;
+- explicit physical browser-turn lifecycle;
+- separate browser profile/session ownership;
+- bounded parallelism and account-abuse awareness.
 
-Current `DivMode/tandem` PR #6 remains open at
-`af568233e1aae2d4cc343b38ca0e2a1a248e7857` and explicitly says not to merge.
-Useful concepts/lessons:
+Do not copy its Electron/Bun/TypeScript implementation into Command Governor.
 
-- worker/provider lifecycle evidence is stronger than screen inference when
-  available;
-- lifecycle deposits can survive daemon restart;
-- stale clients/tool schemas are real;
-- completion barriers prevent unread worker work from disappearing;
-- uncertain sends are not permission to resend.
+### ChatGPT-Web2API
 
-Command Governor does not inherit Tandem's JavaScript stack, runtime-status
-vocabulary, or human notification paths.
+The current repository contains field-driven CDP hardening: staged navigation
+readiness, target/tab isolation, send-selector scoping, reconciliation before
+raising stalls, and the crucial rule that a phase-2 send/stall uncertainty does
+**not** automatically resend the user message.
 
-## CCCC semantics
+These findings support Command Governor's deterministic pre-Send/ambiguous boundary
+and CDP observation plane, not a direct private-write architecture.
 
-CCCC's current Collaboration Standard documents delivery states `claimed`,
-`accepted`, `failed`, and `ambiguous`, requiring intent before external I/O and no
-blind replay after accepted/ambiguous.
+### gpt-web-gateway
 
-Command Governor independently implements the same safety property in Rust and
-adds a durable internal `activation_armed` fence immediately before exact browser
-Send. A crash can conservatively produce a zero-send ambiguity; at-most-once safety
-wins over guessing.
+Current deployment documentation explicitly keeps real Chrome headed by default
+because that configuration was measured as the reliable one for its protected web
+interaction. Its account-pacing work is additional evidence that automated web
+use must fail conservatively rather than hammer/retry through account controls.
 
-CCCC is Apache-2.0. We are adopting documented semantics, not copying source. Any
-future copied Apache material requires license/NOTICE/provenance handling.
+Command Governor does not adopt its JS stack or stealth/bypass techniques.
 
-## MCP research and current ChatGPT constraint
+### OpenWeb
 
-Preferred SDK:
+Current source shows a general pattern relevant to Command Governor: when a site
+blocks plain server-side requests, perform operations in the authenticated browser
+context using ambient session state rather than exporting credentials to a
+separate client. The exact OpenWeb ChatGPT adapter architecture should not be
+assumed stable beyond the pinned source; the broader browser-context lesson is the
+useful one.
 
-- <https://github.com/modelcontextprotocol/rust-sdk>
-- `rmcp` `3.1.4` at review time.
+### Architectural conclusion
 
-The server negotiates the MCP protocol supported by the connecting client.
+For sensitive writes, use the actual ChatGPT SPA. For observation/reconciliation,
+use CDP Network/Target/Page and, only when stable and safe, narrow authenticated
+reads. Keep all unofficial ChatGPT-specific behavior isolated in
+`governor-chatgpt-web`.
 
-OpenAI developer-mode/app docs were reviewed. Architecture consequences:
+Do not implement Sentinel/Turnstile/PoW/CAPTCHA/entitlement/rate-limit bypass.
 
-1. local MCP uses the supported OpenAI tunnel/connectivity mechanism rather than
-   assuming arbitrary localhost reachability;
-2. full custom MCP action availability differs by current ChatGPT plan/surface;
-3. app/tool schema compatibility and action availability require explicit handling.
+---
 
-V1 public ABI remains:
+## Browser driver comparison
+
+### chromiumoxide — selected starting point
+
+Strengths for this workload:
+
+- Rust-first and Tokio-oriented;
+- launch or attach to Chrome over CDP;
+- generated CDP protocol types;
+- Target/Page/Network domain access;
+- headed/headless Chrome launch configuration;
+- event streams fit a dedicated async browser supervisor.
+
+Weakness: maintenance cadence is lower than the rapidly moving JS browser
+libraries, so isolate it behind `governor-browser` and keep a driver conformance
+suite.
+
+### headless_chrome — fallback
+
+Mature direct Chrome/CDP control and useful API coverage, but its concurrency model
+is more blocking/thread-oriented than the selected daemon architecture. Keep as a
+fallback if `chromiumoxide` exposes a measured blocker.
+
+### Wry — reject for V1
+
+Wry is a good Rust WebView abstraction but uses platform webviews. Command
+Governor specifically needs one consistent system-Chrome/CDP target and Network
+observation model, normal Chrome authentication/passkey behavior, and exact target
+lifecycle. A cross-platform WebView abstraction works against those goals.
+
+### CEF Rust — defer
+
+CEF can provide deep Chromium ownership, but would make Command Governor own a
+large embedded browser distribution, security-update cadence, packaging and
+platform integration. That cost is unjustified until a headed system-Chrome/CDP
+spike proves inadequate.
+
+### Headed versus headless
+
+Headed Chrome is the V1 hypothesis because multiple current public ChatGPT-web
+projects report real headed Chrome as their measured reliable configuration.
+Headless remains a separate Gate B experiment. Command Governor will not add
+stealth/challenge bypass merely to make headless pass.
+
+---
+
+## MCP / ChatGPT app conclusions
+
+Use official `modelcontextprotocol/rust-sdk` / `rmcp`. At review completion the
+workspace version is `3.1.4`; repository main advanced the same day with protocol-
+negotiation fixes, so pin a released crate intentionally rather than depending on
+main by accident.
+
+Keep the public ABI to:
 
 - `foreman_bootstrap`
 - `foreman_resume`
 - `foreman_ack`
 - `foreman_answer_input`
 
-Resume/ACK/answer are truthful mutations. A read/fetch-only target surface is
-unsupported for the durable automatic foreman loop; no mutation is mislabeled.
+Bootstrap is low-information. Resume/ACK/input answer are truthful mutations.
+Current ChatGPT app selection is message-scoped and must be proved per browser wake.
+Current local MCP usage requires OpenAI's supported Secure MCP Tunnel/connectivity
+path rather than assuming ChatGPT can dial an arbitrary localhost server.
 
-Official sources:
+Breaking public tool semantics require a new connector ABI/explicit refresh.
 
-- <https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta>
-- <https://developers.openai.com/apps-sdk/>
+---
 
-## OpenAI terms / public-project risk
+## Claude lifecycle conclusions
 
-Reviewed:
+Current Claude Code release at verification is **v2.1.252**; provider behavior
+must still be feature-detected and conformance-tested rather than inferred solely
+from the version number.
 
-- OpenAI Terms of Use, effective 2026-01-01:
-  <https://openai.com/policies/terms-of-use/>
-- OpenAI App Developer Terms, updated 2026-07-09:
-  <https://openai.com/policies/app-developer-terms/>
+Key current properties:
 
-Restrictions relevant to reverse engineering, automated/programmatic extraction,
-rate/restriction bypass, and protective measures make a protected private-write
-client a poor public-project architecture. Normal local browser login and no
-bypass is materially safer but does not make unofficial ChatGPT Web automation
-officially supported or remove account/ToU risk.
+- matching hooks can run in parallel;
+- Stop can be blocked, so our Stop callback is only `stop_candidate`;
+- successful managed completion should use final structured result + child exit;
+- `PermissionRequest` can run in non-interactive/background contexts;
+- `PreToolUse` has exact tool-use correlation and can `defer` in non-interactive
+  mode;
+- confirmed defer returns a `tool_deferred` style structured result and can be
+  resumed in the same Claude session;
+- defer is not a clean pause when several tool calls are emitted together;
+- progress should use structured/native/tool events, not terminal repaint;
+- stale Herdr `working` cannot outrank a stronger confirmed structured state.
 
-Public posture:
+The current Tandem PR #6 remains valuable evidence of the stale-runtime class but
+its "Stop is terminal" approach is not copied blindly; current Claude hook
+semantics require a stronger completion proof.
 
-- normal user authentication;
-- no auth/entitlement/CAPTCHA/Turnstile/rate/anti-abuse bypass;
-- browser credentials remain local;
-- no OpenAI endorsement claim;
-- unofficial adapter may break without notice;
-- adapter is replaceable if an official API appears.
+---
 
-This is engineering/security risk documentation, not a legal conclusion.
+## SQLite: rusqlite versus sqlx
+
+V1 chooses `rusqlite` unless the scaffold review uncovers a new requirement.
+
+Why:
+
+- Command Governor deliberately has one authoritative daemon writer;
+- SQLite serializes writers even in WAL mode;
+- critical lifecycle transactions benefit from explicit synchronous transaction
+  boundaries and short no-I/O sections;
+- no ORM is needed;
+- a dedicated DB actor can keep SQLite work off async executor hot paths;
+- SQLx pooling does not create multi-writer SQLite semantics and adds an async
+  abstraction around the most correctness-sensitive layer.
+
+Use WAL, foreign keys, bounded busy timeout, `synchronous=FULL` initially,
+deterministic migrations, replay validation, and a separate daemon/state-root lock.
+
+---
 
 ## Rust foundation
 
-Initial candidate baseline, to re-verify at scaffolding:
+Candidate initial foundation:
 
-- stable Rust `1.98.0`, edition 2024;
-- Tokio `1.53.x`;
-- serde `1.0.x`;
-- thiserror `2.0.x`;
-- tracing `0.1.x`;
-- clap `4.6.x`;
-- `rmcp` `3.1.4`;
-- `rusqlite` `0.40.x` with bundled SQLite;
-- uuid `1.26.x`;
-- `time` `0.3.x`;
-- axum/tower only if loopback HTTP is actually needed.
+- stable Rust 1.98.0 at this review snapshot, edition 2024;
+- Tokio;
+- serde;
+- thiserror;
+- tracing;
+- clap;
+- `rmcp`;
+- `rusqlite` bundled SQLite;
+- uuid;
+- a deliberate time crate after implementation review;
+- axum/tower only if a loopback transport endpoint is actually required.
 
-`anyhow` is acceptable at binary/process boundaries; domain crates use structured
-errors.
+No Node, Bun, Electron, React, TypeScript or JavaScript service is introduced.
+Small page-context JavaScript through CDP is acceptable only when the current DOM
+requires it.
 
-A contemporaneous August 2026 Rust supply-chain incident included malicious
-releases `arrayref 0.3.10`, `internment 0.8.7`, and
-`append-only-vec 0.1.9`; initial dependency policy should explicitly reject
-known-bad versions in addition to `cargo audit`/`cargo deny`.
+`anyhow` may be used at binary/application edges, not as the domain error model.
 
-## SQLite decision
+Quality gates from the first Rust commit:
 
-Prefer `rusqlite` over SQLx SQLite for V1 because the architecture intentionally
-has one authoritative daemon and serialized writer. WAL improves reader
-concurrency but does not make concurrent writes commit concurrently. A general
-async pool does not improve the central transaction model.
+```text
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+cargo audit
+cargo deny check
+```
 
-Initial store policy:
+The August 2026 Rust ecosystem supply-chain incident is a concrete reason to pin
+and audit dependencies rather than blindly auto-merge updates.
 
-- bundled SQLite;
-- one dedicated DB actor/thread;
-- WAL;
-- foreign keys;
-- bounded busy timeout;
-- `synchronous=FULL` initially;
-- explicit migrations/schema epoch;
-- no ORM.
+---
 
-## Durable result boundary
+## Licensing and provenance
 
-V1 uses two private content stores outside the safe event ledger:
+Command Governor remains MIT licensed.
 
-1. worker-host transport spool — temporary structured provider output surviving
-   daemon restart, no control-plane authority;
-2. immutable result artifact — bounded final worker result pinned until the open
-   obligation is dispositioned and retention permits deletion.
+Architectural inspiration/reference:
 
-Neither content is put in browser wake text or routine logs.
+- Tandem — MIT;
+- codex-chatgpt-web — MIT;
+- CCCC — Apache-2.0;
+- `rmcp` — Apache-2.0;
+- Rust browser libraries under their respective licenses.
 
-## Required live gates — not fabricated
+The current repository is an independent implementation. No third-party
+implementation source is presently vendored/copied. If future code is copied or
+substantially adapted, preserve the applicable license/NOTICE and record exact
+provenance in `THIRD_PARTY_NOTICES.md`.
 
-### Gate A — ChatGPT MCP mutations
+Do not imply any upstream author endorses Command Governor.
 
-Actual target ChatGPT account/surface must prove genuine state-changing foreman
-tools.
+---
 
-### Gate B — headed Chrome + ChatGPT
+## OpenAI public-project risk
 
-Dedicated authenticated headed Chrome must prove exact conversation binding,
-message-scoped app selection, ten unique wakes, semantic accepted evidence,
-crash-at-Send ambiguity/no replay, restart/rebind, and MCP outage behavior.
+Sources reviewed:
+
+- <https://openai.com/policies/terms-of-use/> — Terms of Use, effective
+  2026-01-01;
+- <https://openai.com/policies/app-developer-terms/> — App Developer Terms,
+  updated 2026-07-09;
+- current ChatGPT developer-mode/MCP Help Center documentation above.
+
+The project should be described as unofficial ChatGPT Web automation. The design
+uses normal user authentication, local browser state, supported MCP connectivity,
+and no auth/entitlement/CAPTCHA/rate/protective-measure bypass. That reduces
+engineering/security risk but is not a legal conclusion that every use is allowed.
+
+An official future foreman/push API should replace `governor-chatgpt-web` without
+changing the durable kernel.
+
+---
+
+## Remaining empirical gates
+
+### Gate A — MCP mutation
+
+Consumer Pro is currently excluded by published product capability. A candidate
+Business/Enterprise/Edu workspace must prove real state-changing actions and
+confirmation behavior on the actual account/surface.
+
+### Gate B — headed Chrome/CDP
+
+Dedicated authenticated headed Chrome must prove exact binding, per-message app
+selection, 10/10 unique wakes, semantic accepted evidence, crash-at-Send
+ambiguity/no replay, restart, and generation fencing. Headless is measured
+separately.
 
 ### Gate C — Claude managed execution
 
-Pinned Claude invocation must prove:
+Pinned Claude Code must prove final-result/exit semantics, no raw stream
+persistence, Stop-veto correctness, actual settings-source behavior, single-tool
+defer/resume, multi-tool defer failure behavior, non-interactive
+`PermissionRequest`, daemon-offline final-result recovery, stale-Herdr
+reconciliation, and forbidden-data scans.
 
-- structured init/capability behavior;
-- final result + child exit;
-- controlled parallel Stop-hook veto without false completion;
-- actual settings/hook source behavior;
-- confirmed AskUserQuestion/PreToolUse defer and same-session resume;
-- permission decisions at PreToolUse in `-p`, not unavailable PermissionRequest
-  hooks;
-- daemon-offline worker-host spool recovery;
-- stale Herdr working reconciliation;
-- forbidden-data non-persistence.
+## Recommendation after independent review
 
-The architecture session did **not** fabricate these live results and did not use
-the currently unreliable Tandem/Claude orchestration loop to bootstrap them.
+**Proceed with the small pure Rust kernel/store/testkit scaffold after the
+architecture PR is accepted.** The event/obligation/storage/security model is now
+internally consistent enough to implement deterministically.
 
-## Recommendation
-
-**Proceed with the small pure Rust core/store/testkit foundation after architecture
-review.** Do not yet claim the end-to-end ChatGPT foreman loop or Claude adapter is
-supported. Gates A, B, and C remain real provider/product conformance gates.
-
-If a gate fails, replace/disable the adapter instead of weakening durable
-obligations, at-most-once ambiguity, or explicit ACK.
+Do **not** claim or implement a supported live ChatGPT or Claude adapter beyond
+spike/conformance work until its corresponding gate passes. In particular, do not
+ship consumer ChatGPT Pro as an end-to-end V1 foreman while its custom MCP surface
+is read/fetch-only.
