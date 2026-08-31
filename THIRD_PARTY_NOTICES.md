@@ -1,10 +1,83 @@
-# Third-Party Notices
+# Third-Party Notices and Provenance
 
-The initial Command Governor repository scaffold contains no bundled
-third-party source code, dependencies, or vendored assets.
+Command Governor is licensed under MIT. This notice records architecture
+inspiration/research separately from future compiled dependencies.
 
-As dependencies or third-party materials are introduced, their provenance,
-licenses, attribution requirements, and required notices must be recorded here
-before release or distribution.
+At the 2026-08-31 architecture phase, the repository contains no vendored or
+copied third-party implementation source code. The project is independently
+implementing the documented semantics described below in Rust.
 
-This file is a notice record, not a dependency manifest.
+## Architecture / protocol references
+
+### Tandem
+
+- Project: `Maxmedawar/tandem` and `DivMode/tandem`
+- License: MIT
+- Upstream revision reviewed: `a98bcafd2c40ae5473b85fe41183e4f391933799`
+- DivMode main reviewed: `afc3192e9caaa1affb7c9ed97c6c66df0605c2ee`
+- DivMode PR #6 head reviewed: `af568233e1aae2d4cc343b38ca0e2a1a248e7857`
+- URL: <https://github.com/Maxmedawar/tandem>
+- URL: <https://github.com/DivMode/tandem>
+
+Concepts studied include runtime/Herdr adaptation, ownership/provenance, MCP
+orchestration, native Claude lifecycle, stale-client behavior, completion
+barriers, and turn/session fencing.
+
+No Tandem author or maintainer is implied to endorse Command Governor.
+
+### codex-chatgpt-web
+
+- Project: `miuuyy/codex-chatgpt-web`
+- License: MIT
+- Revision reviewed: `d7675fc7767a8f19b908f3e5d0e357699d1d9fdf`
+- Release reviewed: `v4.0.7`
+- URL: <https://github.com/miuuyy/codex-chatgpt-web>
+
+Concepts studied include exact browser-surface ownership, retained ChatGPT
+conversation lifecycles, connector identity/schema compatibility, send/settlement
+boundaries, reconnect without replay, and compaction handoff.
+
+No codex-chatgpt-web author or maintainer is implied to endorse Command Governor.
+
+### CCCC
+
+- Project: `ChesterRa/CCCC`
+- License: Apache-2.0
+- Revision reviewed: `5f0b83242d09c88b1e2267d1056fc5bf64feb626`
+- URL: <https://github.com/ChesterRa/CCCC>
+
+Command Governor studied CCCC primarily as a protocol/semantics reference,
+including append-only daemon authority and documented delivery states such as
+`claimed`, `accepted`, `failed`, and `ambiguous`.
+
+The current plan is to independently implement those safety semantics, not copy
+CCCC source code. If Apache-2.0 source is copied or adapted later, the repository
+must preserve all required license/NOTICE attribution and record the exact files,
+revisions, and changes here before distribution.
+
+No CCCC author or maintainer is implied to endorse Command Governor.
+
+## Additional research references — no code copied
+
+These projects were studied to understand current ChatGPT Web browser/private-API
+tradeoffs. They are not currently implementation dependencies or copied sources:
+
+- OpenWeb (`imoonkey/openweb`), revision
+  `a387b50c829d871839a613732e1b97bfa1946124`
+- `Octo-Lex/ChatGPT-Web2API`, revision
+  `497527dceabfa3f95961e23c291e618c5570f1ac`
+- `stufently/gpt-web-gateway`, revision
+  `efb01a32e9e4c7fbebb8acff204c8c2a448c476c`
+
+See [`docs/research/2026-08-31-technology-review.md`](docs/research/2026-08-31-technology-review.md)
+for the architecture evidence derived from these sources.
+
+## Planned external dependencies
+
+No Rust dependency has been added yet. The current proposal includes crates such
+as Tokio, serde, thiserror, tracing, clap, `rmcp`, `rusqlite`, uuid, and time, plus
+a Rust CDP library. Exact versions/licenses will be re-verified and recorded by
+`Cargo.lock`/license policy at the first scaffold commit.
+
+A dependency manifest and generated license report do not replace this provenance
+record when source/patterns are materially copied or adapted.
