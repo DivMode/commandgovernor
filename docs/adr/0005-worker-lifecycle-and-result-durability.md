@@ -25,10 +25,10 @@ erase the result while the obligation remains.
 
 ## Decision
 
-### Managed Claude V1 uses the programmatic structured result as terminal evidence
+### Managed Claude V1 uses the structured programmatic result as terminal evidence
 
 Prefer managed non-interactive Claude turns through the current programmatic CLI
-interface (`claude -p` with structured streaming output, subject to conformance at
+interface (`claude -p` with structured output, subject to conformance at
 implementation time).
 
 For this mode, successful terminal evidence is the combination of:
@@ -79,9 +79,9 @@ permissions, symlink safety, and contract epoch before launch.
 
 Current Claude settings can merge hooks/customizations from multiple scopes, and
 `--settings` alone is not assumed to remove every user/project/plugin hook. The
-live adapter conformance suite must prove the exact active settings/hook sources
-for the chosen invocation. The design remains correct even when another Stop hook
-can veto ours because Stop itself is only candidate evidence.
+live adapter conformance suite must prove the actual active settings sources/hook
+behavior for the chosen invocation. The completion rule remains correct even when
+another Stop hook exists because Stop itself is only candidate evidence.
 
 ### Hooks use a durable sanitized inbox for progress/input/native observations
 
@@ -112,23 +112,41 @@ The durable sequence is:
 A hook merely attempting to defer is not lifecycle truth. Unsupported multi-tool
 shapes or missing confirmation become reconciliation attention.
 
-`PermissionRequest` is important native evidence that Claude wants a permission
-decision, but it is not assumed to be a generic durable pause/resume primitive.
-For an action that requires out-of-band authorization, prefer a policy
-`PreToolUse` defer before execution. High-risk, destructive, credential-sensitive,
-materially broader, or unknown requests remain user-owned by default.
+### Preferred `claude -p` permission decisions also use `PreToolUse`
 
-### Native/structured worker truth outranks stale Herdr runtime inference
+Current Claude hook guidance says `PermissionRequest` hooks **do not fire in
+non-interactive `-p` mode** and directs automated permission decisions to
+`PreToolUse`. Therefore preferred managed V1 does not depend on
+`PermissionRequest` at all.
+
+Before a tool executes, the `PreToolUse` policy path classifies the exact fenced
+call:
+
+- already delegated ordinary engineering work may proceed only as current Claude
+  permission/settings rules permit;
+- a decision that must leave the worker is deferred where the current
+  non-interactive tool shape safely supports deferral;
+- destructive, credential-sensitive, materially broader, or unknown actions remain
+  user-owned and fail closed.
+
+Current Claude docs also make clear that a hook's allow decision cannot necessarily
+override deny/ask rules from settings. Command Governor never treats a worker hook
+as an entitlement to widen user/managed policy.
+
+`PermissionRequest` remains a possible evidence/control surface only for a future
+interactive Claude adapter whose exact semantics are separately proven.
+
+### Structured worker truth outranks stale Herdr runtime inference
 
 Herdr remains the process/session transport. A stale `working` sample cannot
 override a confirmed structured final result, confirmed deferred input boundary,
 non-blockable session termination, or another stronger fenced worker fact.
 
-When the worker/runtime disagree:
+When worker/runtime disagree:
 
 1. project the stronger confirmed worker fact;
 2. record `runtime_state_conflict`;
-3. before any continuation write, reconcile the process transport, including one
+3. before any continuation write, reconcile process transport, including one
    governor-authored clear/interrupt if required;
 4. verify transport safety;
 5. if unresolved, keep the original obligation open and do not create a duplicate
@@ -172,6 +190,11 @@ Rejected by the reproduced stale-working failure.
 Rejected because current Stop hooks can block stopping and all matching hooks may
 run in parallel. The callback is a stop candidate, not proof of final settlement.
 
+### Depend on `PermissionRequest` in managed `claude -p`
+
+Rejected because current Claude documentation says those hooks do not fire in
+non-interactive mode. `PreToolUse` is the supported automated decision/defer point.
+
 ### Poll terminal text harder
 
 Rejected. More PTY heuristics do not become a structured provider protocol.
@@ -199,11 +222,12 @@ semantically authoritative.
 
 ## Consequences
 
-The Claude adapter is more disciplined than the original Stop-hook design: it must
-own a small worker-host/spool path, parse the current structured programmatic
-protocol, validate hook/settings behavior, and maintain a provider conformance
-suite.
+The Claude adapter must own a small worker-host/spool path, parse the current
+structured programmatic protocol, validate settings/hook behavior, implement
+permission/input policy at the correct pre-tool boundary, and maintain a provider
+conformance suite.
 
-In return, completion survives daemon/runtime restart, a parallel hook cannot
-produce a false terminal result, input pauses are proven rather than inferred, and
-stale Herdr state cannot veto a confirmed worker boundary.
+In return, completion survives daemon/runtime restart, a parallel Stop hook cannot
+produce false terminal state, input/permission decisions use a provider-supported
+managed boundary, and stale Herdr state cannot veto a confirmed worker result or
+pause.
