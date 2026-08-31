@@ -21,6 +21,9 @@ cross-project writes, false authorization, or premature review closure.
    anti-abuse bypass.
 9. A provider hook callback cannot be promoted to stronger lifecycle truth than
    its documented semantics justify.
+10. Raw provider streams, prompts, tool arguments/results, commands, cwd, and
+    transcript paths are not durably persisted merely to obtain lifecycle
+    reliability.
 
 ## High-value assets
 
@@ -31,10 +34,11 @@ cross-project writes, false authorization, or premature review closure.
 - Command Governor local control endpoint;
 - SQLite DB/WAL;
 - private immutable result artifacts;
-- private Claude worker-host structured-stream spools and exit receipts;
+- private Claude final-result candidate and sanitized run/exit receipts;
 - managed Claude settings and sanitized hook inbox;
 - repository contents visible to workers;
-- durable user delegation/authorization policy.
+- durable user delegation/authorization policy;
+- random browser-wake correlation IDs used to fence MCP claims.
 
 ## Trust boundaries
 
@@ -53,8 +57,15 @@ human user / local OS account
 ```
 
 The local OS account is the V1 administrative trust root. Owner-only file modes do
-not contain malware already running as that same user; same-user compromise is
-outside the strongest V1 isolation claim.
+not contain malware or a deliberately hostile worker/tool process already running
+as that same user. Same-user hostile-process containment is outside V1's security
+claim and would require a separate OS identity/sandbox/broker.
+
+This distinction matters: Command Governor's worker-host is architecturally
+stateless and its implementation writes only allocated staging files, but normal
+same-user filesystem permissions do not make that an enforced sandbox against
+Claude or arbitrary tool subprocesses. V1 minimizes exposed paths/capabilities and
+validates imported files; it does not claim stronger OS isolation than exists.
 
 Remote repository, browser, and worker content is data, not policy.
 
@@ -65,13 +76,31 @@ submits the wake again.
 
 **Mitigations:**
 
-- deterministic delivery/revision identity;
+- deterministic non-secret `delivery_key` for one
+  obligation/generation/revision;
+- separate cryptographically random `delivery_id` for wake correlation;
 - `claimed` durable before any browser I/O;
 - `activation_armed` durable before exact Send action;
 - startup orphaned attempts become ambiguous before browser recovery;
 - accepted/ambiguous never automatically resend;
 - exact message/network reconciliation can only promote ambiguous -> accepted;
 - a later bounded resume is a new revision, never replay of the old one.
+
+## Threat: deterministic wake identity is mistaken for a secret
+
+**Failure:** a deterministic hash of obligation/generation/revision is presented as
+an unguessable possession fence. Another connector conversation learns/enumerates
+those inputs and reconstructs the value without ever receiving the browser wake.
+
+**Mitigations:**
+
+- deterministic `delivery_key` is explicitly non-secret and never authorizes MCP;
+- each durable delivery gets a CSPRNG `delivery_id` of at least 192 bits;
+- random `delivery_id` is in the exact browser wake but not bootstrap/status;
+- `foreman_resume` requires accepted current-generation delivery + random ID +
+  obligation/version fences;
+- connector authentication and later claim fences are still required;
+- tests prove deterministic metadata cannot derive the random correlation ID.
 
 ## Threat: wrong/stale ChatGPT conversation
 
@@ -86,23 +115,25 @@ submits the wake again.
 - delivery snapshots exact obligation version/source event;
 - stale generation/target cannot claim or ACK current work.
 
-## Threat: unrelated connector conversation mutates state
+## Threat: unrelated connector conversation learns too much or mutates state
 
 **Failure:** the same Command Governor connector is visible in another ChatGPT
-conversation and calls mutation tools.
+conversation and calls bootstrap/mutation tools.
 
 **Mitigations:**
 
 - supported connector authentication;
-- `foreman_resume` requires current accepted wake `delivery_id` in addition to
-  generation/obligation fences;
-- bootstrap does not reveal that current accepted delivery correlation nonce;
+- bootstrap returns bounded health/count/attention summaries only: no repo/project
+  refs, result content, worker/session refs, or current wake `delivery_id`;
+- `foreman_resume` requires current accepted random wake `delivery_id` in addition
+  to generation/obligation/version fences;
 - resume mints a current claim;
 - ACK/input answer require claim + source/version/generation;
 - rebind invalidates old-generation mutations;
 - future official trusted conversation/turn metadata can be added as another fence.
 
-The delivery ID is an anti-confusion correlation nonce, not sole authentication.
+The random delivery ID is an anti-confusion correlation nonce, not sole
+authentication.
 
 ## Threat: browser credential exfiltration
 
@@ -187,17 +218,33 @@ hook returns `decision:block`; Claude continues while Governor publishes
 ## Threat: daemon crash loses Claude's final result
 
 **Failure:** daemon owns the only stdout reader; Claude finishes while daemon is
-restarting; final result disappears even though Herdr/worker continues or exits.
+restarting; final result disappears.
 
 **Mitigations:**
 
-- runtime launches managed Claude through a narrow Rust `worker-host` mode;
-- worker-host captures structured stream to owner-private bounded spool;
-- sanitized child-exit receipt is durable after child termination;
+- runtime launches managed Claude through narrow Rust `worker-host` mode;
+- worker-host parses structured stdout online;
+- when a complete final result arrives, worker-host writes one bounded final-result
+  candidate plus sanitized run/child-exit receipts;
 - worker-host owns no SQLite/task/obligation authority;
-- daemon later validates/reconciles spool+receipt and extracts bounded final result
-  into immutable result artifact;
+- daemon later validates/reconciles candidate+receipts and promotes the result into
+  immutable result artifact;
 - truncated/no-exit/no-final-result never becomes completion.
+
+## Threat: durability transport becomes a transcript store
+
+**Failure:** worker-host persists the whole stream-json output. Current streams can
+contain tool-use/tool-result records, thereby storing raw tool args/results,
+commands, prompt-derived content, or other transcript-like data.
+
+**Mitigations:**
+
+- no raw provider-stream spool exists;
+- worker-host parses intermediate records in memory and discards them;
+- durable receipts use event-specific allowlists only;
+- bounded final-result candidate is the sole provider content retained for review;
+- deferred input receipts store opaque IDs/classes, never deferred tool input;
+- forbidden-data scans include worker-host staging, not just SQLite/logs.
 
 ## Threat: worker-host becomes a second control plane
 
@@ -206,24 +253,14 @@ state, creating split-brain orchestration.
 
 **Mitigations:**
 
-- worker-host receives only opaque turn/session transport fences;
-- no write access to SQLite control API;
-- can write only its allocated private spool/receipt/inbox paths;
+- worker-host receives only opaque turn/session transport fences and narrow staging
+  locators;
+- application protocol has no write path into SQLite/control projections;
 - daemon is sole importer/projector;
-- tests attempt arbitrary state commands and verify no authority mutation.
+- tests prove worker-host output alone creates no task/obligation state.
 
-## Threat: worker-host spool leaks prompt/provider content
-
-**Failure:** structured provider stream is copied into routine logs/DB/doctor.
-
-**Mitigations:**
-
-- spool is a separately classified sensitive store, not event ledger;
-- owner-private root/files, bounded size, no-follow rooted access;
-- routine status exposes only safe IDs/counts/state;
-- daemon extracts only bounded final result needed for review;
-- safe-persistence sentinel scans allow sensitive content only in explicitly
-  designated spool/result files.
+**Limit:** because worker-host/Claude normally share the same OS account with the
+daemon, this is a software architecture boundary, not hostile-process containment.
 
 ## Threat: hook event disappears while daemon is down
 
@@ -251,10 +288,10 @@ command, executing unexpected code in each managed worker.
 - do not assume `--settings` isolates all user/project/plugin hooks;
 - live conformance measures active settings/hook behavior.
 
-## Threat: raw hook data leaks sensitive content
+## Threat: raw hook/provider data leaks sensitive content
 
 **Failure:** generic JSON serializer writes cwd/transcript/prompt/tool args/command
-into SQLite/logs.
+into SQLite, staging, inbox, or logs.
 
 **Mitigations:**
 
@@ -262,37 +299,54 @@ into SQLite/logs.
 - unknown provider fields discarded;
 - progress stores identity/time/safe class only;
 - input ledger stores opaque identity/classification, not raw tool args;
-- byte-scan regression tests across DB/WAL/logs/inbox/crash state.
+- managed-run receipts contain no generic provider JSON;
+- byte-scan regression tests across DB/WAL/logs/inbox/staging/crash state.
 
-## Threat: unconfirmed defer creates false `needs_input`
+## Threat: unconfirmed or multi-tool defer creates false `needs_input`
 
 **Failure:** PreToolUse hook attempts `defer`, but provider ignores/misparses it or
-multi-tool shape partially executes; Governor assumes clean pending input.
+Claude emits multiple tool calls; current non-interactive defer is ignored for the
+multi-tool case, yet Governor assumes a clean pending input.
 
 **Mitigations:**
 
 - persist safe defer intent separately;
-- project `needs_input` only after structured managed-run outcome confirms the
-  pending/deferred boundary;
-- unsupported multi-tool shapes become reconciliation attention;
-- PermissionRequest alone is not treated as a generic durable pause/resume
-  primitive without conformance proof.
+- require one exact fenced tool-use ID;
+- project `needs_input` only after structured managed-run outcome confirms
+  `tool_deferred`/equivalent;
+- multi-tool shapes become reconciliation/manual attention;
+- `PermissionRequest` is not substituted as a generic durable pause identity.
+
+## Threat: PermissionRequest semantics are modeled incorrectly
+
+**Failure:** Governor assumes PermissionRequest never fires in `-p` and misses a
+real non-interactive permission decision, or assumes it identifies a resumable tool
+call more precisely than current hook input allows.
+
+**Mitigations:**
+
+- current pinned docs are treated as saying PermissionRequest can run where no
+  prompt UI exists;
+- exact behavior is a live adapter conformance gate;
+- current absence of `tool_use_id` in PermissionRequest input prevents treating it
+  as the preferred durable pause identity;
+- PreToolUse remains the exact tool-call policy/defer fence.
 
 ## Threat: result disappears after runtime close
 
 **Failure:** completion obligation exists but actual worker result lived only in
-PTY/provider spool.
+PTY/volatile memory.
 
 **Mitigations:**
 
-- confirmed final result extracted to immutable result artifact before
+- confirmed final result is promoted to immutable result artifact before
   `completed_unprocessed` transaction commits;
 - digest/size/ref in SQLite;
 - open obligation pins retention;
 - file-before-DB crash-safe ordering;
 - missing/corrupt artifact blocks processing and raises health condition.
 
-## Threat: artifact/spool path tamper
+## Threat: artifact/staging path tamper
 
 **Failure:** worker supplies path, symlink swap, traversal, or modifies bytes.
 
@@ -300,10 +354,12 @@ PTY/provider spool.
 
 - daemon/worker-host allocate opaque store keys;
 - root-contained no-follow access where supported;
-- owner-private permissions;
+- owner-private permissions against other OS users;
 - bounded size/complete-record checks;
 - digest/length validation;
 - untrusted content remains untrusted even when integrity-valid.
+
+Again, owner-private mode is not same-user hostile-worker containment.
 
 ## Threat: SQLite corruption/rollback/projection drift
 
@@ -352,6 +408,22 @@ SQLite's one-writer property is not the daemon-election protocol.
 - credentials excluded from argv/logs where safer mechanisms exist;
 - no unauthenticated public `0.0.0.0` MCP server in V1.
 
+## Threat: connector plan/capability mismatch
+
+**Failure:** architecture assumes ChatGPT Pro can execute `foreman_ack` even though
+current consumer Pro custom MCP is read/fetch-only, or assumes a candidate write
+workspace can execute mutations without confirmations that alter the unattended
+flow.
+
+**Mitigations:**
+
+- consumer Pro explicitly unsupported for end-to-end V1 at this research snapshot;
+- Business/Enterprise/Edu candidate surfaces feature-test synthetic mutation and
+  confirmation behavior;
+- no mutation is mislabeled read-only;
+- assistant/browser settlement never substitutes for ACK;
+- capability loss preserves obligations indefinitely.
+
 ## Threat: connector schema drift/caching
 
 **Mitigations:**
@@ -359,8 +431,8 @@ SQLite's one-writer property is not the daemon-election protocol.
 - complete four-tool V1 ABI from first supported release;
 - connector ABI/capability epoch in bootstrap;
 - breaking changes require explicit new ABI/refresh/rebind;
-- stale conversations can discover health/outstanding work but cannot bypass
-  accepted-wake/claim/generation fences.
+- stale conversations get bounded health/outstanding-work summaries but cannot
+  bypass accepted-wake/claim/generation fences.
 
 ## Threat: supply-chain compromise
 
@@ -412,17 +484,18 @@ Public posture:
 
 ## Out-of-scope V1 guarantees
 
-- containing fully compromised same-user OS account;
+- containing fully compromised or deliberately hostile same-user processes;
 - sandboxing arbitrary worker code from host by Command Governor itself;
 - guaranteeing availability of private web/provider behavior;
 - exactly-once semantics from a non-idempotent browser interface;
-- preventing a user from manually copying their own opaque wake correlation ID;
+- preventing a user from manually copying their own random wake correlation ID;
 - hostile multi-tenant local deployment.
 
 ## Security acceptance gate
 
 No service adapter is supportable until the tests in [`testing.md`](testing.md)
-prove identity fences, ambiguity recovery, Stop-veto safety, structured-result
-recovery, artifact/spool integrity/ACL, event dedupe, and forbidden-data scans
-under deterministic crash injection. Live ChatGPT and Claude support additionally
-require Gates A/B/C from the architecture/roadmap.
+prove identity fences, random wake correlation, ambiguity recovery, Stop-veto
+safety, structured-result recovery without raw stream persistence, artifact/staging
+integrity/ACL, event dedupe, and forbidden-data scans under deterministic crash
+injection. Live ChatGPT and Claude support additionally require Gates A/B/C from
+the architecture/roadmap.
