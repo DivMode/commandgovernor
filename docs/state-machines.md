@@ -1,247 +1,197 @@
 # V1 state machines
 
-Command Governor models facts that other systems commonly collapse together:
-worker lifecycle, foreman obligation processing, browser delivery, physical
-ChatGPT turns, and worker-input delivery. The separation is the correctness
-feature.
+Command Governor deliberately separates worker lifecycle, foreman obligations,
+browser delivery, physical ChatGPT turns, and worker-continuation delivery. The
+separation is the correctness feature.
 
-## State-machine rules
+## Global rules
 
-- Every transition is caused by an immutable accepted event.
-- Provider status strings and hook callbacks are evidence classes, not domain
-  states by themselves.
-- A state transition is fenced by the identities relevant to that transition.
+- Every transition comes from an immutable accepted event.
+- Provider status strings/hook callbacks are evidence, not domain states by name.
+- Every transition is fenced by relevant identities/generations/versions.
 - Duplicate source events are idempotent.
 - Silence is never success.
-- An external side effect that may have happened is never automatically replayed.
+- External effects that may have happened are never blindly replayed.
 - Closing an obligation always requires an explicit terminal disposition event.
-- For providers whose hooks can veto one another, hook invocation is not terminal
+- A provider hook that can be vetoed by another hook cannot be treated as terminal
   until the managed execution protocol confirms the outcome.
 
 ## 1. Durable obligation
 
-The V1 obligation projection intentionally answers one operational question:
-**what work is still owed now?**
-
 ### States
 
-- `created` — durable work exists but the owning worker turn has not been accepted
-  as running.
-- `running` — a verified worker turn is in progress.
-- `needs_input` — a verified durable pause/input boundary requires a decision.
-- `failed` — a worker attempt reached a verified failure the foreman has not yet
-  processed.
-- `completed_unprocessed` — a confirmed worker result is durably captured but not
-  processed/ACKed by the foreman.
-- `claimed_by_foreman` — the current binding generation claimed the exact
-  obligation version through MCP.
-- `processing` — claimed result/input was handed to the current foreman tool
-  call/turn. This is **not** acknowledgement.
-- `acknowledged` — an explicit fenced foreman disposition closed the obligation.
-- `cancelled_by_user` — explicit user-owned cancellation closed it.
-- `superseded` — explicit recorded policy made this exact obligation obsolete.
+- `created`
+- `running`
+- `needs_input`
+- `failed`
+- `completed_unprocessed`
+- `claimed_by_foreman`
+- `processing`
+- `acknowledged`
+- `cancelled_by_user`
+- `superseded`
 
 `suspected_stall` is an attention condition layered on `running`, never a terminal
 obligation state.
 
-### Primary transitions
+### Primary flow
 
 ```text
 created
-  │ verified worker dispatch/start
+  │ verified worker start
   ▼
 running
-  ├── confirmed deferred/blocking boundary ─► needs_input
-  │                                             │
-  │            answer + fenced worker resume + │
-  │            verified resumed-turn evidence  │
-  │                                             │
-  │◄────────────────────────────────────────────┘
+  ├── confirmed durable input/defer boundary ─► needs_input
+  │                                                │
+  │             answer + fenced worker resume +   │
+  │             verified resumed-turn evidence    │
+  │◄───────────────────────────────────────────────┘
   │
-  ├── verified terminal failure ─────────────► failed
+  ├── verified terminal failure ──────────────► failed
   │
   └── confirmed final result + durable artifact
-                                      ───────► completed_unprocessed
-                                                    │
-needs_input / failed / completed_unprocessed        │
-  │ foreman_resume(current generation/version)      │
-  ▼                                                 │
-claimed_by_foreman                                  │
-  │ result/input handed to tool response            │
-  ▼                                                 │
-processing                                          │
-  │ explicit foreman_ack + valid claim/fences       │
-  ▼                                                 │
-acknowledged ◄──────────────────────────────────────┘
+                                         ─────► completed_unprocessed
+                                                   │
+needs_input / failed / completed_unprocessed       │
+  │ foreman_resume(current version/generation)     │
+  ▼                                                │
+claimed_by_foreman                                 │
+  │ result/input handed to current foreman         │
+  ▼                                                │
+processing                                         │
+  │ explicit fenced foreman_ack                    │
+  ▼                                                │
+acknowledged ◄─────────────────────────────────────┘
 ```
 
-A failure is **unprocessed work**, not automatic closure. The foreman may ACK a
-failure with a disposition such as `reviewed_failure`, possibly after creating a
-replacement attempt.
+Worker failure is unprocessed work until the foreman explicitly dispositions it.
 
-### Claim behavior
+### Claim/ACK fencing
 
-`foreman_resume` is state-changing: it creates a claim for one obligation version
-under one `binding_generation`. A claim has an ID and bounded lease. Claim expiry
-is internal coordination, not external worker/browser I/O; expiry may return the
-obligation to its prior attention state but never closes it or releases a required
-artifact.
-
-### ACK fence
+`foreman_resume` creates a bounded claim under the current binding generation.
+Claim expiry is internal coordination and may return the obligation to its prior
+attention state; it never closes work or releases a required result artifact.
 
 Normal ACK requires:
 
 ```text
 obligation_id
 obligation_version
-source_event_id / source event fence
+source_event_id / source fence
 binding_generation
 claim_id
 terminal disposition
 ```
 
-Any stale value returns a typed conflict with zero state mutation. A conversation
-bound under generation N cannot ACK work under N+1.
+A stale value causes a typed conflict and zero state mutation.
 
-### Terminal dispositions
+## 2. Managed Claude worker lifecycle
 
-Initial semantic values can include:
+Preferred V1 is structured non-interactive Claude execution.
 
-- `reviewed_accepted`
-- `reviewed_changes_requested`
-- `reviewed_no_action`
-- `reviewed_failure`
-- `input_resolved`
-- `cancelled_by_user`
-- `superseded`
+### Evidence precedence
 
-Disposition never skips processing; ACK is valid only from a current fenced claim.
+1. final structured programmatic `result` + matching worker-host child exit —
+   terminal outcome for the exact managed run;
+2. strong non-blockable/native evidence such as `StopFailure`, `SessionEnd`, or a
+   **confirmed** `PreToolUse` defer — interpreted with the structured/process
+   outcome;
+3. `Stop` hook callback — `stop_candidate` only because another parallel Stop hook
+   may block stopping;
+4. Herdr/process-session observation — transport evidence;
+5. PTY idle/repaint — fallback diagnostics only.
 
-## 2. Worker lifecycle evidence
-
-Worker lifecycle is normalized per `session_incarnation_id + turn_id`.
-
-### Managed Claude V1 evidence precedence
-
-The preferred execution path is `claude -p` with structured output. Current Claude
-Code `Stop` hooks can block stopping, and all matching hooks run in parallel.
-Therefore a Stop-hook callback is **not** a terminal fact by itself.
-
-For managed non-interactive Claude V1, precedence is:
-
-1. **final structured Claude programmatic result + matching command/process exit
-   receipt** — authoritative terminal outcome for the fenced managed run;
-2. **non-blockable/strong native events** such as `StopFailure`, `SessionEnd`, and
-   a confirmed `PreToolUse` defer boundary — strong evidence reconciled with the
-   structured result/exit;
-3. **`Stop` hook invocation** — `stop_candidate` only; another parallel Stop hook
-   may return `decision: block` and Claude may continue;
-4. **Herdr/process-session observation** — transport evidence; a stale `working`
-   sample cannot erase a confirmed final/deferred managed-run outcome;
-5. **PTY idle/screen repaint** — fallback diagnostics only.
-
-"Newest timestamp wins" is rejected. Evidence class and fence matter.
+"Newest timestamp wins" is rejected. Evidence class + fence wins.
 
 ### Successful completion
 
-A `Stop` hook callback may create `stop_candidate` but does not transition the
-obligation to `completed_unprocessed`.
+A Stop callback can record `stop_candidate` but cannot publish
+`completed_unprocessed`.
 
-Successful completion requires the worker-host/runtime adapter to prove the final
-structured programmatic result for the exact managed turn and the matching child
-command exit. The bounded final result is then made durable in the private result
-artifact store. Only the transaction that references that durable artifact may
-publish `completed_unprocessed`.
+Successful completion requires a complete final structured result for the exact
+managed run plus the matching child exit receipt. The daemon extracts the bounded
+final response from the private worker-host spool, makes the immutable result
+artifact durable, then atomically publishes the terminal event/projection and one
+processing obligation.
 
-If the stream is truncated, the final result is absent, the child exit is unknown,
-or artifact publication fails, create reconciliation/health attention and do
-**not** pretend the result is processable.
+Missing/truncated stream, unknown exit, or artifact failure creates reconciliation
+attention—not fake processable completion.
 
 ### Failure
 
-`StopFailure` is strong native evidence that a turn ended due to Claude API error,
-but the adapter still records/reconciles the managed command outcome. Non-zero
-command exit, explicit interrupt, transport loss, and malformed/truncated provider
-output are separate failure classes rather than one undifferentiated `failed`.
+`StopFailure`, nonzero child exit, explicit interrupt, transport loss, and malformed
+provider output are distinct evidence classes. Only documented accepted
+combinations project `failed`.
 
-The domain may project `failed` only from a documented accepted combination of
-those evidence classes.
+### Stop-veto race
 
-### Stop-hook veto race
-
-Required scenario:
+Required case:
 
 ```text
-CG Stop hook fires -> records stop_candidate
-other parallel Stop hook returns decision:block
-Claude continues working
-later CG Stop hook fires again
-final structured result + process exit arrives
+CG Stop hook -> stop_candidate #1
+other parallel Stop hook -> decision:block
+Claude continues and emits progress
+CG Stop hook -> stop_candidate #2
+final structured result + matching child exit
 ```
 
-Expected: no `completed_unprocessed` after the first candidate; only the confirmed
-final managed result can create completion.
+No completion occurs until the final result/exit plus durable artifact.
 
-## 3. `needs_input`
+## 3. Durable `needs_input`
 
-Input is first-class durable state, but a hook merely *requesting* a pause is not
-sufficient if the provider did not actually honor it.
+Input is durable only when the provider/runtime is actually in a safely resumable
+blocked state—not merely because a hook tried to request one.
 
 ### Input classes
 
-- `engineering_question` — ordinary bounded coordination within delegated scope;
-- `permission_request` — action needs a policy/permission decision;
-- `user_owned_decision` — credentials, destructive actions, broader authority, or
-  another policy says only the user may decide;
-- `runtime_input` — verified runtime-level blocking request;
-- `provider_elicitation` — provider/MCP form or elicitation boundary when the
-  adapter can prove it is durably pending.
+- `engineering_question`
+- `user_owned_decision`
+- `runtime_input`
+- `provider_elicitation` when exact resumability is proven
 
-The ledger stores only safe opaque identity/classification and answer shape. Raw
-Claude tool arguments/question payloads are not copied into SQLite. Current detail
-is retrieved ephemerally from the native provider/session when available.
+For preferred managed `claude -p`, tool/permission decisions are detected at
+`PreToolUse` because current Claude docs say **`PermissionRequest` hooks do not
+fire in non-interactive `-p` mode**.
 
-### `AskUserQuestion` defer
+The SQLite ledger stores safe opaque identity/classification and answer shape, not
+raw Claude tool arguments/question payloads.
 
-Preferred non-interactive path:
+### AskUserQuestion / policy defer
 
-1. `PreToolUse` identifies the exact fenced `AskUserQuestion` tool call;
-2. the Command Governor hook durably records a safe defer intent and returns the
-   current documented `defer` response;
-3. the adapter waits for the structured managed-run outcome that proves the run
-   actually stopped with the call pending;
+Preferred sequence:
+
+1. `PreToolUse` identifies exact fenced tool call;
+2. Command Governor records safe defer intent and returns current documented
+   non-interactive `defer` decision;
+3. structured managed-run outcome proves the call remains pending/deferred;
 4. only then project `needs_input`.
 
-If the defer response is ignored/malformed or several tool calls create an
-unsupported partial-execution shape, preserve reconciliation attention instead of
-creating a false clean pause.
+If the defer response is ignored/malformed or a multi-tool shape cannot be safely
+preserved, create reconciliation attention rather than a clean input state.
 
-### Permission requests
+### Permission policy
 
-`PermissionRequest` is authoritative evidence that Claude requested permission,
-but its own hook is not assumed to be a durable pause/resume primitive. V1 should
-prefer a policy `PreToolUse` defer **before** a tool whose authorization must be
-resolved out of band. `PermissionRequest`, `PermissionDenied`, and current
-permission-prompt-tool behavior remain additional evidence/integration points and
-must pass conformance before becoming lifecycle authority.
+In managed `-p`, `PreToolUse` is also the permission-policy boundary:
 
-### Answer path
+- already delegated ordinary engineering action may proceed only as Claude's
+  current settings/permission semantics allow;
+- out-of-band foreman/user decisions are deferred where current tool shape supports
+  it;
+- destructive, credential-sensitive, materially broader, or unknown action is
+  user-owned and fails closed.
 
-`foreman_answer_input` records only a structured answer after verifying claim,
-obligation version, binding generation, input identity, and authorization policy.
-It then creates a separate **worker command delivery**.
+A hook allow is not assumed to override deny/ask settings. `PermissionRequest`
+belongs only to an interactive/future adapter mode whose semantics are separately
+proven.
 
-Answer recorded != worker received it.
+### Answer/resume
 
-For a deferred Claude call, the same Claude session is resumed through the current
-supported provider mechanism. Only verified structured/native resumed-turn
-evidence moves the obligation back to `running`.
+`foreman_answer_input` verifies current claim/version/generation/input identity and
+authorization policy, records only the structured answer, and creates a separate
+worker-command delivery.
 
-### Authorization boundary
-
-A ChatGPT foreman cannot convert an ungranted high-risk permission into authority
-because a worker requested it. Unknown/broader/destructive requests are user-owned
-by default; `foreman_answer_input` fails closed outside recorded policy.
+Answer recorded != worker received. Worker delivery acceptance also does not
+restore `running` until matching structured/native resumed-turn evidence arrives.
 
 ## 4. Browser wake delivery
 
@@ -256,10 +206,12 @@ delivery_id = H(
 )
 ```
 
-A delivery also snapshots the exact target obligation version/source event. A wake
-that became stale before Send cannot submit.
+The delivery snapshots target obligation version/source event. If the target
+changes before Send, the wake is stale and cannot submit.
 
-### Projection states
+### Projection / attempt states
+
+Delivery projection:
 
 - `pending`
 - `claimed`
@@ -267,189 +219,148 @@ that became stale before Send cannot submit.
 - `failed`
 - `ambiguous`
 
-Each revision may have multiple attempts only while every earlier attempt is
-proved failed before the Send ambiguity fence.
-
-### Attempt states
-
-- `claimed` — committed before **any browser I/O**;
-- `activation_armed` — committed immediately before exact Send activation;
-- `failed`;
-- `accepted`;
-- `ambiguous`.
-
-### Transition graph
+Attempt lifecycle:
 
 ```text
 pending
-  │ DB transaction before browser I/O
+  │ transaction before any browser I/O
   ▼
 claimed
-  ├── definite pre-submit error ───────────► failed
-  │                                            │
-  │                bounded safe retry may     │ create next attempt
-  │◄───────────────────────────────────────────┘
+  ├── definite pre-submit error ─────────► failed
+  │                                          │
+  │            bounded safe retry may       │ create next attempt
+  │◄─────────────────────────────────────────┘
   │
-  │ all target/obligation/composer/app checks pass
+  │ revalidate target/binding/app/composer
   ▼
 activation_armed
-  ├── exact semantic submission evidence ─► accepted
-  ├── definite proof submission did not happen ─► failed
-  └── evidence lost/uncertain ─────────────► ambiguous
+  ├── exact semantic submit evidence ───► accepted
+  ├── definite proof no submit ─────────► failed
+  └── uncertain/lost evidence ──────────► ambiguous
 ```
 
-### Restart rule
+`activation_armed` is committed immediately before exact Send activation.
 
-On startup, any previous-process attempt whose latest state is `claimed` or
-`activation_armed` without a terminal result becomes `ambiguous` **before browser
-recovery**.
+### Restart
 
-This intentionally may quarantine a zero-send crash. At-most-once safety is more
-important than guessing and sending twice.
+Any previous-process attempt left `claimed`/`activation_armed` without terminal
+outcome becomes `ambiguous` **before browser recovery**. This can conservatively
+quarantine a zero-send crash; duplicate avoidance wins over guessing.
 
 ### Accepted evidence
 
-`accepted` requires semantic evidence binding the intended wake to the exact
-conversation, preferably a provider user-message identity observed in real SPA
-network/message-tree evidence plus matching conversation/opaque delivery identity.
+Require semantic evidence binding the intended wake to the exact conversation and
+provider user-message identity where available. These are insufficient alone:
 
-Insufficient alone:
-
-- composer cleared;
+- composer emptied;
 - URL changed;
 - Stop button appeared;
 - assistant started;
-- wake text appears somewhere in the DOM.
+- wake text appears in DOM.
 
 ### Ambiguous reconciliation
 
-Automatic reconciliation may only promote:
+Automatic reconciliation may only promote `ambiguous -> accepted` with exact
+already-submitted message evidence. Absence is not proof of no submission.
+Accepted/ambiguous is frozen and never automatically resent.
 
-```text
-ambiguous -> accepted
-```
+A later bounded foreman resume is a **new delivery revision**, not another attempt
+on the old accepted/ambiguous wake.
 
-when exact evidence identifies the already-submitted wake. Absence is not proof of
-no submission, so ambiguous is not auto-demoted to failed and never auto-retried.
+## 5. Exact foreman binding
 
-An operator may later explicitly supersede an ambiguity under a separately audited
-policy; history is never rewritten.
+V1 has one active binding.
 
-### Accepted/ambiguous freeze
-
-Once any attempt is accepted or ambiguous, no attempt for that revision may
-activate Send again. A later bounded resume is a new `delivery_revision` and ID.
-
-## 5. Exact ChatGPT conversation binding
-
-There is one active binding in V1.
-
-### Bind existing conversation
+### Existing chat
 
 ```text
 unbound
-  -> navigate requested exact /c/<id>
-  -> browser reports resolved route
-  -> verify canonical conversation ID == requested ID
-  -> verify dedicated profile identity
-  -> verify Command Governor app availability/capability
+  -> navigate requested /c/<id>
+  -> verify resolved canonical conversation exactly
+  -> verify profile/app/capabilities
   -> commit new binding generation
 ```
 
-Redirect/displacement/wrong chat fails before composer mutation.
+Any displacement/login/deleted/wrong-chat route fails before composer mutation.
 
 ### Rebind
 
-1. verify new target independently;
-2. increment generation;
-3. insert/activate new binding;
-4. supersede old generation;
-5. invalidate old claims for mutation purposes.
+Verify new target, increment generation, activate new binding, supersede old one,
+and reject all old-generation mutations.
 
-Old accepted deliveries remain historical facts but cannot satisfy new-generation
-ACK fences.
+### New chat
 
-### New-chat binding
-
-Never persist `/` or a provisional route. Commit only after ChatGPT assigns a
-concrete canonical `/c/<id>`.
+Never persist `/`/temporary route. Commit only after a concrete canonical
+`/c/<id>` exists.
 
 ## 6. Physical ChatGPT turn
 
 ```text
-unknown/idle -> starting -> active -> settled
+idle/unknown -> starting -> active -> settled
                          \-> observation_lost
 ```
 
-No new wake while the exact bound surface is active. `observation_lost` must be
-reconciled before another Send.
+No new wake while the exact bound surface is active/unknown. `settled` means only
+that the physical assistant turn appears finished; it means neither MCP success nor
+obligation processing.
 
-`settled` means the physical assistant response appears finished by strong
-evidence. It means neither "MCP tools worked" nor "obligation processed."
+## 7. Settled but unACKed resume
 
-## 7. Settled but unACKed resume policy
+Eligible only when:
 
-A bounded automatic resume is eligible only when:
-
-- prior wake is `accepted`;
-- its physical ChatGPT turn is `settled`;
-- obligation is still open;
-- no current claim is processing;
-- no ChatGPT turn is active/unknown;
+- prior wake accepted;
+- physical turn settled;
+- obligation still open;
+- no current processing claim;
+- no active/unknown ChatGPT turn;
 - backoff elapsed;
 - automatic-resume budget remains;
-- exact binding/capability preflight passes.
+- current binding/capability still valid.
 
-Action: create a **new** delivery revision for the same obligation.
-
-After budget exhaustion, create/update `foreman_unreachable`; keep the obligation
-open indefinitely. Never create an infinite wake loop.
+Create the next delivery revision for the same obligation. On budget exhaustion,
+record `foreman_unreachable`, keep the obligation open indefinitely, and stop
+automatic wakes.
 
 ## 8. Worker answer/resume delivery
 
-The same external-I/O rule applies when sending an answer/continuation to a
-worker:
+Worker continuations use the same external-I/O discipline:
 
 ```text
 pending -> claimed -> accepted | failed | ambiguous
 ```
 
-An answer can be retried only before worker I/O is proven possible. Once a resume,
-stdin write, or provider submission may have happened, ambiguity is durable and
-blind replay is forbidden. Matching structured/native resumed-turn evidence is
-used to reconcile acceptance and return the obligation to `running`.
+Once resume/stdin/provider submission may have occurred, blind replay is forbidden.
+Matching resumed-turn evidence reconciles acceptance and restores `running`.
 
-## 9. Watchdog / suspected stall
+## 9. Watchdog
 
-For each running turn:
+For a running turn:
 
 ```text
 last_verified_progress_at + threshold < now
   AND no confirmed terminal/input boundary
-  -> suspected_stall attention event
+  -> suspected_stall attention
 ```
 
-Later verified progress resolves the attention and keeps the turn running. No
-amount of silence emits a synthetic Stop, failure, or completion.
+Later verified progress resolves the attention. Silence never emits synthetic Stop,
+failure, completion, interrupt, or duplicate worker.
 
-## 10. Required invariants
+## Required invariants
 
 1. Open obligation count cannot decrease without a closing disposition event.
-2. Result artifact retention cannot release while an open obligation references
+2. Required result artifact cannot be released while an open obligation references
    it.
-3. Duplicate confirmed terminal source events produce at most one result
-   obligation.
-4. A Claude `Stop` hook callback alone cannot create `completed_unprocessed`.
-5. A Stop candidate blocked by another parallel hook cannot produce completion.
-6. Old session-incarnation events cannot mutate the current incarnation.
-7. Old binding generation cannot ACK or answer current work.
-8. Browser attempt is `claimed` before any browser I/O.
-9. Send ambiguity fence is durable before exact Send activation.
-10. Startup turns orphaned `claimed`/`activation_armed` into `ambiguous` before
-    browser recovery.
-11. `accepted` and `ambiguous` are never automatically resent.
-12. Browser accepted != ChatGPT settled != foreman ACK.
-13. Confirmed structured/native worker terminal/input evidence beats stale Herdr
-    `working` for the same fenced turn.
-14. Watchdog creates attention, never fake terminal state.
-15. Foreman answer cannot grant authority outside recorded user policy.
+3. Duplicate confirmed terminal source events create at most one result obligation.
+4. Claude Stop callback alone cannot create `completed_unprocessed`.
+5. A Stop candidate blocked by another hook cannot create completion.
+6. Managed `claude -p` does not depend on `PermissionRequest` hooks.
+7. Old session-incarnation events cannot mutate current incarnation.
+8. Old binding generation cannot ACK/answer current work.
+9. Browser attempt is `claimed` before any browser I/O.
+10. Send ambiguity fence is durable before exact Send.
+11. Startup quarantines orphaned claimed/armed attempts before browser recovery.
+12. Accepted/ambiguous browser delivery is never automatically resent.
+13. Browser accepted != ChatGPT settled != foreman ACK.
+14. Confirmed structured/native worker result/input beats stale Herdr `working`.
+15. Watchdog creates attention, never fake terminal state.
+16. Foreman answer cannot grant authority outside recorded user policy.
