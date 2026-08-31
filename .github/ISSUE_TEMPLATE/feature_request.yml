@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a capability or design change.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete workflow or failure mode needs to be addressed?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the desired behavior without assuming an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Lifecycle and safety invariants
+      description: Which guarantees must remain true during success, failure, and restart?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches or workarounds did you consider?
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This proposal does not require publishing credentials, private prompts, or session data.
+          required: true

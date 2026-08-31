@@ -1,0 +1,31 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs and runtime state
+*.log
+logs/
+run/
+tmp/
+
+# Common dependency and build outputs
+node_modules/
+dist/
+build/
+coverage/
+target/
+.venv/
+__pycache__/
+*.py[cod]

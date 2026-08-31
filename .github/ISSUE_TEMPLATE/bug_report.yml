@@ -1,0 +1,51 @@
+name: Bug report
+description: Report reproducible incorrect behavior.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Remove credentials, private prompts,
+        conversation contents, source code, and session data before submitting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe sequence that reproduces the behavior.
+      placeholder: |
+        1. Configure ...
+        2. Start ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: lifecycle
+    attributes:
+      label: Lifecycle evidence
+      description: Include sanitized task, session, obligation, and delivery states when relevant.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Command Governor version or commit, operating system, providers, agents, and runtimes.
+    validations:
+      required: true
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Regression
+      options:
+        - Unknown
+        - "Yes"
+        - "No"
+    validations:
+      required: true
