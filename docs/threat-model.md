@@ -1,464 +1,428 @@
 # Command Governor V1 threat model
 
-Command Governor coordinates components that can edit source code, run processes,
-access authenticated services, and drive an authenticated browser. A lifecycle bug
-can become a security bug when it causes duplicate commands, cross-project writes,
-or false authorization.
-
-This document defines the V1 trust model before implementation.
+Command Governor coordinates components that can edit source, run processes,
+access authenticated services, and drive an authenticated browser. A lifecycle
+mistake can become a security mistake when it causes duplicate commands,
+cross-project writes, false authorization, or premature review closure.
 
 ## Security goals
 
-1. A stale/incorrect worker, session, browser, or ChatGPT conversation cannot
+1. A stale/incorrect worker, runtime, browser, or ChatGPT conversation cannot
    silently close current work.
 2. Ambiguous external writes are not automatically replayed.
-3. A worker/repository cannot inject Command Governor control instructions through
-   data content.
-4. Browser/session/GitHub credentials stay in their normal private stores and do
-   not leak into the control ledger or logs.
-5. State survives crashes without widening authority.
-6. One project/session/conversation cannot accidentally act as another through
-   name reuse or stale identifiers.
-7. ChatGPT cannot grant authority the user has not delegated.
-8. Public/open-source distribution does not implement authentication, entitlement,
-   CAPTCHA, rate-limit, or anti-abuse bypasses.
+3. Repository/worker content cannot become Command Governor policy through prompt
+   injection.
+4. Browser/GitHub/provider credentials stay in their normal private stores and do
+   not leak into the control ledger or safe logs.
+5. State/result durability survives crashes without widening authority.
+6. Name reuse/stale identities cannot cross session/project/binding generations.
+7. ChatGPT cannot grant authority the user did not delegate.
+8. Public distribution does not implement auth/entitlement/CAPTCHA/rate-limit/
+   anti-abuse bypass.
+9. A provider hook callback cannot be promoted to stronger lifecycle truth than
+   its documented semantics justify.
 
-## Assets
+## High-value assets
 
-Highest-value assets:
-
-- dedicated ChatGPT Chrome profile/cookies/session state;
+- dedicated ChatGPT Chrome profile/session state;
 - GitHub credentials and repository write authority;
 - worker/runtime execution authority;
-- Secure MCP Tunnel/app credentials;
+- OpenAI-supported MCP tunnel/app credentials;
 - Command Governor local control endpoint;
-- SQLite orchestration database and WAL;
-- private result artifacts;
-- managed Claude hook settings and inbox;
-- source repository contents available to workers;
-- durable user authorization/policy records.
+- SQLite DB/WAL;
+- private immutable result artifacts;
+- private Claude worker-host structured-stream spools and exit receipts;
+- managed Claude settings and sanitized hook inbox;
+- repository contents visible to workers;
+- durable user delegation/authorization policy.
 
 ## Trust boundaries
 
 ```text
-human user
+human user / local OS account
    │
-   ├── local OS account ───────────────────────────────────────────┐
-   │                                                              │
-   │  command-governor daemon  ◄── local IPC ── CLI/shims         │
-   │       │                 │                                    │
-   │       │                 ├── private SQLite/artifacts/hooks    │
-   │       │                 │                                    │
-   │       ├── runtime ── Claude/Codex ── repository data          │
-   │       │                                                      │
-   │       ├── GitHub remote                                      │
-   │       │                                                      │
-   │       └── dedicated Chrome profile ── ChatGPT.com            │
-   │                                     │                        │
-   │                                     └── supported MCP tunnel │
-   │                                               │              │
-   └───────────────────────────────────────────────┴──────────────┘
+   ├── command-governor daemon ◄── owner-local IPC ── CLI / transport shims
+   │       │
+   │       ├── SQLite / result artifacts / hook inbox
+   │       ├── runtime -> worker-host -> Claude/Codex -> repository data
+   │       ├── GitHub remote
+   │       └── dedicated Chrome profile -> ChatGPT.com
+   │                                      └── supported MCP tunnel
+   │
+   └── local administrative trust root
 ```
 
-The local OS user is the V1 administrative trust root. Owner-only Unix modes do
-not protect against a malicious process already executing as the same user; OS
-sandboxing/least-privilege can reduce exposure but same-user compromise is outside
-the strong V1 isolation claim.
+The local OS account is the V1 administrative trust root. Owner-only file modes do
+not contain malware already running as that same user; same-user compromise is
+outside the strongest V1 isolation claim.
 
-Remote repository/worker/browser content is **data, not policy**.
-
-## Threat actors / failure actors
-
-- accidental stale ChatGPT conversation;
-- compromised or prompt-injected worker result;
-- malicious repository issue/file/diff text;
-- stale/replayed native lifecycle event;
-- buggy Herdr/runtime observation;
-- browser selector drift or SPA redirect;
-- daemon/browser/process crash at an external-I/O boundary;
-- local process under a different OS account trying to access state/control IPC;
-- supply-chain dependency compromise;
-- compromised browser extension/profile content;
-- remote service/account restriction or protocol drift.
-
-A fully compromised same-user OS account can generally read the same credentials
-as Command Governor and is not claimed to be contained by file mode alone.
+Remote repository, browser, and worker content is data, not policy.
 
 ## Threat: duplicate browser wake
 
-### Failure
+**Failure:** daemon crashes after Send/evidence loss and an ordinary retry loop
+submits the wake again.
 
-Daemon crashes after Send, or evidence is lost, then an ordinary retry loop sends
-the same wake twice.
-
-### Mitigation
+**Mitigations:**
 
 - deterministic delivery/revision identity;
-- `claimed` committed before browser I/O;
-- `activation_armed` committed before Send activation;
-- startup orphaned claims become `ambiguous` before recovery;
-- accepted/ambiguous attempts never automatically resend;
-- exact message-tree/network reconciliation may only promote ambiguous to
-  accepted;
-- new bounded resume is a new delivery revision for the same obligation.
+- `claimed` durable before any browser I/O;
+- `activation_armed` durable before exact Send action;
+- startup orphaned attempts become ambiguous before browser recovery;
+- accepted/ambiguous never automatically resend;
+- exact message/network reconciliation can only promote ambiguous -> accepted;
+- a later bounded resume is a new revision, never replay of the old one.
 
-## Threat: wrong ChatGPT conversation
+## Threat: wrong/stale ChatGPT conversation
 
-### Failure
+**Failure:** current tab/history/redirect causes mutation in another conversation.
 
-"Current tab" or SPA redirect causes Command Governor to type/send into another
-conversation.
-
-### Mitigation
+**Mitigations:**
 
 - one explicit canonical `/c/<id>` binding;
 - monotonic binding generation;
-- dedicated browser target;
-- verify resolved canonical conversation immediately before composer mutation and
-  again before Send;
-- wrong/displaced route is a pre-submit failure;
-- stale generation cannot claim/ACK current work.
+- dedicated browser target/profile;
+- verify exact resolved conversation before composer mutation and before Send;
+- delivery snapshots exact obligation version/source event;
+- stale generation/target cannot claim or ACK current work.
 
-## Threat: unrelated/stale connector conversation mutates state
+## Threat: unrelated connector conversation mutates state
 
-### Failure
+**Failure:** the same Command Governor connector is visible in another ChatGPT
+conversation and calls mutation tools.
 
-The same Command Governor connector is visible in another ChatGPT conversation,
-which calls mutation tools.
+**Mitigations:**
 
-### Mitigation
+- supported connector authentication;
+- `foreman_resume` requires current accepted wake `delivery_id` in addition to
+  generation/obligation fences;
+- bootstrap does not reveal that current accepted delivery correlation nonce;
+- resume mints a current claim;
+- ACK/input answer require claim + source/version/generation;
+- rebind invalidates old-generation mutations;
+- future official trusted conversation/turn metadata can be added as another fence.
 
-- connector authentication through supported OpenAI path;
-- `foreman_resume` requires an accepted current-generation wake `delivery_id`
-  present in the browser-delivered message;
-- bootstrap does not disclose that accepted delivery correlation ID;
-- resume mints a claim bound to delivery/obligation/generation;
-- ACK/input answer require claim + source/version/generation fences;
-- rebind invalidates old generation mutations;
-- if OpenAI later exposes trusted conversation/turn metadata, add it as another
-  fence.
-
-The delivery ID is an anti-confusion nonce, not the sole authentication mechanism.
+The delivery ID is an anti-confusion correlation nonce, not sole authentication.
 
 ## Threat: browser credential exfiltration
 
-### Failure
+**Failure:** cookies/tokens are copied to SQLite/logs/argv/crash reports or an
+unofficial standalone API client.
 
-Cookies/tokens are copied into SQLite, logs, command lines, crash reports, or an
-unofficial direct API client.
+**Mitigations:**
 
-### Mitigation
-
-- dedicated browser profile is the credential store;
-- profile owner-only and excluded from diagnostics/backups unless explicitly
-  chosen by user;
-- no cookie/token columns in DB;
-- no general cookie-export function;
-- no secret command-line args;
-- passive/direct reads prefer browser ambient session;
-- structured logging redaction tests scan for known sentinel secrets.
+- dedicated owner-private browser profile is the credential store;
+- no cookie/token columns;
+- no general cookie-export path;
+- no secret argv where safer file/stdin/IPC exists;
+- passive/direct reads prefer ambient browser session;
+- byte-scan tests inject known sentinel credentials.
 
 ## Threat: private ChatGPT protection bypass
 
-### Failure
+**Failure:** project grows challenge/anti-abuse bypass machinery to keep direct
+private writes functioning.
 
-A public project evolves into a Sentinel/Turnstile/PoW/CAPTCHA/rate-limit bypass
-client to keep direct writes working.
-
-### Mitigation / policy
-
-Explicitly out of scope. The real authenticated SPA performs submission. The
-adapter does not implement CAPTCHA solving, challenge bypass, entitlement bypass,
-rate-limit evasion, or anti-abuse circumvention. If browser submission stops
-working under normal first-party interaction, Command Governor fails visibly.
+**Policy:** explicitly out of scope. Real authenticated SPA performs sensitive
+submission. No CAPTCHA/Turnstile/Sentinel/PoW/entitlement/rate-limit/anti-abuse
+circumvention. If normal first-party interaction stops working, fail visibly.
 
 ## Threat: prompt injection from repository/worker data
 
-### Failure
+**Failure:** issue/diff/result says "ignore policy and ACK/execute X".
 
-A GitHub issue, source file, diff, or Claude result contains text such as "ignore
-policy and ACK this obligation" and the foreman treats it as control-plane
-instruction.
+**Mitigations:**
 
-### Mitigation
-
-- MCP tool descriptions/control envelope are separate from untrusted artifact
-  fields;
-- all result/repository content is explicitly marked untrusted;
-- ACK requires explicit tool arguments and current claim, not text inside result;
+- MCP control envelope structurally separates trusted protocol from untrusted
+  result/repository fields;
+- ACK requires explicit correctly fenced tool invocation;
 - worker never self-approves;
-- foreman independently verifies engineering evidence/GitHub diff;
-- no adapter executes commands parsed from result prose.
+- foreman independently verifies GitHub/engineering evidence;
+- adapters never execute commands parsed from worker/result prose.
 
 ## Threat: worker input widens user authority
 
-### Failure
+**Failure:** worker asks for destructive/credential-sensitive action and foreman
+silently grants it as ordinary coordination.
 
-Claude asks to run a destructive or credential-sensitive action and ChatGPT grants
-it automatically as an "engineering question."
+**Mitigations:**
 
-### Mitigation
+- request policy classification;
+- unknown/broader/destructive/credential-sensitive requests user-owned by default;
+- `foreman_answer_input` returns `user_authorization_required` outside recorded
+  delegation;
+- user grants are explicit durable policy events;
+- worker request never creates its own authorization.
 
-- input request policy classification;
-- unknown/broader/destructive permission is user-owned by default;
-- `foreman_answer_input` returns `user_authorization_required` without worker I/O;
-- user grants are explicit durable policy events with scope/expiry where relevant;
-- a worker's requested permission never creates its own authorization.
+## Threat: stale Herdr state overrides worker truth
 
-## Threat: stale runtime state overrides native lifecycle
+**Failure:** confirmed Claude result/deferred input exists but Herdr still says
+`working / idle:false`, causing rejected continuation or duplicate worker.
 
-### Failure
+**Mitigations:**
 
-Claude is stopped/blocked, but Herdr still reports `working`; Command Governor
-rejects the needed answer or opens a duplicate worker.
-
-### Mitigation
-
-- native Claude `Stop`/input evidence wins for the fenced turn;
+- managed Claude structured final/deferred/process evidence outranks stale Herdr
+  observation for the same fenced turn;
 - record `runtime_state_conflict`;
-- one explicit runtime reconciliation/clear-busy path;
-- no duplicate session creation while ownership remains unresolved;
-- deterministic regression test reproduces the exact stale-Herdr condition.
+- one explicit reconciliation/clear-busy path before continuation;
+- no duplicate worker while ownership is unresolved;
+- deterministic and live conformance fixtures reproduce the class.
 
-## Threat: daemon crash loses Claude completion event
+## Threat: Stop-hook callback falsely declares completion
 
-### Failure
+**Failure:** Command Governor's Claude `Stop` hook fires, but another matching Stop
+hook returns `decision:block`; Claude continues while Governor publishes
+`completed_unprocessed` from the first callback.
 
-Claude fires `Stop` while Command Governor is offline and the event vanishes.
+**Mitigations:**
 
-### Mitigation
+- Stop callback is only `stop_candidate` evidence;
+- current docs say matching hooks can run in parallel, so hook order is never
+  terminal arbitration;
+- successful managed Claude completion requires final structured programmatic
+  `result` + matching child-process exit receipt;
+- controlled parallel Stop-veto test is a hard live Gate C case;
+- `SessionEnd` is session-end evidence, not successful-result proof.
 
-- managed hook first deposits a sanitized event to an owner-private durable inbox;
-- atomic temp/write/fsync/rename;
-- DB ingestion deduped by source event identity;
-- hook never depends solely on live daemon HTTP/IPC.
+## Threat: daemon crash loses Claude's final result
 
-## Threat: hook/settings command injection
+**Failure:** daemon owns the only stdout reader; Claude finishes while daemon is
+restarting; final result disappears even though Herdr/worker continues or exits.
 
-### Failure
+**Mitigations:**
 
-Another user/process rewrites the managed Claude settings file or replaces hook
-path so every Claude worker executes attacker-controlled code.
+- runtime launches managed Claude through a narrow Rust `worker-host` mode;
+- worker-host captures structured stream to owner-private bounded spool;
+- sanitized child-exit receipt is durable after child termination;
+- worker-host owns no SQLite/task/obligation authority;
+- daemon later validates/reconciles spool+receipt and extracts bounded final result
+  into immutable result artifact;
+- truncated/no-exit/no-final-result never becomes completion.
 
-### Mitigation
+## Threat: worker-host becomes a second control plane
 
-- settings file and parent directory owner/mode validation;
-- reject symlinks and unsafe writable ancestors where platform APIs permit;
-- stable installed hook binary name;
-- fail closed before managed worker spawn if ownership/format/epoch is wrong;
-- never edit/use personal Claude settings as Command Governor authority.
+**Failure:** transport shim starts writing obligations or deciding terminal review
+state, creating split-brain orchestration.
+
+**Mitigations:**
+
+- worker-host receives only opaque turn/session transport fences;
+- no write access to SQLite control API;
+- can write only its allocated private spool/receipt/inbox paths;
+- daemon is sole importer/projector;
+- tests attempt arbitrary state commands and verify no authority mutation.
+
+## Threat: worker-host spool leaks prompt/provider content
+
+**Failure:** structured provider stream is copied into routine logs/DB/doctor.
+
+**Mitigations:**
+
+- spool is a separately classified sensitive store, not event ledger;
+- owner-private root/files, bounded size, no-follow rooted access;
+- routine status exposes only safe IDs/counts/state;
+- daemon extracts only bounded final result needed for review;
+- safe-persistence sentinel scans allow sensitive content only in explicitly
+  designated spool/result files.
+
+## Threat: hook event disappears while daemon is down
+
+**Failure:** progress/input/defer/native event is delivered only over live IPC.
+
+**Mitigations:**
+
+- managed hook first writes a sanitized owner-private atomic inbox envelope;
+- file and directory durability are established before return as required;
+- daemon ingestion dedupes by non-secret source identity;
+- crash after DB commit before inbox cleanup is idempotent;
+- inbox contains lifecycle metadata only, not raw hook payload/transcript.
+
+## Threat: Claude settings/hook command tampering
+
+**Failure:** attacker/unsafe local configuration rewrites the settings file or hook
+command, executing unexpected code in each managed worker.
+
+**Mitigations:**
+
+- Command Governor-owned settings, never personal settings mutation;
+- validate owner, mode, regular-file/no-symlink, safe ancestor, hook epoch;
+- stable installed hook command;
+- fail closed before managed spawn if unsafe;
+- do not assume `--settings` isolates all user/project/plugin hooks;
+- live conformance measures active settings/hook behavior.
 
 ## Threat: raw hook data leaks sensitive content
 
-### Failure
+**Failure:** generic JSON serializer writes cwd/transcript/prompt/tool args/command
+into SQLite/logs.
 
-Generic hook serializer writes cwd, transcript path, prompt, tool args, or command
-text into SQLite/logs.
+**Mitigations:**
 
-### Mitigation
+- event-specific typed extractors;
+- unknown provider fields discarded;
+- progress stores identity/time/safe class only;
+- input ledger stores opaque identity/classification, not raw tool args;
+- byte-scan regression tests across DB/WAL/logs/inbox/crash state.
 
-- event-specific typed extractors, no generic `serde_json::Value` persistence of
-  the input payload;
-- discard unknown fields;
-- progress stores only identity/time/event class;
-- blocking input stores opaque identity/classification, not raw tool args;
-- byte-scan regression test across DB/WAL/logs/crash state with sentinel values.
+## Threat: unconfirmed defer creates false `needs_input`
+
+**Failure:** PreToolUse hook attempts `defer`, but provider ignores/misparses it or
+multi-tool shape partially executes; Governor assumes clean pending input.
+
+**Mitigations:**
+
+- persist safe defer intent separately;
+- project `needs_input` only after structured managed-run outcome confirms the
+  pending/deferred boundary;
+- unsupported multi-tool shapes become reconciliation attention;
+- PermissionRequest alone is not treated as a generic durable pause/resume
+  primitive without conformance proof.
 
 ## Threat: result disappears after runtime close
 
-### Failure
+**Failure:** completion obligation exists but actual worker result lived only in
+PTY/provider spool.
 
-`completed_unprocessed` exists but the actual Claude result lived only in the PTY.
+**Mitigations:**
 
-### Mitigation
+- confirmed final result extracted to immutable result artifact before
+  `completed_unprocessed` transaction commits;
+- digest/size/ref in SQLite;
+- open obligation pins retention;
+- file-before-DB crash-safe ordering;
+- missing/corrupt artifact blocks processing and raises health condition.
 
-- bounded final result written to immutable private artifact store before terminal
-  obligation transaction commits;
-- artifact digest/size/ref in DB;
-- open obligation pins artifact retention;
-- crash-safe file-before-DB commit ordering;
-- missing/corrupt referenced artifact blocks processing and raises health error.
+## Threat: artifact/spool path tamper
 
-## Threat: result artifact tamper/path traversal
+**Failure:** worker supplies path, symlink swap, traversal, or modifies bytes.
 
-### Failure
+**Mitigations:**
 
-Worker supplies a path or local process swaps result content.
+- daemon/worker-host allocate opaque store keys;
+- root-contained no-follow access where supported;
+- owner-private permissions;
+- bounded size/complete-record checks;
+- digest/length validation;
+- untrusted content remains untrusted even when integrity-valid.
 
-### Mitigation
+## Threat: SQLite corruption/rollback/projection drift
 
-- daemon allocates store keys; workers never choose filesystem path;
-- immutable owner-private files;
-- digest and byte length verified before MCP read;
-- no symlink following for artifact open;
-- directory ownership validation;
-- content-size ceiling;
-- artifact is untrusted data even when digest-valid.
+**Failure:** restored/corrupt DB projection appears closed while event history does
+not support it.
 
-## Threat: SQLite corruption or rollback
-
-### Failure
-
-DB/WAL corruption or partial restore makes projections look closed while events do
-not support the state.
-
-### Mitigation
+**Mitigations:**
 
 - schema epoch/checksums;
 - foreign keys;
-- transactionally coupled event/projection changes;
-- startup replay/validation watermark;
-- projection mismatch fails closed into doctor/repair mode;
-- tested backup/restore procedure must include DB/WAL consistency and artifact
-  set; copying only one random live file is not a supported backup.
+- event/projection transactional coupling;
+- replay/validation watermark;
+- mismatch fails closed into doctor/repair mode;
+- supported backup/restore includes consistent DB/WAL plus required artifact set.
 
 ## Threat: two daemons become authorities
 
-### Failure
+**Failure:** two daemons target one state root and each schedules work.
 
-Two Command Governor daemons open the same state root and each schedules work.
+**Mitigations:**
 
-### Mitigation
+- owner-root instance lock before DB/browser/runtime recovery;
+- DB instance/daemon epoch;
+- second process fails closed or becomes a stateless client;
+- browser profile ownership separately fenced.
 
-- owner-root instance lock acquired before DB/browser/runtime recovery;
-- DB instance ID / daemon epoch;
-- second process fails closed or becomes a stateless client of the first;
-- browser profile single-owner lock is separately verified.
-
-SQLite's single-writer behavior is not the product-level daemon-election protocol.
+SQLite's one-writer property is not the daemon-election protocol.
 
 ## Threat: local IPC abuse
 
-### Failure
+**Mitigations:**
 
-Another OS account calls daemon control operations.
-
-### Mitigation
-
-- Unix domain socket in owner-only directory with peer-credential checks where
-  available;
-- Windows named-pipe ACL restricted to current user;
-- loopback HTTP only if required, with random local capability and strict
-  loopback/origin handling;
+- Unix socket in owner-only directory with peer credentials where available;
+- Windows named-pipe ACL current-user-only;
+- loopback HTTP only if required, with random local capability and strict loopback
+  handling;
 - no LAN bind by default.
 
 ## Threat: MCP tunnel exposure
 
-### Failure
+**Mitigations:**
 
-Local MCP server is exposed publicly without authentication or tunnel credentials
-leak.
-
-### Mitigation
-
-- prefer the supported OpenAI Secure MCP Tunnel/connectivity path;
-- stdio/stateless shim or loopback-only endpoint, depending on supported tunnel
-  contract;
-- tunnel/shim owns no durable state;
-- private credentials not in argv/logs;
-- no generic public `0.0.0.0` MCP listener in V1.
+- use current supported OpenAI tunnel/connectivity path;
+- stdio stateless shim or loopback-only endpoint as required;
+- tunnel/shim owns no durable orchestration state;
+- credentials excluded from argv/logs where safer mechanisms exist;
+- no unauthenticated public `0.0.0.0` MCP server in V1.
 
 ## Threat: connector schema drift/caching
 
-### Failure
+**Mitigations:**
 
-A long-lived ChatGPT conversation uses old tool schemas and silently performs a
-new operation incorrectly.
-
-### Mitigation
-
-- four-tool V1 schema from first supported release;
-- connector ABI identifier and capability epoch in bootstrap;
-- breaking change requires explicit new ABI/refresh/rebind;
-- stale conversations can discover outstanding work but cannot bypass current
-  wake/claim/generation fences.
+- complete four-tool V1 ABI from first supported release;
+- connector ABI/capability epoch in bootstrap;
+- breaking changes require explicit new ABI/refresh/rebind;
+- stale conversations can discover health/outstanding work but cannot bypass
+  accepted-wake/claim/generation fences.
 
 ## Threat: supply-chain compromise
 
-### Failure
+**Mitigations:**
 
-A Rust dependency/toolchain/action release is malicious.
-
-### Mitigation
-
-- pinned Rust toolchain and committed `Cargo.lock`;
-- `cargo audit` and `cargo deny` in CI;
+- pinned Rust toolchain and committed application `Cargo.lock`;
+- `cargo audit` + `cargo deny`;
 - license/source policy;
-- Dependabot/Renovate review, not blind auto-merge for security-sensitive crates;
+- reviewed dependency automation, no blind auto-merge for security-sensitive
+  crates;
 - pin GitHub Actions by commit SHA where practical;
-- explicit deny/check for known malicious crate releases from the August 2026
-  ecosystem incident (`arrayref 0.3.10`, `internment 0.8.7`,
-  `append-only-vec 0.1.9`);
-- minimize dependencies, especially browser/auth/process crates.
+- explicitly reject known malicious August 2026 crate releases such as
+  `arrayref 0.3.10`, `internment 0.8.7`, and `append-only-vec 0.1.9`;
+- minimize browser/auth/process dependencies.
 
-## Threat: diagnostics become an exfiltration channel
+## Threat: diagnostics become exfiltration
 
-Safe diagnostics may contain:
+Safe diagnostics may include opaque IDs, state/event classes, counts, durations,
+versions/commits, redacted route class, and boolean evidence flags.
 
-- opaque IDs;
-- state/event classes;
-- counts;
-- durations;
-- version/commit information;
-- redacted route class;
-- boolean readiness/evidence flags.
+They must not include prompt/result/repository content by default, cwd, transcript
+paths, raw provider stream, browser headers/bodies/cookies/tokens, GitHub auth, or
+arbitrary environment variables.
 
-They must not contain by default:
+## OpenAI terms / unofficial ChatGPT Web risk
 
-- prompt/result/repository content;
-- cwd;
-- transcript paths;
-- browser request/response headers/bodies;
-- cookies/tokens;
-- GitHub auth;
-- arbitrary environment variables.
-
-A deliberately requested sensitive diagnostic export, if one is ever added,
-requires a separate user action and is outside V1 public-safe logs.
-
-## Terms / unofficial ChatGPT Web risk
-
-Command Governor is a public independent project. Its ChatGPT Web adapter is
-unofficial.
-
-Current sources reviewed:
+Command Governor is an independent open-source project. Current sources reviewed:
 
 - OpenAI Terms of Use, effective 2026-01-01:
   <https://openai.com/policies/terms-of-use/>
 - OpenAI App Developer Terms, updated 2026-07-09:
   <https://openai.com/policies/app-developer-terms/>
 
-The Terms include restrictions relevant to reverse engineering, automated data
-extraction, bypassing restrictions/protective measures, and use of OpenAI
-services. Even a local normal-login browser architecture carries account/terms
-risk and can break without notice.
+The terms include restrictions relevant to reverse engineering, automated data
+extraction, rate/restriction bypass, and protective measures. The normal-login,
+local-browser, no-bypass design reduces some engineering/security risk but does
+not make unofficial browser automation officially supported or establish a legal
+conclusion.
 
-Project posture:
+Public posture:
 
-- no claim of official OpenAI support/endorsement;
-- user authenticates normally;
-- no auth/entitlement/CAPTCHA/rate-limit/anti-abuse bypass;
-- browser credentials stay local;
-- protected private write protocol is not reimplemented;
-- all ChatGPT-specific unofficial behavior is isolated and replaceable;
-- documentation tells users to review applicable service terms for their use.
+- no OpenAI endorsement claim;
+- normal user authentication;
+- no auth/entitlement/CAPTCHA/rate/protective-measure bypass;
+- browser credentials local;
+- no protected private-write emulator;
+- replaceable ChatGPT-specific adapter;
+- users review terms applicable to their use.
 
-This security posture reduces risk; it is not a legal conclusion that any
-particular automation is permitted.
+## Out-of-scope V1 guarantees
 
-## Out of-scope V1 guarantees
-
-- containing a fully compromised local OS user account;
-- sandboxing arbitrary worker code from the host by Command Governor itself;
-- guaranteeing availability of ChatGPT/private web behavior;
+- containing fully compromised same-user OS account;
+- sandboxing arbitrary worker code from host by Command Governor itself;
+- guaranteeing availability of private web/provider behavior;
 - exactly-once semantics from a non-idempotent browser interface;
-- preventing a user from manually copying an opaque wake correlation ID between
-  their own ChatGPT conversations;
-- a multi-tenant hostile-local-user deployment.
+- preventing a user from manually copying their own opaque wake correlation ID;
+- hostile multi-tenant local deployment.
 
 ## Security acceptance gate
 
-No browser/worker integration is supportable until the tests in
-[`testing.md`](testing.md) prove state fences, ambiguity recovery, event dedupe,
-artifact ACL/digest behavior, and forbidden-data scans under deterministic crash
-injection.
+No service adapter is supportable until the tests in [`testing.md`](testing.md)
+prove identity fences, ambiguity recovery, Stop-veto safety, structured-result
+recovery, artifact/spool integrity/ACL, event dedupe, and forbidden-data scans
+under deterministic crash injection. Live ChatGPT and Claude support additionally
+require Gates A/B/C from the architecture/roadmap.
