@@ -1,226 +1,256 @@
 # Command Governor roadmap
 
-Milestones are outcomes and gates, not calendar promises. V1 does not advance by
-writing a large amount of code; it advances when the relevant failure modes are
-proven safe.
+Milestones are outcomes and gates, not calendar promises. V1 advances when failure
+modes are proven safe, not when a large amount of code exists.
 
 ## Phase 0 — verified architecture
 
-Deliverables:
+Deliver:
 
-- current technology/source review with exact commits/releases/dates;
-- accepted/proposed ADR set;
+- pinned current-source research;
+- architecture/decision records;
 - threat/security model;
 - Rust workspace proposal;
 - SQLite/data model;
-- obligation/delivery/binding state machines;
+- obligation/browser/worker/binding state machines;
 - stable MCP contract;
-- worker lifecycle/input/watchdog contract;
-- browser-control comparison and hybrid decision;
-- authenticated browser spike protocol;
+- browser-control and private-API/DOM/hybrid comparison;
+- Claude structured lifecycle/input/watchdog contract;
+- result-artifact and worker-host transport boundaries;
 - licensing/provenance plan;
-- deterministic acceptance tests.
+- phased implementation plan;
+- deterministic crash/failure/security acceptance tests.
 
 Exit criteria:
 
-- central invariant has no known state transition that closes work without ACK;
-- every external non-idempotent write has an explicit ambiguity boundary;
-- no required correctness property depends on a GUI or human completion alert;
-- reviewers agree the acceptance tests can be implemented without redesigning the
-  domain model.
+- no normal state transition can close delegated work without explicit disposition;
+- every consequential external write has an ambiguity boundary;
+- a worker result can survive daemon/runtime restart until ACK;
+- Claude Stop-hook veto behavior cannot create false completion;
+- correctness does not depend on a GUI or human completion notification;
+- reviewers agree the acceptance suite can be implemented without weakening the
+  central invariant.
 
-## Gate A — ChatGPT MCP mutation capability
+## Phase 1 — pure Rust kernel + store + testkit
 
-Before claiming the automatic foreman loop works on a target ChatGPT account:
+After architecture review:
 
-- install/configure the V1 Command Governor app through the supported path;
-- verify connector ABI/tool visibility;
-- run a synthetic state-changing mutation through the real bound ChatGPT surface;
-- prove `foreman_ack`/`foreman_answer_input` class actions are available;
-- prove stale binding generation is rejected.
-
-If the target account/surface is read/fetch-only under current product policy,
-record `write_capability_unavailable`. Do not weaken the ACK invariant.
-
-This gate can be developed in parallel with pure core work but must pass before
-end-to-end V1 is called supported.
-
-## Phase 1 — Rust kernel + store + testkit
-
-Only after Phase 0 architecture acceptance:
-
-- scaffold Cargo workspace with pinned stable Rust/edition 2024;
-- implement typed IDs/domain events and pure state machines;
+- scaffold the Cargo workspace with pinned stable Rust/edition 2024;
+- implement opaque typed IDs, source/domain events, pure state machines, policies;
 - implement `rusqlite` single-writer DB actor;
-- implement migrations/schema epoch and replayable projections;
-- implement private result-artifact store and crash-safe commit order;
-- implement owner-local daemon lock and local IPC skeleton;
-- implement deterministic fake clock/runtime/browser/foreman/lifecycle sources;
-- enable fmt/clippy/test/audit/deny CI from first Rust commit.
+- implement schema epoch/migrations and replayable projections;
+- implement immutable private result-artifact store;
+- implement owner-root daemon lock/local IPC skeleton;
+- implement deterministic fake clock/runtime/browser/foreman/worker lifecycle;
+- establish fmt/clippy/test/audit/deny CI from the first Rust commit.
 
 Exit criteria:
 
-- all pure obligation and persistence tests in `testing.md` pass;
-- completion/result obligation survives forced daemon/runtime restart until ACK;
+- pure obligation/persistence/browser-delivery state tests pass;
+- restart preserves every open obligation;
 - duplicate source events are idempotent;
-- projection replay equivalence holds;
+- stale generation/claim fences fail closed;
+- result-artifact crash ordering passes;
+- projection replay equivalence passes;
 - forbidden-data scan is clean.
 
 No real ChatGPT or Claude is required for this phase.
 
-## Phase 2 — Claude native lifecycle + Herdr runtime
+## Phase 2 — Claude structured worker transport + Herdr adapter
 
-- implement hardened managed Claude settings/hook command;
-- implement owner-private durable hook inbox;
-- normalize Stop/StopFailure/input/progress events;
-- prefer tested non-interactive `AskUserQuestion` defer/resume path;
-- implement Herdr runtime adapter as process/session evidence only;
+- implement `command-governor worker-host claude <opaque-turn-id>` as a
+  transport-only Rust mode;
+- launch/resume managed `claude -p` with structured output;
+- capture a private bounded provider stream spool and sanitized child-exit receipt;
+- implement hardened Command Governor-owned Claude settings/hook command;
+- implement sanitized durable hook inbox;
+- normalize structured init/result, Stop candidate, StopFailure, SessionEnd,
+  progress, permission, and confirmed defer/resume evidence;
+- treat Stop callbacks as candidate evidence only;
+- implement `PreToolUse` policy/defer path for out-of-band input where supported;
+- implement Herdr process/session adapter as lower-level runtime evidence;
 - implement runtime conflict/clear-busy reconciliation;
-- implement worker answer/resume delivery ambiguity state;
-- capture bounded final worker result into result artifact before completion
-  publication.
+- implement worker continuation delivery ambiguity semantics;
+- extract only the bounded final result from a confirmed worker-host spool into the
+  immutable result artifact before completion publication.
 
-Exit criteria:
+Exit criteria for deterministic implementation tests:
 
-- fake stale-Herdr tests pass;
-- real Claude conformance report passes on pinned Claude version;
-- daemon-offline Stop hook recovers exactly once;
+- Stop candidate alone never creates completion;
+- another fake Stop hook can veto and Claude continues without false terminal state;
+- structured final result + child exit creates exactly one result obligation;
+- truncated/missing stream/exit fails visibly;
+- daemon-offline spool and hook-inbox recovery are exactly-once/idempotent;
+- stale Herdr working cannot veto a confirmed structured final/deferred state;
 - personal Claude settings remain untouched;
-- no monitor-only sessions are required;
-- raw prompt/tool/cwd/transcript data does not appear in Command Governor safe
+- raw prompt/tool/cwd/transcript/provider-stream fields do not leak into safe
   persistence/logs.
+
+## Gate C — live Claude managed-execution conformance
+
+Run a disposable real Claude/Herdr matrix on the exact pinned versions before the
+Claude adapter is called supported:
+
+- structured `system/init` and capability feature detection;
+- normal final structured `result` + matching child exit;
+- controlled parallel Stop-hook `decision:block` case followed by continued work;
+- exactly one terminal result only after the later true final result;
+- StopFailure/SessionEnd failure semantics;
+- actual active settings/hook source behavior for the selected CLI invocation;
+- confirmed AskUserQuestion/policy defer + same-session resume;
+- unsupported multi-tool defer shape;
+- daemon killed while worker continues -> worker-host result/exit survives;
+- truncated worker-host spool -> no fabricated completion;
+- stale Herdr `working / idle:false` conflict;
+- forbidden-data byte scan.
+
+A false completion caused by a Stop-hook callback fails Gate C.
 
 ## Phase 3 — stable MCP server + supported tunnel
 
-- implement `rmcp` V1 four-tool ABI;
-- implement wake-delivery correlation and claim fencing;
-- implement paging for bounded result artifacts;
+- implement the four-tool `rmcp` ABI;
+- implement accepted-wake correlation and claim fencing;
+- implement result paging;
 - implement explicit ACK/disposition and input-answer policy;
-- integrate the currently supported OpenAI Secure MCP Tunnel/connectivity path
-  without creating a second state authority;
-- implement `doctor` compatibility/capability checks.
+- integrate current OpenAI-supported Secure MCP Tunnel/connectivity without a
+  second state authority;
+- implement `doctor` ABI/capability checks.
 
 Exit criteria:
 
-- deterministic MCP fencing/security tests pass;
 - unrelated/stale fake connector cannot claim current work from bootstrap alone;
-- exact repeated ACK is idempotent, conflicting stale ACK is rejected;
-- transport restart cannot close/lose obligations;
-- Gate A is run and recorded on every declared supported ChatGPT plan/surface.
+- exact repeated ACK is idempotent, conflicting stale ACK rejected;
+- tunnel/shim restart cannot close/lose obligations;
+- all deterministic MCP fencing/security tests pass.
 
-## Phase 4 — generic browser/CDP foundation
+## Gate A — ChatGPT MCP mutation capability
+
+For each declared supported ChatGPT plan/surface:
+
+- install/configure the V1 Command Governor app through the supported path;
+- verify connector ABI/tool visibility;
+- perform a synthetic harmless mutation from the actual ChatGPT surface;
+- prove state-changing resume/ACK/input-action class tools are available;
+- prove stale binding generation fails closed.
+
+If the target account/surface is read/fetch-only under current product policy,
+record `write_capability_unavailable`. Do not fake ACK or mislabel a write as a
+read.
+
+## Phase 4 — generic Rust browser/CDP foundation
 
 - implement `governor-browser` trait and `chromiumoxide` driver;
-- launch/attach dedicated Chrome profile;
+- launch/attach dedicated headed Chrome profile;
 - target/page/network event plumbing;
 - browser process/profile ownership/restart supervision;
 - staged route/composer readiness diagnostics;
-- no ChatGPT private-write logic.
+- no protected private ChatGPT write logic.
 
 Exit criteria:
 
-- fake CDP/target crash tests pass;
-- no browser I/O can occur before durable delivery claim in adapter tests;
+- fake target/CDP crash tests pass;
+- no browser I/O precedes durable delivery claim;
 - profile ownership and secret-redaction tests pass.
 
 ## Gate B — authenticated headed ChatGPT browser spike
 
-Run the exact spike in `browser-transport.md` with a disposable bound conversation
-and fake obligations:
+Use a disposable bound conversation and fake local obligations:
 
-- login/profile persistence;
-- exact conversation binding;
-- per-message Command Governor app selection;
+- normal login/profile persistence;
+- exact `/c/<id>` binding and wrong-route fencing;
+- Command Governor app selection for each message;
 - 10/10 unique wake submissions;
-- strong accepted evidence;
-- wrong-chat fencing;
-- crash after claim and around Send activation;
-- ambiguous reconciliation without replay;
+- strong network/message accepted evidence;
+- pre-submit failure;
+- crash after claim and around exact Send activation;
+- ambiguity reconciliation without replay;
 - physical settlement != ACK;
-- rebind generation fencing;
+- bounded resume revision;
+- rebind-generation fencing;
 - browser restart;
 - MCP outage;
 - separate `--headless=new` comparison.
 
-A duplicate Send fails the gate.
+A duplicate Send fails Gate B.
 
 ## Phase 5 — `governor-chatgpt-web`
 
-Only after enough of Gate B is understood to freeze the adapter contract:
+After Gate B has frozen the required evidence contract sufficiently:
 
-- implement exact binding verification;
-- implement current app-selection structural control;
-- implement tiny deterministic wake payload;
-- implement durable `claimed` + `activation_armed` Send boundary;
-- implement CDP semantic accepted evidence;
-- implement passive/direct read reconciliation where robust;
-- implement physical assistant-turn observation;
-- implement bounded settled-without-ACK resume revisions;
-- keep private endpoint/schema observations internal and replaceable.
+- exact binding verification;
+- current message-scoped app selection;
+- deterministic tiny wake;
+- durable `claimed` + `activation_armed` fence;
+- CDP semantic accepted evidence;
+- passive/direct read reconciliation where robust;
+- physical assistant-turn observation;
+- bounded settled-without-ACK resume revisions;
+- all private endpoint/schema observations confined to this replaceable crate.
 
 Exit criteria:
 
-- all deterministic browser-delivery tests pass;
-- Gate B passes on supported headed Chrome platform;
+- deterministic browser-delivery suite passes;
+- Gate B passes on supported headed platform;
 - accepted/ambiguous never automatically replay;
-- exact same delivery revision cannot physically submit twice;
-- ChatGPT-specific code is confined to the adapter crate.
+- same delivery revision cannot physically submit twice.
 
 ## Phase 6 — end-to-end durable foreman loop
 
-Scenario:
+Prove:
 
 ```text
-Claude work
-  -> native terminal/input event
-  -> durable obligation + result/input identity
+managed worker
+  -> confirmed terminal/input evidence
+  -> durable result/input obligation
   -> browser wake accepted
   -> exact ChatGPT foreman turn
   -> MCP resume/fetch
   -> independent review/action
-  -> explicit ACK or input answer
+  -> explicit ACK or structured input answer
   -> obligation closes/resumes only on fenced evidence
 ```
 
-Inject daemon/browser/runtime/worker/tunnel restarts at every boundary.
+Inject daemon/browser/runtime/worker-host/worker/tunnel restarts at every boundary.
 
 Exit criteria:
 
 - no lost result/input obligation;
 - no duplicate browser or worker continuation;
 - no stale-generation ACK;
-- no task considered complete before independent review disposition;
+- no work considered complete before independent disposition;
 - `status`, `obligations`, and `doctor` explain every unresolved condition.
 
 ## Phase 7 — GitHub engineering integration
 
-- stable project/repository binding;
-- issue/commit/PR references and review evidence;
+- project/repository binding;
+- issue/commit/PR refs and review evidence;
 - source refs attached to obligations/results;
-- least-privilege auth path;
-- prompt-injection separation between GitHub content and Governor control fields.
+- least-privilege authentication path;
+- prompt-injection separation between GitHub data and Governor control fields.
 
-GitHub remains engineering truth; the local DB stores refs/provenance, not a
-shadow source-code repository.
+GitHub remains engineering truth; the local DB stores references/provenance, not a
+shadow repository.
 
 ## Phase 8 — Codex and additional adapters
 
 - Codex worker lifecycle adapter;
-- additional runtime adapters only when they can satisfy the same contract;
-- compatibility/capability matrix;
-- adapter conformance suite required before support claim.
+- additional runtimes/workers only when they satisfy the same fencing/durability
+  contract;
+- capability/support matrix;
+- adapter conformance required before support claim.
 
-Provider additions do not change obligation or browser semantics.
+Provider additions do not redefine obligation or browser semantics.
 
-## Phase 9 — hardening and public V1 release
+## Phase 9 — public V1 hardening
 
 - migration/backup/restore tooling;
-- security audit of local IPC/profile/artifact/hook boundaries;
+- local IPC/profile/artifact/hook/spool security audit;
 - crash/failpoint extended CI;
 - dependency/license/source review;
 - signed/reproducible release strategy where practical;
-- macOS first-class packaging, Linux and Windows support matrix;
-- documentation of unsupported ChatGPT plan/surface combinations;
+- macOS first-class packaging;
+- Linux/Windows support matrix;
+- documented unsupported ChatGPT/Claude combinations;
 - exact provenance/third-party notices.
 
 ## Later, not V1 correctness requirements
@@ -229,8 +259,8 @@ Provider additions do not change obligation or browser semantics.
 - multi-machine control plane;
 - multiple simultaneous foreman bindings with explicit routing policy;
 - team/multi-user authorization;
-- stronger OS sandboxing for workers;
+- stronger worker OS sandboxing;
 - official foreman/wake provider APIs when available.
 
-A future UI must never become the lifecycle authority. Human completion
-notifications remain optional operator convenience, not the primary wake design.
+A future UI never becomes lifecycle authority. Human completion notifications
+remain optional operator convenience, not the primary wake design.
