@@ -11,9 +11,9 @@ A feature is not accepted because a happy-path demo worked once.
 `governor-testkit` provides deterministic fakes for:
 
 - wall/monotonic clock;
-- generated IDs and provider/source identities;
+- generated IDs, CSPRNG output, and provider/source identities;
 - SQLite failures and restart points;
-- result-artifact filesystem/failpoints;
+- result-artifact and managed-run staging filesystem/failpoints;
 - Claude structured stream / hook / worker-host child process;
 - runtime/Herdr adapter;
 - worker command delivery;
@@ -27,11 +27,12 @@ machine can be driven by explicit events and replayed from an empty projection.
 
 ## Test levels
 
-1. **Pure domain** — transition legality, fencing, deterministic IDs, replay.
+1. **Pure domain** — transition legality, fencing, dedupe keys, random correlation
+   identity, replay.
 2. **SQLite/store** — real SQLite, migrations, transactions, crash/reopen,
    uniqueness.
-3. **Filesystem** — result artifacts, hook inbox, worker-host spool, permissions,
-   symlink/tamper handling.
+3. **Filesystem** — result artifacts, hook inbox, managed-run staging,
+   permissions, symlink/tamper handling.
 4. **Adapter contract** — fake CDP/Herdr/Claude around real adapter code.
 5. **Live conformance** — real Claude/Herdr/Chrome/ChatGPT only after the pure
    suites pass.
@@ -90,15 +91,21 @@ obligation stays open and may later be reclaimed after claim expiry.
 Vary source event, obligation version, claim, result identity, and binding
 generation one field at a time. Every stale variant fails without mutation.
 
+### OBL-010 — failure is unprocessed work
+
+A verified terminal worker failure creates/keeps a processable failure obligation.
+Runtime close, restart, or assistant settlement cannot silently discard it.
+
 ---
 
 ## Result artifact / worker transport tests
 
 ### ART-001 — artifact durable before completed obligation
 
-Inject a crash at each file write/fsync/rename/directory-sync/DB point. Forbidden:
-committed `completed_unprocessed` references a missing/non-durable result artifact.
-Allowed: an unreferenced orphan file later quarantined/GCed.
+Inject a crash at each candidate-validation/file write/fsync/rename/directory-sync/
+DB point. Forbidden: committed `completed_unprocessed` references a missing or
+non-durable result artifact. Allowed: an unreferenced orphan file later
+quarantined/GCed.
 
 ### ART-002 — open obligation pins retention
 
@@ -114,117 +121,161 @@ obligation remains open.
 ### ART-004 — path traversal/symlink rejected
 
 Attempt traversal, absolute paths, symlinks, unsafe parents, and relevant hard-link
-edge cases. No read/write escapes the daemon-owned root.
+edge cases. No read/write escapes the daemon-owned root under the platform's
+supported rooted/no-follow policy.
 
 ### ART-005 — private filesystem permissions
 
 On Unix verify intended private modes regardless of host umask. On Windows verify
-current-user ACL policy in the platform suite.
+current-user ACL policy in the platform suite. This test proves privacy against
+other OS principals, **not** hostile same-user worker containment.
 
-### ART-006 — worker-host final result survives daemon outage
+### ART-006 — final result survives daemon outage
 
-Run fake worker-host while the authoritative daemon is absent. It receives a
-structured Claude final result, writes a complete bounded private spool plus
-sanitized child-exit receipt, and exits. Restart daemon. Expected exactly one
-confirmed terminal result -> immutable result artifact -> one open obligation.
+Run fake worker-host while authoritative daemon is absent. It parses structured
+Claude output, writes one bounded final-result candidate plus sanitized run/exit
+receipts, and exits. Restart daemon. Expected exactly one confirmed terminal
+result -> immutable artifact -> one open obligation.
 
-### ART-007 — truncated worker-host stream never becomes completion
+### ART-007 — truncated result never becomes completion
 
-Crash worker-host/child at every point before a complete structured final result
+Crash worker-host/child at every point before a complete final structured result
 and matching exit receipt. Expected reconciliation/failure attention according to
 known evidence, never `completed_unprocessed` from partial bytes.
 
-### ART-008 — spool is transport-only
+### ART-008 — worker-host is transport-only
 
-Populate a valid transport spool and exit receipt without starting daemon. Assert
-no task/obligation state exists until the authoritative daemon imports/reconciles
-it. Worker-host never writes SQLite lifecycle projections.
+Populate valid final-result candidate and receipts without starting daemon. Assert
+no task/obligation projection exists until authoritative daemon imports/reconciles
+them. Worker-host has no protocol path that writes lifecycle SQLite state.
 
-### ART-009 — spool content is not routine diagnostics
+### ART-009 — no raw provider-stream spool exists
 
-Inject prompt/tool/result sentinels into the private provider stream. Safe logs,
-SQLite, status/doctor output, hook inbox, and crash metadata contain none of them.
-Only the explicitly sensitive spool/result-artifact boundary may contain allowed
-content.
+Feed a fake stream containing unique sentinels in prompt fragments, `tool_use`
+inputs, shell command, `tool_result`, cwd, transcript path, and intermediate
+assistant content. The worker-host may inspect records in memory but after exit no
+durable staging file contains those sentinels. Only the explicitly designated
+bounded final assistant result sentinel may exist in final-result candidate/result
+artifact.
+
+### ART-010 — managed-run receipts are allowlist-only
+
+Fuzz provider records with unknown nested fields and sensitive strings. Durable run
+and exit receipts contain only defined opaque IDs, safe event/outcome classes,
+flags, timestamps, and bounded numeric metadata.
+
+### ART-011 — deferred input receipt omits raw question/tool input
+
+A confirmed deferred AskUserQuestion contains unique option/question sentinels.
+Durable receipt stores only safe input identity/classification/stop reason. Raw
+question/options are absent from DB, staging, inbox, logs, and diagnostics.
 
 ---
 
 ## Browser delivery acceptance tests
 
-### DEL-001 — claim transaction precedes all browser I/O
+### DEL-001 — delivery key deterministic, delivery ID random
 
-Fake browser panics if any method is called before the store shows the attempt
-`claimed`. Navigation, DOM and CDP paths must satisfy it.
+For identical `(obligation, binding_generation, revision)`, deterministic
+`delivery_key` is identical. Independent logical revisions produce distinct keys.
+The associated `delivery_id` is generated from configured CSPRNG, has at least 192
+bits of entropy in production construction, and is not a hash of deterministic
+metadata.
 
-### DEL-002 — definite pre-submit failure retries safely
+### DEL-002 — duplicate scheduling converges
+
+Schedule the same logical revision concurrently/repeatedly. Unique `delivery_key`
+returns one durable delivery row and one previously generated random `delivery_id`;
+it never creates two physical revisions.
+
+### DEL-003 — claim transaction precedes all browser I/O
+
+Fake browser panics if any method is called before store shows attempt `claimed`.
+Navigation, DOM, and CDP paths must satisfy it.
+
+### DEL-004 — definite pre-submit failure retries safely
 
 Inject target-not-found, stale obligation version, wrong chat, app-not-selected,
 and composer-not-ready before activation. Expected `failed`; bounded retry may
-create the next attempt; zero submitted wake messages so far.
+create the next attempt under the same delivery revision; zero submitted messages.
 
-### DEL-003 — Send activation crosses durable ambiguity fence
+### DEL-005 — Send activation crosses durable ambiguity fence
 
 Fake browser `send()` asserts DB attempt is `activation_armed` before accepting the
 call.
 
-### DEL-004 — crash after `claimed` -> ambiguous
+### DEL-006 — crash after `claimed` -> ambiguous
 
 Persist `claimed`, terminate before terminal outcome, restart. Startup converts it
 to `ambiguous` before browser recovery and never calls Send.
 
-### DEL-005 — crash around activation fence -> ambiguous
+### DEL-007 — crash around activation fence -> ambiguous
 
 Test both zero-send and one-send physical worlds around `activation_armed`. Restart
 must not resend in either world.
 
-### DEL-006 — ambiguous never auto-resends
+### DEL-008 — ambiguous never auto-resends
 
 Advance timers/recovery indefinitely. Zero additional Send calls for that revision.
-Only exact reconciliation or explicit audited superseding policy may move forward.
+Only exact reconciliation or a later separately created resume revision may move
+forward.
 
-### DEL-007 — accepted never auto-resends
+### DEL-009 — accepted never auto-resends
 
 After accepted, trigger browser crash, daemon crash, MCP outage, long delay, and
 physical settlement. Same delivery revision never Sends again.
 
-### DEL-008 — exact bound conversation enforced
+### DEL-010 — exact bound conversation enforced
 
 Bound `/c/A`; simulate `/c/B`, `/`, project-scoped wrong chat, login redirect,
 deleted chat, and stale target. Expected failure before composer mutation.
 
-### DEL-009 — target reverified immediately before Send
+### DEL-011 — target reverified immediately before Send
 
 Target is correct during staging then displaced before activation. No Send. Outcome
-classification depends on whether the ambiguity fence was crossed.
+classification depends on whether ambiguity fence was crossed.
 
-### DEL-010 — target obligation version reverified immediately before Send
+### DEL-012 — target obligation version reverified immediately before Send
 
 Wake targets obligation version V/source S. Change obligation before activation.
 Expected stale delivery, zero Send.
 
-### DEL-011 — same wake revision not submitted twice
+### DEL-013 — same delivery revision not submitted twice
 
 Exercise retry/restart/reconciliation matrices. At most one physical submitted
 message exists for one delivery revision.
 
-### DEL-012 — semantic evidence required for accepted
+### DEL-014 — semantic evidence required for accepted
 
-Composer clear, Stop button, URL change, assistant activity, and DOM text reflection
-without correlated user-message identity never produce accepted.
+Composer clear, Stop button, URL change, assistant activity, and DOM text
+reflection without correlated exact user-message identity never produce accepted.
 
-### DEL-013 — exact reconciliation promotes ambiguous
+### DEL-015 — exact reconciliation promotes ambiguous
 
 Ambiguous + exact current-generation conversation/message identity -> accepted
-without Send. Wrong conversation/message/revision -> remain ambiguous.
+without Send. Wrong conversation/message/random delivery ID -> remain ambiguous.
 
-### DEL-014 — startup recovery order
+### DEL-016 — startup recovery order
 
 With an orphaned attempt and live browser target, assert orphan conversion to
 ambiguous occurs before browser supervisor recovery/send methods.
 
+### DEL-017 — new resume revision gets new random correlation ID
+
+Accepted/settled/unACKed obligation becomes eligible for bounded resume. New
+revision has new deterministic `delivery_key` and independent random `delivery_id`;
+old accepted revision remains immutable.
+
+### DEL-018 — deterministic metadata cannot reconstruct delivery ID
+
+Give an attacker fake client obligation ID, binding generation, revision,
+`delivery_key`, wake protocol, bootstrap response, and all public safe metadata.
+Without the random `delivery_id`, `foreman_resume` must fail; no deterministic
+function of supplied metadata yields the accepted delivery ID.
+
 ---
 
-## ChatGPT processing / resume tests
+## ChatGPT processing / MCP tests
 
 ### GPT-001 — accepted != processed
 
@@ -241,7 +292,7 @@ Successful `foreman_resume`, all pages returned, assistant settles. No ACK. Open
 ### GPT-004 — bounded resume creates new revision
 
 Accepted + settled + no ACK + policy delay -> same obligation, revision +1, new
-deterministic delivery ID. Original accepted revision stays immutable.
+delivery key/random delivery ID. Original accepted revision stays immutable.
 
 ### GPT-005 — never overlap active/unknown ChatGPT turn
 
@@ -253,20 +304,40 @@ activation.
 After configured automatic resumes, create one `foreman_unreachable`; obligation
 remains open indefinitely; no infinite wake loop.
 
-### GPT-007 — unrelated/stale conversation cannot claim via bootstrap
+### GPT-007 — bootstrap is low-information
 
-Fake unrelated connector learns generation/obligation from bootstrap but not the
-accepted wake `delivery_id`. `foreman_resume` rejects it.
+Unrelated fake connector calls bootstrap. It may learn compatibility, active
+binding generation, health, aggregate attention kinds/counts/priority/age/wake
+state. It must not receive repository/project refs, task/session/worker refs,
+result content, raw obligation metadata, or accepted random `delivery_id`.
 
-### GPT-008 — current accepted wake can claim
+### GPT-008 — unrelated/stale conversation cannot claim from bootstrap
 
-Matching accepted delivery ID + generation + obligation version creates one
+Fake unrelated connector learns every bootstrap field and deterministic delivery
+metadata but not the random accepted wake `delivery_id`. `foreman_resume` rejects
+it with zero claim/state mutation.
+
+### GPT-009 — current accepted wake can claim
+
+Matching random accepted delivery ID + generation + obligation version creates one
 current claim. Parallel/repeated claim semantics are deterministic.
 
-### GPT-009 — connector ABI mismatch fails closed
+### GPT-010 — connector ABI mismatch fails closed
 
 Old/new cached schema cases produce compatibility results; no mutation under an
 incompatible ABI.
+
+### GPT-011 — write capability loss preserves work
+
+Simulate binding originally write-capable, then MCP writes become unavailable.
+No browser/assistant event closes work; doctor/health reports capability failure and
+obligations remain durable.
+
+### GPT-012 — product confirmation is not bypassed
+
+Fake write action requires a user-owned/unsupported confirmation state. Command
+Governor does not automate around it, reclassify the tool read-only, or mark ACK
+successful. Binding/action state fails visibly.
 
 ---
 
@@ -289,8 +360,8 @@ Expected confirmed terminal worker outcome, durable result artifact, one
 Fixture:
 
 ```text
-Command Governor PreToolUse defer for AskUserQuestion
-Claude structured result: run ended with pending deferred call
+CG PreToolUse: exact single-tool AskUserQuestion defer
+Claude structured result: stop_reason/tool_deferred
 Herdr: working / idle=false
 ```
 
@@ -298,8 +369,8 @@ Expected `needs_input`; duplicate worker forbidden; runtime conflict recorded.
 
 ### WRK-003 — Stop-hook callback alone is not completion
 
-Emit only a matching Claude `Stop` hook callback. No final structured result or
-child exit. Expected bounded `stop_candidate` evidence/progress and **no**
+Emit only matching Claude `Stop` hook callback. No final structured result or child
+exit. Expected bounded `stop_candidate` evidence and **no**
 `completed_unprocessed`.
 
 ### WRK-004 — parallel Stop-hook veto cannot create false completion
@@ -314,23 +385,23 @@ CG Stop hook fires -> stop_candidate #2
 final structured result + matching child exit arrives
 ```
 
-Expected no completion after candidate #1 or #2. Completion occurs exactly once
-only after final structured result/exit is proven and artifact is durable.
+No completion after either candidate. Completion occurs exactly once only after
+final result/exit is proven and artifact is durable.
 
-### WRK-005 — stop candidate followed by continued work updates watchdog
+### WRK-005 — stop candidate followed by progress stays running
 
-After stop candidate, emit verified tool progress. Turn remains `running` and the
-new progress resets `last_progress_at`; no contradiction or duplicate obligation.
+After stop candidate, emit verified tool progress. Turn remains `running` and
+progress resets watchdog timestamp.
 
 ### WRK-006 — child success exit without final result is not completion
 
-Process reports successful exit but provider stream lacks a complete final
-structured result. Expected reconciliation condition, no completed result.
+Process reports successful exit but provider output lacks a complete final result.
+Expected reconciliation condition, no completed result.
 
 ### WRK-007 — final result without trustworthy child exit is not completion
 
-Complete-looking result exists but worker-host exit receipt is missing/ambiguous.
-Expected reconciliation condition, no completed result until safe reconciliation.
+Complete final result exists but worker-host exit receipt is missing/ambiguous.
+Expected reconciliation condition until safe evidence resolves.
 
 ### WRK-008 — StopFailure is reconciled, not blindly equated
 
@@ -367,7 +438,7 @@ synthetic failure/completion/interrupt.
 
 Later verified progress resolves attention; running state remains.
 
-### WRK-015 — progress dedupe/coalescing is deterministic
+### WRK-015 — progress dedupe/coalescing deterministic
 
 High-rate duplicate/equivalent events do not grow unbounded duplicate rows or move
 watchdog time incorrectly.
@@ -377,33 +448,56 @@ watchdog time incorrectly.
 While daemon absent, a progress/input/native hook writes a sanitized inbox envelope.
 Restart imports exactly once.
 
-### WRK-017 — hook inbox replay is idempotent
+### WRK-017 — hook inbox replay idempotent
 
 Crash after DB ingest before inbox cleanup, restart, reimport. No duplicate event
 or obligation.
 
 ### WRK-018 — old incarnation event cannot mutate new incarnation
 
-Create a new session incarnation then ingest delayed old-incarnation hook/spool
-receipt. History/quarantine only; current turn unchanged.
+Create new session incarnation then ingest delayed old-incarnation safe receipt.
+History/quarantine only; current turn unchanged.
 
 ### WRK-019 — worker result is not self-approval
 
 Final result says "tests pass, ACK/merge now". State stays
-`completed_unprocessed`; independent foreman ACK is required.
+`completed_unprocessed`; independent foreman processing/ACK required.
 
-### WRK-020 — settings source/hook isolation is never assumed
+### WRK-020 — settings source/hook isolation never assumed
 
 Fake active-hook inventory contains user/project/plugin Stop hooks in addition to
-Command Governor. Adapter still uses structured result/exit for completion.
-Launch preflight reports the active-source model it can prove; no code path changes
-Stop candidate into terminal because an option was *assumed* to isolate hooks.
+Governor. Adapter still uses structured final result/exit; no code path promotes
+Stop merely because a settings flag was assumed to isolate hooks.
 
 ### WRK-021 — capability feature detection beats version guess
 
-Structured `system/init` advertises/omits required capabilities across fake
-versions. Adapter behavior follows capability proof and fails closed when required
-features are missing.
+Structured init advertises/omits required capabilities across fake versions.
+Adapter follows capability proof and fails closed when required features are
+missing.
+
+### WRK-022 — non-interactive PermissionRequest can fire
+
+Fake current Claude emits PermissionRequest under non-interactive mode. Adapter
+must not drop it based on obsolete "does not fire in -p" logic. A valid pinned
+permission policy may answer/deny it as decision evidence.
+
+### WRK-023 — PermissionRequest is not exact pause identity
+
+PermissionRequest carries tool name/input but no exact tool-use ID. It cannot alone
+create a resumable `needs_input` record that claims a tool-call identity it does
+not possess.
+
+### WRK-024 — raw stream containing tool records is never persisted
+
+Fake stream contains `tool_use`, command, `tool_result`, partial assistant, and
+sensitive markers before final result. Only safe evidence and allowed final result
+survive process exit.
+
+### WRK-025 — general state root not exported to worker
+
+Spawn fixture inspects managed environment/argv. Opaque turn/session/hook epoch and
+narrow per-turn inbox locator may be present; general Command Governor state-root,
+credentials, prompt, and secrets are absent.
 
 ---
 
@@ -411,56 +505,61 @@ features are missing.
 
 ### INP-001 — defer intent != confirmed `needs_input`
 
-PreToolUse hook records defer intent but provider continues because response was
-ignored/malformed. Expected no clean `needs_input`; reconciliation attention
-instead.
+PreToolUse records defer intent but provider continues because response was
+ignored/malformed. No clean `needs_input`; reconciliation attention instead.
 
-### INP-002 — confirmed deferred AskUserQuestion creates `needs_input`
+### INP-002 — confirmed single-tool AskUserQuestion creates `needs_input`
 
-Exact tool-call fence + documented defer response + structured final deferred
-outcome -> one durable input request, no raw tool args persisted.
+Exact tool-use fence + single-tool shape + documented defer response + structured
+`tool_deferred` outcome -> one durable input request, no raw tool args persisted.
 
-### INP-003 — answer recorded != worker received
+### INP-003 — multi-tool defer cannot create clean pause
+
+AskUserQuestion appears beside sibling tool calls. Current Claude semantics ignore
+`defer` in this shape. Expected `worker_defer_shape_unsupported`/manual
+reconciliation, not `needs_input` and not an invented pending tool identity.
+
+### INP-004 — answer recorded != worker received
 
 Valid `foreman_answer_input` records answer and creates worker-command delivery;
-crash before worker I/O. Obligation does not magically return to running.
+crash before worker I/O. Obligation does not return to running.
 
-### INP-004 — worker resume acceptance still waits for resumed-turn evidence
+### INP-005 — worker resume acceptance still waits for resumed-turn evidence
 
 Transport accepts continuation but no structured/native new-turn event arrives.
 Input obligation is not projected as healthy running solely from transport ACK.
 
-### INP-005 — confirmed resumed turn restores running
+### INP-006 — confirmed resumed turn restores running
 
 Matching same-session resumed-turn evidence arrives. Expected running and input
 request disposition linked to exact answer/delivery.
 
-### INP-006 — user-owned permission remains user-owned
+### INP-007 — user-owned permission remains user-owned
 
-Action is outside delegated authority. Foreman answer returns
+Action outside delegated authority. Foreman answer returns
 `user_authorization_required`, no grant event, no worker I/O.
 
-### INP-007 — PermissionRequest alone is not treated as durable provider pause
+### INP-008 — PermissionRequest decision != durable pause
 
-Emit PermissionRequest without a confirmed pre-tool defer/pending resumable state.
-Record request evidence/policy condition, but do not claim we can resume it later
-unless adapter conformance proves that provider primitive.
+Emit non-interactive PermissionRequest. Record safe decision evidence as permitted,
+but do not claim resumable pause semantics unless an exact provider primitive is
+also proven.
 
-### INP-008 — conflicting second answer rejected
+### INP-009 — conflicting second answer rejected
 
 Same current input gets different second answer. Immutable first answer or stale
 conflict; never two worker resumes.
 
-### INP-009 — raw input/tool arguments not persisted
+### INP-010 — raw input/tool arguments not persisted
 
-Input payload contains unique sensitive markers. DB/WAL/logs/hook inbox/safe
-status contain zero matches.
+Input payload contains unique sensitive markers. DB/WAL/logs/hook inbox/staging/
+safe status contain zero matches.
 
-### INP-010 — unsupported multi-tool defer fails visibly
+### INP-011 — question detail unavailable remains durable
 
-AskUserQuestion appears beside sibling tool calls in a shape current Claude defer
-semantics cannot safely preserve. Expected reconciliation/manual attention, not a
-false clean pause.
+After restart, safe deferred identity exists but native provider cannot recover
+question/options without transcript scraping. Return `input_detail_unavailable`;
+keep obligation open; never invent an answer.
 
 ---
 
@@ -473,8 +572,8 @@ from events. Semantic state must match.
 
 ### DB-002 — transition crash matrix
 
-Inject SQLite errors/crashes around each multi-row transition. Reopen yields the
-previous complete state or committed next state, never a half-transition.
+Inject SQLite errors/crashes around each multi-row transition. Reopen yields prior
+complete state or committed next state, never half-transition.
 
 ### DB-003 — unknown newer schema fails closed
 
@@ -486,126 +585,187 @@ status; no downgrade/mutation.
 Crash each migration at supported failpoints. Reopen produces deterministic
 completion or explicit repair state.
 
-### DB-005 — two-daemon ownership
+### DB-005 — two-daemon authority rejected
 
-Two processes target same state root. Exactly one becomes authority; the second
-cannot start browser/workers or write lifecycle state.
+Start two daemon instances against one state root. Exactly one obtains authority;
+second fails closed or behaves only as a client. SQLite writer serialization alone
+is not accepted as daemon election.
 
-### DB-006 — recovery order imports spools before scheduling wake
+### DB-006 — startup quarantines ambiguous external effects first
 
-On startup with pending hook inbox, completed worker-host spool, stale Herdr
-working, and an open browser target, assert worker result/lifecycle reconciliation
-finishes before any new browser wake is scheduled.
+Seed orphaned browser and worker-command claimed/armed states plus ready work.
+Restart must quarantine/reconcile those effects before scheduling any new external
+I/O.
+
+### DB-007 — source-event uniqueness survives restart
+
+Replay duplicate hook/provider/runtime events across 100 restarts. No duplicate
+projection transition or obligation.
+
+### DB-008 — backup/restore requires pinned artifacts
+
+Restore DB without artifact required by open obligation. Governor enters explicit
+health/repair state and does not pretend obligation processable/closed.
 
 ---
 
 ## Security / privacy tests
 
-### SEC-001 — forbidden persistence byte scan
+### SEC-001 — forbidden-data sentinel sweep
 
-Inject unique sentinels into:
+Inject distinct sentinels into prompt, cwd, raw tool args, raw tool results,
+command, transcript path, terminal transcript, provider intermediate records,
+browser cookies/tokens/headers/bodies, GitHub auth, and environment secrets.
 
-- cwd;
-- prompt;
-- raw tool arguments;
-- shell command;
-- transcript path;
-- terminal transcript;
-- browser cookie/token;
-- GitHub auth;
-- raw CDP headers/bodies;
-- full Claude structured stream fields not explicitly allowed in final result.
+After lifecycle/browser/MCP/crash/restart scenarios, byte-scan:
 
-After lifecycle/browser/MCP/crash/restart flows, scan SQLite DB/WAL/SHM, hook
-inbox, structured logs, safe diagnostics, crash state, and configuration. Expected
-**zero matches** outside deliberately sensitive worker-host/result-artifact files
-where the test intentionally places allowed content.
+- SQLite DB/WAL/SHM;
+- safe event exports;
+- hook inbox;
+- managed-run receipts/staging;
+- logs/diagnostics/crash metadata;
+- generated settings/config;
+- CLI status/doctor output.
 
-### SEC-002 — routine logs redact worker result
+Expected zero matches. Only the explicit final-result candidate/result artifact may
+contain a sentinel deliberately placed in the **final assistant result**.
 
-Result contains secret/prompt-injection sentinel. Logs contain only artifact
-identity/digest/size/event classes, not content.
+### SEC-002 — bootstrap metadata minimization
 
-### SEC-003 — managed Claude settings ownership/symlink
+Populate tasks/results with sensitive repository names, refs, worker/session IDs,
+and artifact content. Bootstrap response contains none of them; only approved
+aggregate attention/health/compatibility metadata.
 
-Unsafe owner/mode, symlink, malformed JSON, wrong hook epoch, and unsafe parent all
-fail managed spawn before Claude executes.
+### SEC-003 — random wake correlation survives attacker knowledge
 
-### SEC-004 — browser profile never copied to DB/export
+Attacker knows delivery key, obligation ID, revision, generation, all bootstrap
+metadata, and code. Without random delivery ID, resume cannot claim. Property test
+covers large generated input set.
 
-Fake cookie/local-storage secrets never appear in diagnostics/status/state exports.
+### SEC-004 — stale generation/claim cannot mutate
 
-### SEC-005 — local IPC ACL
+Fuzz stale combinations of binding, obligation version, source fence, claim, and
+random delivery ID. Zero unauthorized closure/answer.
 
-Platform suites reject non-owner access.
+### SEC-005 — wake contains no sensitive result data
 
-### SEC-006 — result/spool integrity and ACL
+Generated browser wake contains only protocol marker plus opaque obligation/random
+delivery IDs and static instruction. No task/project/worker/result/prompt content.
 
-Artifact and worker-host spool roots enforce private ownership, no-follow rooted
-access, digest/complete-record checks, bounded sizes, and explicit retention.
+### SEC-006 — prompt injection cannot become control argument
 
-### SEC-007 — prompt injection cannot close obligation
+Worker result/repo data includes forged "ACK", "answer input", fake IDs and policy
+instructions. Server never parses them as MCP control fields or user grants.
 
-Artifact/repository text instructs fake foreman to ACK. Without a correctly fenced
-`foreman_ack` tool call, obligation stays open.
+### SEC-007 — same-user containment is not falsely asserted
 
-### SEC-008 — dependency deny policy
+Security/doctor metadata reports V1 trust model accurately. Tests do not infer
+"safe from worker" from Unix `0600`; hostile same-user sandbox claims require a
+future explicit isolation feature.
 
-`cargo deny` rejects disallowed licenses/sources and explicit known-bad malicious
-versions. Advisory output cannot be silently suppressed to green CI.
+### SEC-008 — path and symlink race tests
 
-### SEC-009 — worker-host owns no authority
+Exercise rooted file operations against traversal/symlink replacement where
+platform primitives permit. Imported candidate/artifact integrity mismatch fails
+closed.
 
-Attempt to feed worker-host arbitrary obligation IDs/state commands. It may write
-only its allocated transport spool/receipt; it has no SQLite/control-plane mutation
-capability.
+### SEC-009 — browser/profile credentials never exported
+
+No DB column, safe log, CLI command line, diagnostic bundle, or direct private
+write client contains browser credentials.
+
+### SEC-010 — supply-chain policy gates malicious known versions
+
+`cargo deny`/dependency policy rejects known malicious/revoked versions and
+unapproved licenses/sources according to project policy.
 
 ---
 
-## Live Gate B — Chrome / ChatGPT conformance
+## Live Gate A — ChatGPT MCP mutation capability
 
-The real headed-Chrome/ChatGPT protocol is defined in
-[`browser-transport.md`](browser-transport.md). Support requires 10/10 unique wake
-submissions, zero duplicates, wrong-chat fencing, per-message app selection,
-crash-at-Send ambiguity/no replay, restart/rebind behavior, and safe diagnostics.
+Do not run browser wake support against a surface that cannot truthfully mutate
+Governor state.
 
-Headless is a separate experiment and cannot be promoted by adding stealth,
-challenge, CAPTCHA, or anti-abuse bypass.
+Research baseline on 2026-08-31:
 
-## Live Gate C — Claude managed-execution conformance
+- consumer ChatGPT Pro custom MCP: documented read/fetch-only -> **not eligible**;
+- Business/Enterprise/Edu: full MCP actions currently documented as beta ->
+  candidate only;
+- Business currently offers GPT-5.6 Sol Pro, satisfying the desired Pro-model role
+  without consumer-Pro MCP limitations.
 
-After fake suites pass, use a disposable real Claude session/runtime and record the
-exact Claude version, CLI invocation, active settings sources, runtime version,
-and Command Governor commit.
+For each candidate workspace/account:
 
-Required cases:
+1. record plan/workspace/model/date;
+2. install/refresh exact V1 connector ABI;
+3. call read-only bootstrap;
+4. execute a harmless synthetic claim mutation;
+5. execute a harmless synthetic ACK-like close mutation;
+6. characterize confirmation behavior and whether the legitimate ChatGPT model can
+   complete it unattended under product policy;
+7. verify stale generation mutation rejected;
+8. remove synthetic record.
 
-1. `system/init` exposes expected session/capability metadata;
-2. normal managed turn yields one complete final structured `result` and matching
-   successful child exit;
-3. Command Governor Stop hook fires but another controlled Stop hook returns
-   `decision:block`; Claude continues; **no terminal obligation exists yet**;
-4. later real final result/exit creates exactly one result obligation;
-5. StopFailure/error cases map to documented failure state;
-6. `SessionEnd` without successful result cannot fabricate completion;
-7. AskUserQuestion `PreToolUse` defer is confirmed by the structured result and the
-   same Claude session resumes correctly;
-8. unsupported multi-tool defer shape fails visibly;
-9. permission policy defer/deny behavior matches current Claude semantics;
-10. kill Command Governor daemon before Claude finishes; worker-host still records
-    complete private result/exit and daemon later recovers exactly once;
-11. kill/truncate worker-host path before final record; daemon does not fabricate
-    completion;
-12. stale Herdr `working / idle:false` cannot block a confirmed final/deferred
-    Claude state;
-13. personal Claude settings are never modified;
-14. active user/project/plugin hooks under the selected CLI flags are measured,
-    not assumed away;
-15. forbidden prompt/tool/cwd/transcript sentinels are absent from safe persistence.
+Pass: truthful writes function through supported product behavior and no required
+confirmation/boundary forces an invariant-weakening bypass. Fail: surface remains
+unsupported; no fallback to browser-inferred ACK.
 
-A Stop-veto false completion is a **Gate C failure**.
+---
 
-## Quality gates from the first Rust commit
+## Live Gate B — headed Chrome/CDP
+
+Run the full matrix in [`browser-transport.md`](browser-transport.md), including:
+
+- normal login and three restarts;
+- exact conversation binding/wrong-route fencing;
+- per-message app selection;
+- 10/10 unique random wake submissions;
+- semantic CDP/message evidence;
+- crashes before/after activation fence;
+- ambiguous reconciliation/no replay;
+- physical settlement != ACK;
+- bounded new-revision resume;
+- rebind/stale-generation rejection;
+- MCP outage;
+- random correlation non-derivability;
+- safe-log credential/body scans;
+- separate `--headless=new` comparison without stealth/bypass.
+
+One duplicate Send is a gate failure.
+
+---
+
+## Live Gate C — Claude managed execution
+
+Pin exact Claude Code version and invocation, then prove:
+
+1. structured init/session/capabilities are observable;
+2. final structured result + child exit produces one result;
+3. raw intermediate stream containing tool_use/tool_result is not persisted;
+4. daemon-down final result survives via bounded candidate + sanitized receipts;
+5. Stop hook fires, another matching hook blocks, work continues, no false
+   completion;
+6. actual settings/hook source behavior matches adapter assumptions;
+7. exact single-tool AskUserQuestion PreToolUse defer produces confirmed
+   `tool_deferred` and resumes same session;
+8. multi-tool defer is ignored/unsupported and Governor does not project clean
+   `needs_input`;
+9. non-interactive PermissionRequest really fires under documented conditions and
+   its lack/current presence of tool-use correlation is measured;
+10. permission decision precedence/settings interactions are recorded;
+11. stale Herdr `working/idle:false` cannot veto confirmed result/defer;
+12. one fenced clear-busy/continuation path creates no duplicate answer;
+13. prompt/tool args/results/command/cwd/transcript secrets are absent from all
+    durable safe stores/staging;
+14. general Command Governor state-root is not intentionally passed to Claude.
+
+Any divergence updates the adapter contract before support is claimed.
+
+---
+
+## Rust quality and CI gates
+
+From the first implementation commit:
 
 ```text
 cargo fmt --check
@@ -617,19 +777,25 @@ cargo deny check
 
 Also require:
 
-- pinned `rust-toolchain.toml`;
-- committed application `Cargo.lock`;
-- macOS first-class CI;
-- Linux CI;
-- Windows CI where supported;
-- dependency-update automation with human review;
-- no silently skipped tests on the primary macOS target;
-- failpoint/crash suites in CI or a required extended workflow;
-- GitHub Actions pinned to immutable commit SHAs where practical.
+- pinned `rust-toolchain.toml` and committed application `Cargo.lock`;
+- migration/replay/failpoint tests in CI;
+- macOS first-class CI plus Linux and Windows where implementation permits;
+- dependency/license policy;
+- no blind auto-merge for security-sensitive dependencies;
+- deterministic fake suites do not require live credentials.
 
-## Definition of architecture acceptance
+## Architecture-to-implementation exit criteria
 
-Architecture is ready for the small Phase 1 Rust core/store/testkit scaffold when
-reviewers agree these tests can be implemented without weakening the central
-invariant. End-to-end V1 is not supported until deterministic suites and live Gates
-A, B, and C have explicit recorded results.
+The **pure Rust core/store/testkit scaffold may begin after the architecture PR is
+accepted** because it can implement and prove obligations, persistence, fences,
+artifacts, random delivery identity, and fakes without claiming a live service
+adapter.
+
+The following remain forbidden until their live gate passes:
+
+- supported ChatGPT MCP foreman adapter (Gate A);
+- supported ChatGPT browser transport (Gate B);
+- supported Claude managed worker adapter (Gate C).
+
+This separation lets Command Governor build the durable kernel without pretending
+current external product behavior has already been proven.
