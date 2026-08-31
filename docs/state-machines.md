@@ -93,13 +93,16 @@ Preferred V1 is structured non-interactive Claude execution.
 
 1. final structured programmatic `result` + matching worker-host child exit —
    terminal outcome for the exact managed run;
-2. strong non-blockable/native evidence such as `StopFailure`, `SessionEnd`, or a
-   **confirmed** `PreToolUse` defer — interpreted with the structured/process
+2. strong native evidence such as `StopFailure`, `SessionEnd`, or a **confirmed
+   single-tool `PreToolUse` defer** — interpreted with the structured/process
    outcome;
 3. `Stop` hook callback — `stop_candidate` only because another parallel Stop hook
    may block stopping;
-4. Herdr/process-session observation — transport evidence;
-5. PTY idle/repaint — fallback diagnostics only.
+4. `PermissionRequest` hook — permission-decision evidence; current non-interactive
+   hooks can fire, but its input lacks the same exact `tool_use_id` correlation as
+   `PreToolUse`, so it is not by itself a durable pause/resume identity;
+5. Herdr/process-session observation — transport evidence;
+6. PTY idle/repaint — fallback diagnostics only.
 
 "Newest timestamp wins" is rejected. Evidence class + fence wins.
 
@@ -109,19 +112,20 @@ A Stop callback can record `stop_candidate` but cannot publish
 `completed_unprocessed`.
 
 Successful completion requires a complete final structured result for the exact
-managed run plus the matching child exit receipt. The daemon extracts the bounded
-final response from the private worker-host spool, makes the immutable result
-artifact durable, then atomically publishes the terminal event/projection and one
-processing obligation.
+managed run plus the matching child exit receipt. The worker-host parses provider
+output online, persists the bounded final-result candidate and sanitized run/exit
+receipts only, then the daemon makes the immutable result artifact durable and
+atomically publishes the terminal event/projection and one processing obligation.
 
-Missing/truncated stream, unknown exit, or artifact failure creates reconciliation
-attention—not fake processable completion.
+Missing/truncated final result, unknown exit, or artifact failure creates
+reconciliation attention—not fake processable completion. Intermediate provider
+stream records are not durably spooled.
 
 ### Failure
 
-`StopFailure`, nonzero child exit, explicit interrupt, transport loss, and malformed
-provider output are distinct evidence classes. Only documented accepted
-combinations project `failed`.
+`StopFailure`, nonzero child exit, explicit interrupt, transport loss, malformed
+provider output, and denied permission are distinct evidence classes. Only
+documented accepted combinations project `failed`.
 
 ### Stop-veto race
 
@@ -140,7 +144,7 @@ No completion occurs until the final result/exit plus durable artifact.
 ## 3. Durable `needs_input`
 
 Input is durable only when the provider/runtime is actually in a safely resumable
-blocked state—not merely because a hook tried to request one.
+blocked state—not merely because a hook observed or attempted a decision.
 
 ### Input classes
 
@@ -149,9 +153,10 @@ blocked state—not merely because a hook tried to request one.
 - `runtime_input`
 - `provider_elicitation` when exact resumability is proven
 
-For preferred managed `claude -p`, tool/permission decisions are detected at
-`PreToolUse` because current Claude docs say **`PermissionRequest` hooks do not
-fire in non-interactive `-p` mode**.
+For preferred managed `claude -p`, exact durable out-of-band pause/resume uses a
+confirmed **single-tool** `PreToolUse` defer when supported. Current Claude docs
+state that `defer` is ignored when multiple tool calls are emitted together, so a
+multi-tool shape cannot become clean `needs_input`.
 
 The SQLite ledger stores safe opaque identity/classification and answer shape, not
 raw Claude tool arguments/question payloads.
@@ -161,28 +166,34 @@ raw Claude tool arguments/question payloads.
 Preferred sequence:
 
 1. `PreToolUse` identifies exact fenced tool call;
-2. Command Governor records safe defer intent and returns current documented
+2. verify the current event represents a single tool call eligible for defer;
+3. Command Governor records safe defer intent and returns current documented
    non-interactive `defer` decision;
-3. structured managed-run outcome proves the call remains pending/deferred;
-4. only then project `needs_input`.
+4. structured managed-run outcome proves `tool_deferred`/equivalent and the call
+   remains pending;
+5. only then project `needs_input`.
 
-If the defer response is ignored/malformed or a multi-tool shape cannot be safely
-preserved, create reconciliation attention rather than a clean input state.
+If the defer response is ignored/malformed, or a multi-tool shape is present,
+create reconciliation/manual attention rather than a clean input state.
 
 ### Permission policy
 
-In managed `-p`, `PreToolUse` is also the permission-policy boundary:
+Current Claude documentation says `PermissionRequest` hooks can run in
+non-interactive sessions that cannot display a prompt. If no hook decides, the
+permission is denied. V1 therefore does not discard this signal.
 
+However, current `PermissionRequest` input contains tool name/input without the
+same `tool_use_id` correlation available to `PreToolUse`. Therefore:
+
+- `PreToolUse` is the preferred exact tool-call policy/defer boundary;
+- `PermissionRequest` may produce a permission decision under pinned-release
+  conformance, but cannot by itself claim a durable resumable pause identity;
 - already delegated ordinary engineering action may proceed only as Claude's
   current settings/permission semantics allow;
-- out-of-band foreman/user decisions are deferred where current tool shape supports
-  it;
 - destructive, credential-sensitive, materially broader, or unknown action is
   user-owned and fails closed.
 
-A hook allow is not assumed to override deny/ask settings. `PermissionRequest`
-belongs only to an interactive/future adapter mode whose semantics are separately
-proven.
+A hook allow is not assumed to override deny/ask settings.
 
 ### Answer/resume
 
@@ -197,14 +208,25 @@ restore `running` until matching structured/native resumed-turn evidence arrives
 
 ### Identity
 
+V1 separates deterministic dedupe identity from the correlation token carried in
+the wake:
+
 ```text
-delivery_id = H(
-  "command-governor/wake/v1",
+delivery_key = H(
+  "command-governor/wake-key/v1",
   obligation_id,
   binding_generation,
   delivery_revision
 )
+
+delivery_id = CSPRNG(>=192 bits)
 ```
+
+`delivery_key` is a non-secret idempotency key. `delivery_id` is generated once and
+persisted with the durable delivery, appears in the accepted browser wake, is not
+returned by bootstrap/status, and is required by `foreman_resume` as an
+anti-confusion possession fence. Knowing the deterministic inputs must not reveal
+`delivery_id`.
 
 The delivery snapshots target obligation version/source event. If the target
 changes before Send, the wake is stale and cannot submit.
@@ -264,8 +286,8 @@ Automatic reconciliation may only promote `ambiguous -> accepted` with exact
 already-submitted message evidence. Absence is not proof of no submission.
 Accepted/ambiguous is frozen and never automatically resent.
 
-A later bounded foreman resume is a **new delivery revision**, not another attempt
-on the old accepted/ambiguous wake.
+A later bounded foreman resume is a **new delivery revision** with a new random
+`delivery_id`, not another attempt on the old accepted/ambiguous wake.
 
 ## 5. Exact foreman binding
 
@@ -353,14 +375,18 @@ failure, completion, interrupt, or duplicate worker.
 3. Duplicate confirmed terminal source events create at most one result obligation.
 4. Claude Stop callback alone cannot create `completed_unprocessed`.
 5. A Stop candidate blocked by another hook cannot create completion.
-6. Managed `claude -p` does not depend on `PermissionRequest` hooks.
-7. Old session-incarnation events cannot mutate current incarnation.
-8. Old binding generation cannot ACK/answer current work.
-9. Browser attempt is `claimed` before any browser I/O.
-10. Send ambiguity fence is durable before exact Send.
-11. Startup quarantines orphaned claimed/armed attempts before browser recovery.
-12. Accepted/ambiguous browser delivery is never automatically resent.
-13. Browser accepted != ChatGPT settled != foreman ACK.
-14. Confirmed structured/native worker result/input beats stale Herdr `working`.
-15. Watchdog creates attention, never fake terminal state.
-16. Foreman answer cannot grant authority outside recorded user policy.
+6. A clean managed `claude -p` defer requires a confirmed single-tool deferred
+   boundary; multi-tool defer cannot fabricate `needs_input`.
+7. `PermissionRequest` is handled according to pinned non-interactive semantics but
+   is not treated as an exact durable pause identity without a matching fence.
+8. Old session-incarnation events cannot mutate current incarnation.
+9. Old binding generation cannot ACK/answer current work.
+10. Browser attempt is `claimed` before any browser I/O.
+11. Send ambiguity fence is durable before exact Send.
+12. Startup quarantines orphaned claimed/armed attempts before browser recovery.
+13. Accepted/ambiguous browser delivery is never automatically resent.
+14. Browser accepted != ChatGPT settled != foreman ACK.
+15. Confirmed structured/native worker result/input beats stale Herdr `working`.
+16. Watchdog creates attention, never fake terminal state.
+17. Deterministic delivery metadata cannot be used to derive the random wake
+   `delivery_id` required for `foreman_resume`.
