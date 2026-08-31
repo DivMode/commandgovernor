@@ -1,6 +1,6 @@
 # Command Governor V1 architecture
 
-Status: **proposed implementation architecture**  
+Status: **proposed implementation architecture — independently reviewed, live adapter gates remain**  
 Research snapshot: [2026-08-31 technology review](research/2026-08-31-technology-review.md)
 
 ## Mission and invariant
@@ -16,6 +16,28 @@ runtimes, or Command Governor restart.
 
 V1 is a Rust daemon + CLI. No conventional GUI and no human completion-notification
 subsystem is part of correctness.
+
+## Current ChatGPT deployment constraint
+
+The architecture requires state-changing MCP operations for claim, ACK, and input
+answers. As of the 2026-08-31 review, OpenAI's published ChatGPT developer-mode
+policy says consumer **ChatGPT Pro custom MCP is read/fetch-only**; full custom MCP
+modify/write actions are currently available to Business, Enterprise, and Edu beta
+surfaces. Business currently offers the GPT-5.6 Sol Pro model, so a Business
+workspace can be a current end-to-end V1 foreman target when the live capability
+gate passes.
+
+Therefore:
+
+- the Rust kernel/store/testkit may proceed independently;
+- **consumer ChatGPT Pro is not currently a supported end-to-end V1 foreman
+  surface** because it cannot truthfully perform `foreman_ack`;
+- Business/Enterprise/Edu remain candidates, subject to the real account/surface
+  capability and confirmation-behavior spike;
+- no browser signal, assistant settlement, or mislabeled read tool may substitute
+  for explicit ACK.
+
+This is a product-capability constraint, not a reason to weaken the invariant.
 
 ## Authority model
 
@@ -55,14 +77,16 @@ command-governor CLI ── owner-local IPC ──► daemon
 
 Herdr/session runtime ──► command-governor worker-host claude <opaque-turn-id>
                               ├── launches/resumes `claude -p`
-                              ├── private bounded structured-stream spool
-                              └── sanitized child-exit receipt
+                              ├── parses structured output online
+                              ├── durable bounded final-result candidate only
+                              └── sanitized run + child-exit receipts
 ```
 
 There is one orchestration authority: the daemon. The Secure MCP Tunnel and Claude
 worker-host are transport children with **zero task/obligation/binding authority**.
 The worker-host exists so Claude can finish while the daemon is restarting without
-losing the provider's final structured result.
+losing the final reviewable result. It does **not** persist the complete provider
+stream.
 
 ## Rust workspace proposal
 
@@ -153,14 +177,18 @@ A terminal obligation is useless if the actual result still lives only in a PTY.
 
 V1 uses two distinct private content boundaries:
 
-1. **worker-host spool** — temporary sensitive structured provider output that can
-   survive daemon restart; owns no lifecycle authority;
-2. **immutable result artifact** — bounded final worker result required for review,
-   referenced by SQLite and pinned while any open obligation needs it.
+1. **managed-run staging** — the worker-host parses Claude structured output online
+   and persists only sanitized lifecycle/run receipts plus, when a complete final
+   result arrives, one bounded final-result candidate. Raw stream records, prompt
+   text, tool arguments/results, commands, cwd, transcript paths, and secrets are
+   never durably spooled;
+2. **immutable result artifact** — the bounded final worker result required for
+   review, referenced by SQLite and pinned while any open obligation needs it.
 
 The result artifact is made durable **before** the transaction publishes
 `completed_unprocessed`. Full terminal/provider transcripts do not belong in the
-SQLite event ledger. GitHub commit/PR refs are complementary evidence.
+SQLite event ledger or any worker-host spool. GitHub commit/PR refs are
+complementary evidence.
 
 ## Managed Claude lifecycle
 
@@ -175,6 +203,10 @@ structured output. Successful terminal proof is:
 
 1. complete final structured `result` for the exact fenced run; plus
 2. matching child-command/process exit receipt from the worker-host.
+
+The worker-host parses this stream online and durably retains only the bounded
+final-result candidate plus sanitized receipts. It does not persist intermediate
+provider records.
 
 `StopFailure`, `SessionEnd`, structured failure, interrupt, and process loss are
 separate evidence classes with explicit adapter rules. A stale Herdr `working`
@@ -195,16 +227,23 @@ the chosen invocation.
 
 ### Input and permission in preferred `claude -p`
 
-For `AskUserQuestion` and out-of-band tool decisions, prefer current documented
-`PreToolUse` deferral where conformance proves the exact tool shape is safely
-resumable. Project `needs_input` only after the structured managed-run result
-confirms the defer actually took effect.
+For `AskUserQuestion` and other out-of-band decisions, current documented
+`PreToolUse` deferral is the preferred durable pause mechanism **only when exactly
+one tool call is being processed and conformance proves the tool shape can be
+resumed**. Current Claude documentation says `defer` in `-p` is ignored when
+multiple tool calls are emitted together; that case must not be projected as a
+clean `needs_input` pause.
 
-Current Claude documentation says **`PermissionRequest` hooks do not fire in
-non-interactive `-p` mode**. Therefore managed V1 does not depend on
-`PermissionRequest`; automated permission policy is implemented at `PreToolUse`.
-An interactive/future Claude adapter may use PermissionRequest only after separate
-conformance.
+Project `needs_input` only after the structured managed-run result confirms the
+defer actually took effect (`tool_deferred`/equivalent current structured proof).
+
+Current Claude documentation also says `PermissionRequest` hooks **can run in
+non-interactive sessions that cannot show a prompt**; if no hook decides, the tool
+is denied. In current hook input, `PermissionRequest` includes the tool name/input
+but does not carry the same `tool_use_id` fence as `PreToolUse`, so V1 treats it as
+a permission-decision signal, not as a generic durable pause/resume identity.
+`PreToolUse` remains the preferred exact tool-call policy/defer boundary when a
+stable tool-use fence is needed.
 
 High-risk, destructive, credential-sensitive, materially broader, or unknown
 requests stay user-owned. A worker-generated request cannot widen authority, and a
@@ -265,14 +304,23 @@ See [browser transport](browser-transport.md).
 
 ## Browser delivery semantics
 
-Conceptual deterministic ID:
+Separate **idempotency identity** from **wake possession correlation**:
 
 ```text
-delivery_id = H("command-governor/wake/v1",
-                obligation_id,
-                binding_generation,
-                delivery_revision)
+delivery_key = H("command-governor/wake-key/v1",
+                 obligation_id,
+                 binding_generation,
+                 delivery_revision)
+
+delivery_id = CSPRNG(>=192 bits)   # opaque random correlation ID
 ```
+
+`delivery_key` is a non-secret deterministic dedupe key and never authorizes a
+foreman mutation. `delivery_id` is generated once when the delivery row is created,
+persisted durably, carried in the browser wake, omitted from bootstrap/status, and
+required by `foreman_resume` as an anti-confusion possession fence. Connector
+authentication and all obligation/generation/version fences remain required; the
+random ID is not sole authentication.
 
 The delivery also snapshots target obligation version/source event.
 
@@ -310,13 +358,14 @@ Use official Rust `rmcp` with a deliberately small stable V1 ABI:
 
 Resume/ACK/input answer are truthful mutations. Because MCP does not currently
 supply a documented trustworthy ChatGPT conversation principal, resume also
-requires the opaque accepted wake `delivery_id`; bootstrap does not disclose it.
-Resume mints the claim needed for later mutation.
+requires the random accepted wake `delivery_id`; bootstrap/status do not disclose
+it. Resume mints the claim needed for later mutation.
 
 Current ChatGPT plan/surface capabilities mean write-capable MCP cannot be assumed.
-`chatgpt bind` must feature-test the real account with a synthetic harmless
-mutation. If writes are unavailable, mark that combination unsupported—do not fake
-ACK from browser/assistant state or mislabel a mutation as read-only.
+Consumer Pro is currently read/fetch-only and therefore unsupported for the
+end-to-end V1 foreman loop. Business/Enterprise/Edu candidates must still pass the
+real account capability preflight; do not fake ACK from browser/assistant state or
+mislabel a mutation as read-only.
 
 See [MCP contract](mcp-contract.md).
 
@@ -333,18 +382,30 @@ Use bundled `rusqlite` with one daemon-owned DB actor:
 - compare-and-swap fences;
 - no ORM;
 - no browser cookies/tokens, raw tool args, terminal transcripts, or complete
-  provider streams in the ledger.
+  provider streams in the ledger or durable worker staging.
 
 See [data model](data-model.md).
 
-## Local IPC / secrets
+## Local IPC / secrets and V1 trust boundary
 
 CLI uses owner-local IPC: Unix socket on macOS/Linux, named pipe on Windows where
 implemented. Loopback HTTP is only a fallback with an owner-local capability.
 
-Chrome profile, result artifacts, worker-host spools, hook inbox, database, logs,
+Chrome profile, result artifacts, managed-run staging, hook inbox, database, logs,
 and tunnel credentials have separate private paths. Secrets do not go in argv or
 structured logs when a safer mechanism exists.
+
+V1's local administrative trust root is the OS user account. A Claude/tool process
+running as that same user is **not sandbox-contained by owner-only file modes** and
+could maliciously tamper with Governor state if fully compromised or deliberately
+hostile. Command Governor minimizes paths/capabilities exposed to workers and its
+own worker-host code writes only allocated staging paths, but this is an
+application boundary, not same-user OS isolation. Hostile-worker containment would
+require a future separate OS identity/sandbox/broker and is not claimed by V1.
+
+Managed worker environments therefore receive only the opaque correlation values
+needed by hooks; the full Command Governor state-root path is not intentionally
+exported to Claude as a generic environment variable.
 
 ## GitHub
 
@@ -363,7 +424,8 @@ Before new orchestration work:
    rules before new I/O;
 5. replay/validate projections;
 6. ingest/dedupe sanitized hook inbox;
-7. reconcile worker-host spools/exit receipts and publish only proven results;
+7. reconcile managed-run final-result candidates/run+exit receipts and publish
+   only proven results;
 8. verify artifacts required by open obligations;
 9. reconcile structured/native worker evidence against runtime observations;
 10. restore watchdog schedules without fabricating terminal state;
@@ -378,22 +440,25 @@ Missing evidence never becomes success.
 - GUI/menu-bar app as correctness layer;
 - human completion notifications;
 - hosted multi-tenant authority;
-- full terminal/provider transcript database;
+- full terminal/provider transcript database or raw provider-stream spool;
 - direct protected private ChatGPT write protocol;
 - CAPTCHA/Turnstile/Sentinel/PoW/rate/entitlement bypass;
 - multiple active foreman conversations;
 - exactly-once claims from external interfaces without idempotency;
 - Herdr idle/screen state as semantic completion truth;
 - Claude Stop callback alone as completion;
-- `PermissionRequest` as a managed `-p` input primitive;
-- worker self-approval.
+- worker self-approval;
+- hostile same-user worker/process containment.
 
 ## Live gates
 
 ### Gate A — ChatGPT MCP mutation
 
-Target ChatGPT plan/surface must prove state-changing foreman tools on the actual
-account. If unavailable, the surface is unsupported without weakening ACK.
+A target Business/Enterprise/Edu ChatGPT surface must prove state-changing foreman
+tools on the actual account, including any confirmation behavior relevant to
+unattended processing. Consumer Pro is documented read/fetch-only as of this
+review and is not a Gate A candidate unless OpenAI changes the product capability.
+If writes are unavailable, the surface is unsupported without weakening ACK.
 
 ### Gate B — headed Chrome/CDP
 
@@ -406,13 +471,16 @@ restart, MCP outage, and generation fencing. Headless is separate/experimental.
 Pinned Claude invocation must prove:
 
 - structured init/capabilities;
-- final structured result + child exit;
+- final structured result + child exit while raw intermediate stream records are
+  not persisted;
 - parallel Stop-hook veto without false completion;
 - actual settings/hook-source behavior;
-- confirmed AskUserQuestion/PreToolUse defer + same-session resume;
-- managed permission decisions through PreToolUse rather than unavailable `-p`
-  PermissionRequest hooks;
-- daemon-offline worker-host recovery;
+- confirmed AskUserQuestion/PreToolUse single-tool defer + `tool_deferred`
+  structured result + same-session resume;
+- multi-tool defer is detected as unsupported and never projected as clean pause;
+- non-interactive `PermissionRequest` behavior and its weaker correlation are
+  handled exactly as the pinned release documents;
+- daemon-offline worker-host final-result/receipt recovery;
 - stale Herdr working reconciliation;
 - forbidden-data non-persistence.
 
@@ -420,4 +488,6 @@ Pinned Claude invocation must prove:
 
 The architecture is suitable for a **small pure Rust core/store/testkit Phase 1
 scaffold after this architecture PR is reviewed/accepted**. ChatGPT and Claude
-service adapters remain gated capabilities, not assumptions.
+service adapters remain gated capabilities, not assumptions. End-to-end V1 foreman
+automation currently targets a write-capable ChatGPT workspace surface, not
+consumer Pro.
