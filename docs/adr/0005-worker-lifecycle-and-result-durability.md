@@ -17,11 +17,13 @@ shows that is too strong. All matching hooks can run in parallel, and a `Stop` h
 can return a blocking decision that makes Claude continue. Our hook observing a
 Stop candidate therefore does not prove that the response actually ended.
 
-There is also a durability problem at the process boundary. If Command Governor is
-restarting while Claude finishes, a completion signal or final structured result
-cannot exist only in the daemon's volatile stdout reader. And if
-`completed_unprocessed` points only at a terminal/session, closing that runtime can
-erase the result while the obligation remains.
+There is also a durability/privacy problem at the process boundary. If Command
+Governor is restarting while Claude finishes, a completion signal or final result
+cannot exist only in the daemon's volatile stdout reader. But persisting Claude's
+entire structured stream is also unacceptable: current stream-json output can
+include tool-use/tool-result records, so a raw spool can persist tool arguments,
+commands, results, prompts, or other transcript-like content that Command Governor
+explicitly forbids from durable control-plane storage.
 
 ## Decision
 
@@ -46,7 +48,7 @@ and transport loss are separate evidence classes. The adapter normalizes their
 allowed combinations explicitly instead of using event-name intuition or "newest
 status wins."
 
-### A small Rust worker-host preserves the structured result across daemon restart
+### A small Rust worker-host preserves only the reviewable result and sanitized receipts
 
 A managed Claude process is launched/resumed through a narrow Rust transport mode
 owned by the Command Governor binary, conceptually:
@@ -55,20 +57,29 @@ owned by the Command Governor binary, conceptually:
 Herdr / session runtime
   -> command-governor worker-host claude <opaque-turn-id>
        -> launches/resumes `claude -p`
-       -> captures the structured stream in an owner-private bounded spool
-       -> writes a sanitized child-exit receipt
+       -> parses structured stdout online
+       -> durably writes one bounded final-result candidate when complete
+       -> durably writes sanitized run/child-exit receipts
        -> exits
 ```
 
 The worker-host is **not** a second orchestration daemon. It owns no tasks,
 obligations, browser state, foreman state, or lifecycle projections. Its only job
-is to make the provider transport/result recoverable when the authoritative daemon
-is temporarily absent.
+is to make the final reviewable provider result recoverable when the authoritative
+daemon is temporarily absent.
 
-The sensitive transport spool is separate from SQLite and routine logs. The daemon
-later validates the fenced stream/exit receipt, extracts only the bounded final
-worker result needed for review, and commits that result to the immutable result
-artifact store.
+The worker-host **does not persist the complete structured provider stream**.
+Intermediate provider records are processed in memory and discarded after the
+minimum safe lifecycle evidence is extracted. Durable run receipts may contain
+only allowlisted opaque IDs, safe event/outcome classes, completeness flags,
+timestamps, and sanitized child-exit metadata. They may not contain prompt text,
+raw tool arguments/results, shell commands, cwd, transcript paths, terminal text,
+secrets, or generic provider JSON.
+
+When a complete final result arrives, the worker-host writes only the bounded final
+assistant result needed for independent review to an owner-private candidate file.
+The daemon later validates the exact run/result/exit fences and promotes/copies it
+through the immutable result-artifact publication protocol.
 
 ### Command Governor owns managed hook configuration without assuming hook isolation
 
@@ -105,36 +116,43 @@ The durable sequence is:
 1. Command Governor identifies the exact fenced tool call;
 2. its hook records safe defer intent and returns the current documented defer
    decision;
-3. the managed structured run confirms that execution actually stopped with the
-   tool call pending;
+3. the managed structured run confirms that execution actually stopped with
+   `tool_deferred`/equivalent and the tool call pending;
 4. only then does the control plane project `needs_input`.
 
-A hook merely attempting to defer is not lifecycle truth. Unsupported multi-tool
-shapes or missing confirmation become reconciliation attention.
+Current Claude documentation states that non-interactive `defer` is ignored when
+Claude emits **multiple tool calls together**. That is a hard V1 constraint: only
+a proven single-tool defer may become clean `needs_input`; multi-tool defer shapes
+become reconciliation/manual attention rather than a fake pause.
 
-### Preferred `claude -p` permission decisions also use `PreToolUse`
+### `PermissionRequest` is available in non-interactive sessions but is not the durable pause identity
 
-Current Claude hook guidance says `PermissionRequest` hooks **do not fire in
-non-interactive `-p` mode** and directs automated permission decisions to
-`PreToolUse`. Therefore preferred managed V1 does not depend on
-`PermissionRequest` at all.
+The review corrected an earlier false assumption. Current Claude hook documentation
+says `PermissionRequest` hooks **can run in sessions that cannot show a prompt,
+including non-interactive/background contexts**; if no hook decides, the tool is
+denied.
 
-Before a tool executes, the `PreToolUse` policy path classifies the exact fenced
-call:
+V1 may therefore use `PermissionRequest` as a permission-decision signal. However,
+its current hook input carries tool name/input without the same `tool_use_id`
+correlation supplied to `PreToolUse`. For exact durable tool-call identity,
+policy/defer fencing, and same-session resume, `PreToolUse` remains the preferred
+boundary.
+
+The managed policy is:
 
 - already delegated ordinary engineering work may proceed only as current Claude
   permission/settings rules permit;
-- a decision that must leave the worker is deferred where the current
-  non-interactive tool shape safely supports deferral;
+- exact out-of-band decisions use confirmed `PreToolUse` defer when the current
+  single-tool shape supports it;
+- `PermissionRequest` decisions are handled only under the correlation guarantees
+  proven for the pinned Claude release and are not automatically projected as a
+  resumable `needs_input` state;
 - destructive, credential-sensitive, materially broader, or unknown actions remain
   user-owned and fail closed.
 
-Current Claude docs also make clear that a hook's allow decision cannot necessarily
-override deny/ask rules from settings. Command Governor never treats a worker hook
-as an entitlement to widen user/managed policy.
-
-`PermissionRequest` remains a possible evidence/control surface only for a future
-interactive Claude adapter whose exact semantics are separately proven.
+Current Claude docs also make clear that hook allow decisions do not simply erase
+settings precedence/deny rules. Command Governor never treats a worker hook as an
+entitlement to widen user/managed policy.
 
 ### Structured worker truth outranks stale Herdr runtime inference
 
@@ -156,11 +174,11 @@ A lone Stop-hook candidate is not sufficient to win this conflict.
 
 ### Durable final result artifact
 
-Before publishing `completed_unprocessed`, the daemon validates the worker-host
-structured result/exit receipt and writes the bounded final worker result to an
-immutable owner-private artifact store. File durability is established before the
-SQLite transaction references its digest/size/opaque key and creates the
-obligation.
+Before publishing `completed_unprocessed`, the daemon validates the bounded
+worker-host final-result candidate and sanitized exit/run receipts, then writes the
+bounded final worker result to the immutable owner-private artifact store. File
+durability is established before the SQLite transaction references its
+digest/size/opaque key and creates the obligation.
 
 The artifact is not a terminal transcript or complete provider stream. It is the
 bounded final result needed by the foreman; GitHub commit/PR refs are additional
@@ -179,6 +197,15 @@ separate external delivery with accepted/failed/ambiguous semantics. Matching
 structured/native resumed-turn evidence is required before returning the
 obligation to `running`.
 
+## Local trust boundary
+
+The worker-host is architecturally stateless, but V1 does not claim that same-user
+file permissions sandbox a malicious Claude/tool process. The OS user account is
+the local trust root. Managed worker environments receive only narrow opaque
+correlation values needed by hooks; Command Governor does not intentionally export
+the general state-root path to Claude. Strong hostile-worker containment would
+require a future separate OS identity/sandbox/broker.
+
 ## Alternatives
 
 ### Treat Herdr `working`/idle as semantic completion truth
@@ -190,20 +217,29 @@ Rejected by the reproduced stale-working failure.
 Rejected because current Stop hooks can block stopping and all matching hooks may
 run in parallel. The callback is a stop candidate, not proof of final settlement.
 
-### Depend on `PermissionRequest` in managed `claude -p`
+### Treat `PermissionRequest` as unavailable in `claude -p`
 
-Rejected because current Claude documentation says those hooks do not fire in
-non-interactive mode. `PreToolUse` is the supported automated decision/defer point.
+Rejected by current Claude documentation. It can run in non-interactive contexts.
+The architectural distinction is instead that `PermissionRequest` is a permission
+decision signal with weaker exact tool-call correlation than `PreToolUse`, not the
+preferred durable defer/resume identity.
 
 ### Poll terminal text harder
 
 Rejected. More PTY heuristics do not become a structured provider protocol.
 
+### Persist the complete `claude -p` stream
+
+Rejected. Current structured streams can contain tool-use/tool-result records;
+persisting them would violate the explicit no-prompt/no-tool-args/no-command
+storage boundary. The worker-host parses online and durably retains only sanitized
+receipts and the bounded final-result candidate.
+
 ### Capture `claude -p` only in the authoritative daemon's live stdout reader
 
 Rejected because daemon restart could lose the final result while the worker
-continues. The worker-host/spool is a transport durability shim, not a second
-control plane.
+continues. The worker-host is a transport durability shim, not a second control
+plane.
 
 ### Hook sends only live IPC/HTTP
 
@@ -211,9 +247,7 @@ Rejected because daemon restart can lose progress/input/native observations.
 
 ### Store the complete provider stream/transcript in SQLite
 
-Rejected for privacy, size, prompt-injection, and data-boundary reasons. Sensitive
-transport spool and bounded final result artifact have explicit private retention
-boundaries; the event ledger remains sanitized.
+Rejected for privacy, size, prompt-injection, and data-boundary reasons.
 
 ### Monitor a worker with another Claude session
 
@@ -222,12 +256,12 @@ semantically authoritative.
 
 ## Consequences
 
-The Claude adapter must own a small worker-host/spool path, parse the current
-structured programmatic protocol, validate settings/hook behavior, implement
-permission/input policy at the correct pre-tool boundary, and maintain a provider
-conformance suite.
+The Claude adapter must own a small worker-host staging path, parse the current
+structured programmatic protocol online, validate settings/hook behavior,
+implement permission/input policy at the proven current boundaries, and maintain a
+provider conformance suite.
 
-In return, completion survives daemon/runtime restart, a parallel Stop hook cannot
-produce false terminal state, input/permission decisions use a provider-supported
-managed boundary, and stale Herdr state cannot veto a confirmed worker result or
-pause.
+In return, completion survives daemon/runtime restart without a raw transcript
+spool, a parallel Stop hook cannot produce false terminal state, input/permission
+decisions use current provider semantics, and stale Herdr state cannot veto a
+confirmed worker result or pause.
