@@ -1,162 +1,463 @@
-# Architecture
+# Command Governor V1 architecture
 
-## Purpose
+Status: **proposed implementation architecture**  
+Research snapshot: [2026-08-31 technology review](research/2026-08-31-technology-review.md)
 
-Command Governor is a local-first control plane for coordinating AI coding
-agents across conversational foremen, worker processes, source control, and
-session runtimes. Its central responsibility is to preserve lifecycle truth and
-outstanding obligations when any individual UI, process, adapter, or machine
-session disappears.
+## Mission
 
-This document describes the intended architecture. No implementation exists
-yet.
+Command Governor is a local-first durable control plane for AI/software-engineering
+workers. Its job is not to make a terminal look busy or to forward prompts. Its
+job is to preserve **what work is still owed** when browsers, foremen, workers,
+runtimes, or the governor itself disappear and restart.
 
-## System roles
+The central invariant is:
 
-| Role | Responsibility | Authoritative for |
-| --- | --- | --- |
-| Foreman | Plans work, delegates, reviews results, and makes policy decisions | Human-visible decisions and review intent |
-| Worker | Executes a bounded task and emits progress, questions, and results | Its own execution output, not global lifecycle state |
-| Source host | Stores issues, commits, reviews, and pull requests | Durable engineering artifacts |
-| Session runtime | Owns terminal and process execution | Process presence and runtime observations |
-| Command Governor | Persists events, derives lifecycle state, and closes obligations | Orchestration lifecycle truth |
+> Delegated work remains a durable obligation until the bound foreman has fetched
+> the real result or blocking request, performed the required review/action, and
+> explicitly ACKed a fenced obligation. Worker completion, browser delivery, and
+> ChatGPT turn settlement do not close it.
 
-A single product may fill more than one role, but the boundaries remain
-explicit.
+V1 is a Rust daemon plus CLI. There is no conventional application GUI and no
+human completion-notification subsystem.
 
-## Core domain model
+## Roles and authority
 
-- **Project:** a configured engineering boundary and its adapters.
-- **Actor:** a human, foreman, worker, or system component with a stable identity.
-- **Task:** a requested outcome with policy, ownership, and terminal criteria.
-- **Attempt:** one bounded execution of a task by a worker.
-- **Session:** the runtime container associated with an attempt.
-- **Event:** an immutable fact observed or accepted by the control plane.
-- **Result:** a durable worker outcome and its artifact references.
-- **Obligation:** work that remains owed, such as consuming a result, answering a
-  question, reconciling a delivery, or reviewing a change.
-- **Conversation binding:** the exact foreman conversation authorized to receive
-  a browser delivery.
-- **Delivery attempt:** the durable record of one proposed external submission.
+| Component | Role | Authoritative for | Not authoritative for |
+| --- | --- | --- | --- |
+| ChatGPT Web foreman | Planner and independent reviewer of record | review/disposition decisions it explicitly records | worker/process liveness, browser delivery, global lifecycle truth |
+| Claude Code / Codex / future agents | Workers | their own native lifecycle/output facts | whether work was reviewed/consumed |
+| GitHub | Engineering source of truth | issues, commits, PRs, reviews | transient worker/input/browser state |
+| Herdr / runtime adapters | Process/session layer | process existence, PTY/session transport facts | task completion when native worker lifecycle disagrees |
+| Command Governor | Control-plane authority | event order, projections, obligations, delivery ambiguity, binding generations, ACK validity | repository correctness or user-owned authorization decisions |
 
-Events are append-only. Current state is a projection that can be rebuilt from
-accepted events and checked against materialized views.
+Provider status strings are observations. They never overwrite a stronger domain
+fact merely because they are newer.
 
-## Lifecycle model
+## V1 process boundary
 
-A task and its worker attempt are related but distinct. Initial task states are:
+```text
+                          authenticated local browser profile
+                                     │
+                                     ▼
+                         headed Chrome / Chromium
+                                     ▲
+                                     │ CDP
+                                     │
+┌────────────────────────────────────┴────────────────────────────────────┐
+│                     command-governor daemon                             │
+│                                                                          │
+│  ┌────────────────┐   ┌─────────────────────┐   ┌────────────────────┐  │
+│  │ lifecycle core │◄─►│ single-writer SQLite│   │ result artifact    │  │
+│  │ + projections  │   │ DB actor            │   │ store (private)    │  │
+│  └───────┬────────┘   └─────────────────────┘   └────────────────────┘  │
+│          │                                                               │
+│  ┌───────┴────────┐ ┌──────────────────┐ ┌───────────────────────────┐  │
+│  │ worker adapters│ │ runtime adapters │ │ governor-chatgpt-web      │  │
+│  │ Claude / Codex │ │ Herdr / future   │ │ browser + CDP evidence   │  │
+│  └────────────────┘ └──────────────────┘ └─────────────┬─────────────┘  │
+│                                                        │                │
+│  ┌────────────────┐ ┌──────────────────┐               │                │
+│  │ GitHub adapter │ │ rmcp MCP server  │◄──────────────┘                │
+│  └────────────────┘ └─────────┬────────┘                                │
+└───────────────────────────────┼──────────────────────────────────────────┘
+                                │ OpenAI-supported tunnel/connectivity
+                                ▼
+                       ChatGPT Command Governor app
 
-- `queued`
-- `dispatching`
-- `active`
-- `blocked`
-- `completed`
-- `failed`
-- `cancelled`
+command-governor CLI ── local IPC ──► daemon
+```
 
-Completion does not imply consumption. A completed task can retain an open
-`consume_result` or `review_result` obligation until the foreman records that
-the result was handled. Runtime labels such as `working` or `idle` are evidence
-used during reconciliation; they never overwrite durable lifecycle state by
-themselves.
+There is one orchestration authority. The browser supervisor, MCP endpoint,
+runtime adapters, and lifecycle engine are parts of the daemon, not three
+independent daemons with competing truth.
 
-Every transition records its cause, actor, time, prior version, and relevant
-external identifiers. Conflicting transitions fail closed and create an
-attention obligation.
+A supervised Secure MCP Tunnel process may exist because current ChatGPT
+connectivity requires it; it is a transport child, never a second state owner.
 
-## Durable obligations
+## Rust workspace boundary
 
-Obligations make unfinished coordination explicit. Each obligation has a stable
-identifier, owner or routing policy, status, due or retry policy when relevant,
-and the event that closes it.
+After the architecture gates pass sufficiently to begin scaffolding, use a small
+Cargo workspace rather than an application starter:
 
-Examples include:
+```text
+crates/
+  governor-core/              # IDs, events, state machines, policies; no I/O
+  governor-store-sqlite/      # rusqlite DB actor, migrations, replay/recovery
+  governor-runtime/           # runtime traits + shared fencing contracts
+  governor-runtime-herdr/     # Herdr adapter
+  governor-worker-claude/     # Claude lifecycle/defer-resume adapter
+  governor-worker-codex/      # Codex adapter
+  governor-browser/           # narrow generic CDP/browser abstraction
+  governor-chatgpt-web/       # ALL unofficial ChatGPT Web-specific behavior
+  governor-mcp/               # stable ChatGPT-facing rmcp ABI
+  governor-github/            # GitHub durable-source adapter
+  governor-daemon/            # composition root, supervisors, local IPC
+  governor-testkit/           # deterministic fakes and crash/failure fixtures
+  command-governor/           # CLI/binary surface
+```
 
-- deliver a task to a worker;
-- surface a worker's blocked-input request;
-- consume and review a completed result;
-- reconcile an ambiguous browser submission;
-- verify a source-control artifact; and
-- recover a session whose runtime state disagrees with stored state.
+Crates may be merged if implementation proves a boundary too fine-grained, but
+`governor-core`, `governor-store-sqlite`, and `governor-chatgpt-web` remain hard
+architectural boundaries. The rest of the system must be able to delete and
+replace `governor-chatgpt-web` if OpenAI ships an official foreman/wake API.
 
-An obligation is never closed merely because a polling loop stopped.
+Use Rust stable 1.98.0 / edition 2024 as the initial pin, re-verifying versions at
+the scaffold commit. Domain crates use typed `thiserror` errors; `anyhow` is
+limited to binary/process composition boundaries.
 
-## Browser delivery semantics
+## Durable truth model
 
-Browser delivery is bound to one exact ChatGPT conversation and uses at-most-once
-submission semantics.
+The control plane stores **source events and durable projections**, not a set of
+mutable booleans.
 
-1. Persist a delivery intent with a stable delivery key and conversation binding.
-2. Acquire an exclusive, expiring lease for that intent.
-3. Verify that the visible browser destination matches the stored binding.
-4. Submit at most once for that delivery key.
-5. Persist positive acknowledgement when it can be observed.
-6. If submission may have occurred but acknowledgement is unavailable, move the
-   delivery to `reconciliation_required` and stop automatic retries.
+Core identities:
 
-This prevents an ambiguous browser event from becoming a duplicate prompt. It
-cannot guarantee that every delivery occurs: a crash at the submission boundary
-may leave zero or one submissions. The unresolved durable obligation makes that
-tradeoff visible and recoverable by inspection.
+- `project_id`
+- `task_id`
+- `session_id`
+- `session_incarnation_id`
+- `turn_id`
+- `source_event_id`
+- `result_artifact_id`
+- `obligation_id`
+- `input_request_id`
+- `foreman_binding_id` + monotonic `binding_generation`
+- `delivery_id` + `delivery_revision`
+- `foreman_claim_id`
 
-Changing the bound conversation creates a new, explicit delivery intent; it
-never mutates an in-flight destination silently.
+A session name is display metadata, never a sufficient fence.
 
-## Worker dispatch and result handling
+Events are immutable and ordered by a daemon-assigned sequence. Materialized
+projections are transactional caches and must be replayable. If replay and a
+materialized projection disagree, startup fails closed into repair/doctor mode;
+it does not silently choose the more convenient state.
 
-Worker adapters translate provider-specific events into the common lifecycle
-model. Dispatch uses stable task and attempt identities. Where an external API
-supports idempotency keys, the adapter must use them. Where it does not, an
-ambiguous dispatch follows the same reconciliation rule as browser delivery.
+See [data model](data-model.md).
 
-Worker output is captured durably before it is announced as available. A
-terminal completion event creates a result-consumption obligation. Session
-shutdown cannot erase the result or satisfy that obligation.
+## Obligation lifecycle
 
-## Crash and restart recovery
+A worker attempt and its foreman obligation are deliberately separate.
+Conceptually:
 
-On startup, the recovery loop:
+```text
+created
+  │
+  ▼
+running ───────────────► needs_input
+  │                         │
+  │                         └── answer/resume ──► running
+  ├──────────────► failed
+  │
+  └──────────────► completed_unprocessed
+                         │
+                         ▼
+                 claimed_by_foreman
+                         │
+                         ▼
+                     processing
+                         │
+                         ▼
+                    acknowledged
+```
 
-1. verifies the durable store and schema version;
-2. rebuilds or validates lifecycle projections;
-3. expires abandoned leases;
-4. compares runtime observations with stored sessions;
-5. resumes safe, idempotent obligations; and
-6. quarantines ambiguous external side effects for reconciliation.
+`needs_input`, `failed`, and `completed_unprocessed` are durable attention states.
+A terminal worker result creates or updates the obligation; it does not close it.
 
-Recovery never infers that silence means completion, failure, or successful
-delivery.
+`suspected_stall` is a non-terminal attention condition. It never converts
+silence into completion or failure.
 
-## Adapter boundaries
+ACK is fenced by task/session-incarnation/turn/source-event/obligation/binding
+generation and the current foreman claim. A stale conversation or old binding
+generation cannot close current work.
 
-Adapters will expose capability-oriented interfaces for:
+See [state machines](state-machines.md).
 
-- conversational foremen and browser control;
-- coding-agent workers;
-- terminal and process session runtimes;
-- source-control hosts; and
-- local persistence and secret providers.
+## Result durability boundary
 
-Provider identifiers and raw payloads may be retained for audit, but domain
-state must not depend on one provider's status vocabulary.
+The obligation invariant is meaningless if the worker result vanishes with its
+PTY. Therefore a terminal result must be made durable **before**
+`completed_unprocessed` is published.
 
-## Security and privacy
+Command Governor will not store full terminal transcripts in SQLite. Instead it
+uses a private immutable result-artifact store:
 
-- Local state is private by default and must have explicit retention controls.
-- Credentials remain in platform-native secret stores and are referenced, not
-  copied into events.
-- Logs and exports redact prompts, source, tokens, and conversation content by
-  default.
-- Adapters receive the narrowest capabilities required for their role.
-- Conversation and project bindings are verified before external writes.
-- Every consequential external action has an auditable actor and cause.
+- daemon-private directory (0700 on Unix; equivalent owner-only ACL on Windows);
+- artifact file owner-only (0600 on Unix);
+- SQLite stores opaque reference, digest, size, source event, and retention state;
+- content can contain the bounded final worker result needed by the foreman;
+- content never enters browser wake text or routine tracing;
+- artifact deletion cannot precede the obligation's closing disposition and
+  retention policy.
 
-## Initial non-goals
+GitHub commit/PR refs are complementary engineering evidence, not a substitute
+for preserving the actual result that created the obligation.
 
-- Hosting a general-purpose cloud agent service.
-- Replacing GitHub as the durable engineering record.
-- Executing untrusted code without an isolated runtime.
-- Claiming exactly-once semantics where an external interface lacks an
-  idempotency or transactional acknowledgement mechanism.
-- Choosing a permanent implementation stack before lifecycle invariants are
-  testable.
+## Native worker lifecycle beats runtime inference
+
+Worker adapters normalize the strongest available native events. For Claude Code,
+current hooks provide authoritative `Stop`, `StopFailure`, `PermissionRequest`,
+and tool-progress evidence. Current non-interactive `AskUserQuestion` deferral can
+also preserve a blocked tool call for later same-session resume.
+
+Ordering policy is evidence-specific, not simply "last timestamp wins":
+
+- native `Stop` proves the worker response boundary even if Herdr still says
+  `working`;
+- native input/permission blocking proves `needs_input` even if a PTY is not idle;
+- a later native resumed-turn event can supersede the previous blocked projection;
+- runtime death is important evidence but cannot erase an already persisted
+  result/obligation;
+- screen repaint/idle heuristics are fallback diagnostics only.
+
+The exact stale-Herdr failure reproduced in Tandem is a mandatory deterministic
+test fixture.
+
+See [worker lifecycle contract](worker-lifecycle.md).
+
+## Watchdog
+
+Progress is based on verified lifecycle/tool activity, not terminal repaint.
+`PostToolUse`/equivalent events may update only bounded metadata such as
+`last_progress_at` and a safe event class.
+
+A configured no-progress threshold creates `suspected_stall`. Long builds with
+verified progress remain healthy. No monitor-only Claude session is ever opened
+just to watch another worker.
+
+## ChatGPT conversation binding
+
+There is exactly one active foreman binding in V1.
+
+Persist:
+
+- canonical ChatGPT conversation ID and `/c/<id>` URL;
+- `binding_generation`;
+- dedicated browser-profile identity;
+- provider/account/profile metadata sufficient to detect displacement without
+  storing credentials;
+- connector/app compatibility epoch and last successful capability preflight.
+
+Never bind "current tab", browser history, or most-recent conversation.
+
+Binding an existing chat requires the browser to resolve to the exact expected
+conversation before composer mutation. A new-chat workflow must not commit `/` or
+another provisional route; binding is committed only after a concrete final
+`/c/<id>` exists.
+
+Rebinding increments `binding_generation` transactionally. Old deliveries,
+claims, or ChatGPT turns from a prior generation may be observed for history but
+cannot ACK current obligations.
+
+## ChatGPT transport: browser-backed hybrid
+
+### Write path
+
+Sensitive submission belongs to the authenticated ChatGPT SPA:
+
+1. acquire the daemon's single-flight browser-delivery worker;
+2. load the exact bound conversation;
+3. verify canonical conversation ID and connector/app availability;
+4. select/mention the Command Governor app for **this message** as required by
+   the current ChatGPT surface;
+5. stage only the tiny opaque wake payload;
+6. durably arm the ambiguity fence;
+7. invoke the exact composer-local Send action once;
+8. observe CDP/network and message-tree evidence;
+9. persist `accepted`, `failed`, or `ambiguous`.
+
+Wake text contains only opaque identifiers and an instruction to use the Command
+Governor app. It does not contain worker output, source, prompt text, cwd,
+terminal transcript, tool arguments, secrets, or GitHub credentials.
+
+### Observation path
+
+Prefer CDP evidence:
+
+- exact Target/Page identity;
+- navigation/redirect events;
+- request initiation;
+- response/stream events;
+- message identifiers/conversation identifiers visible in real SPA traffic;
+- physical assistant-turn start/settlement.
+
+DOM is required for structural control (composer, app selection, Send) and is a
+fallback observation source. Weak evidence such as "composer became empty",
+"URL changed", or "Stop appeared" never promotes a delivery to accepted by
+itself.
+
+Narrow authenticated reads/passive network interpretation may be used for
+reconciliation if they prove stable. They are optimization/observation only; no
+protected private-write client is implemented.
+
+See [browser transport](browser-transport.md).
+
+## Browser delivery safety model
+
+Each wake revision has a deterministic identity such as:
+
+```text
+delivery_id = H("command-governor/wake/v1",
+                obligation_id,
+                binding_generation,
+                delivery_revision)
+```
+
+A database transaction records `claimed` before external browser I/O.
+Immediately before the exact Send activation, another durable transition records
+`activation_armed`. That is the external-I/O ambiguity fence.
+
+Terminal outcomes:
+
+- **failed** — Command Governor has evidence submission did not occur; bounded
+  retry is safe.
+- **accepted** — strong semantic evidence shows the intended user message was
+  submitted to the exact bound conversation.
+- **ambiguous** — submission may have occurred but cannot be proven.
+
+On startup, any nonterminal `claimed`/`activation_armed` attempt from the previous
+daemon is converted to `ambiguous` before browser recovery. This deliberately
+allows a crash before the physical click to create a zero-send ambiguity; safety
+wins over liveness.
+
+`accepted` and `ambiguous` are never automatically resent. Ambiguous may be
+promoted to accepted only by exact reconciliation evidence.
+
+## ChatGPT settlement is not ACK
+
+Three facts remain distinct:
+
+1. browser delivery accepted;
+2. physical ChatGPT assistant turn settled;
+3. foreman explicitly processed and ACKed the obligation through MCP.
+
+Only (3) closes the obligation.
+
+If (2) occurs without (3), the obligation remains outstanding. After a bounded
+policy delay, with no overlapping ChatGPT turn, Command Governor may create a
+**new delivery revision** for the same obligation. Automatic resumes are capped;
+a repeated failure becomes durable `foreman_unreachable` health state while the
+obligation remains open indefinitely.
+
+## MCP contract
+
+Use the official Rust SDK (`rmcp`). Keep the ChatGPT-facing ABI intentionally
+small because connector schemas can be cached and current ChatGPT app updates
+require explicit refresh/action enablement.
+
+V1 surface:
+
+- `foreman_bootstrap` — discover protocol/health/binding generation and urgent
+  outstanding work;
+- `foreman_resume` — claim/fetch one fenced obligation and its real result or
+  input request;
+- `foreman_ack` — explicit state-changing disposition; the only normal path that
+  closes processed work;
+- `foreman_answer_input` — structured state-changing response to a fenced worker
+  input request.
+
+No general arbitrary-action dispatcher is exposed in V1. Tool responses are
+versioned/forward-compatible so additive fields do not require a new tool every
+week.
+
+All mutation tools require current binding generation, obligation/source-event
+identity, and claim fencing. The daemon rejects stale claims without side effects.
+
+Current published ChatGPT product availability makes write-capable MCP a **hard
+binding preflight**. If the actual account/surface cannot call state-changing MCP
+actions, V1 must report that unsupported combination; it must not fake ACK from
+browser settlement.
+
+See [MCP contract](mcp-contract.md).
+
+## Persistence
+
+Use `rusqlite` with one daemon-owned DB actor and bundled SQLite.
+
+Initial policy:
+
+- WAL;
+- foreign keys enabled;
+- bounded busy timeout;
+- `synchronous=FULL` until crash-injection testing justifies another choice;
+- explicit migrations and schema epoch;
+- append source event + update projection + create obligation in one transaction
+  where the facts are inseparable;
+- uniqueness constraints for source-event and terminal-event deduplication;
+- no ORM;
+- no browser cookies/tokens or terminal transcripts in the database.
+
+Async daemon tasks communicate with the DB actor through typed requests rather
+than sharing arbitrary connections.
+
+## Local IPC and secrets
+
+CLI operations go through daemon-owned local IPC. Prefer a Unix domain socket on
+macOS/Linux and a named pipe on Windows. If a loopback HTTP fallback is required,
+it must use an owner-local capability token and reject non-loopback origins.
+
+The dedicated Chrome profile is credential-equivalent and owner-private. The DB,
+artifact store, logs, tunnel credentials, and local control endpoints have
+separate least-privilege paths. Secrets never appear in command-line arguments or
+structured tracing fields.
+
+## GitHub integration
+
+GitHub remains engineering truth. Command Governor may record opaque repository,
+issue, commit, and PR identifiers and use them during review, but it does not
+replace GitHub with a local source-code database.
+
+GitHub content and worker output are untrusted input to the foreman. The MCP
+boundary must label them as data, preserve provenance, and never treat text inside
+an issue/diff/result as Command Governor policy.
+
+## Startup recovery order
+
+Before accepting new orchestration work, daemon startup must:
+
+1. acquire the single-daemon ownership lock;
+2. validate filesystem ownership/permissions;
+3. open SQLite, verify schema epoch, integrity policy, and migration status;
+4. convert orphaned browser `claimed`/`activation_armed` attempts to `ambiguous`;
+5. replay/validate materialized projections;
+6. verify referenced result artifacts needed by open obligations;
+7. reconcile native worker lifecycle against runtime observations;
+8. restore watchdog schedules without fabricating terminal events;
+9. reconnect/supervise the browser and MCP tunnel;
+10. verify the exact foreman binding and capability epoch before any wake;
+11. resume only operations proven idempotent/safe.
+
+Recovery never converts missing observations into success.
+
+## V1 explicit non-goals
+
+- conventional GUI, Electron, Tauri, Dioxus, Iced, or menu-bar app;
+- phone/email/Slack/Telegram/ntfy completion notifications;
+- hosted multi-tenant control plane;
+- storing full terminal transcripts or browser credentials in the ledger;
+- private ChatGPT protocol emulation or challenge bypass;
+- exactly-once claims over interfaces without transactional idempotency;
+- multiple simultaneously active foreman conversations;
+- using runtime idle/screen state as stronger truth than native lifecycle;
+- permitting a worker to independently approve its own implementation.
+
+## Architecture gates before implementation claims
+
+The domain/store/testkit foundation can proceed once this ADR set is accepted,
+but the ChatGPT end-to-end V1 is not "supported" until two live gates pass:
+
+### Gate A — MCP mutation capability
+
+The exact target ChatGPT account/surface must invoke `foreman_ack` and
+`foreman_answer_input` as genuine state-changing tools through the supported
+connector path. Published Pro limitations mean this cannot be assumed.
+
+### Gate B — browser transport spike
+
+A dedicated headed Chrome profile must pass the spike in
+[browser-transport.md](browser-transport.md): exact binding, per-message app
+selection, ten sends, strong accepted evidence, crash-at-send ambiguity, no
+replay, profile restart, and generation fencing. Headless is evaluated separately
+and remains experimental unless it matches the headed result.
+
+If either gate fails, the durable control-plane architecture remains valid. The
+unsupported adapter/surface is fenced off rather than weakening the invariant.
