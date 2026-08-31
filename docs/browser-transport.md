@@ -15,13 +15,23 @@ V1 starts with:
 - one dedicated Command Governor-owned profile;
 - daemon-owned browser process/supervision;
 - CDP controlled from Rust through `chromiumoxide` behind an internal trait;
-- DOM interaction only for the structural controls the real SPA requires;
+- DOM interaction only for structural controls the real SPA requires;
 - CDP/network and narrowly bounded authenticated reads for stronger observation
   and reconciliation;
 - the real ChatGPT SPA as the authority for sensitive message submission.
 
 `headless_chrome` is the first fallback driver if a measured driver issue appears.
 Wry and CEF are not V1 dependencies.
+
+## Current MCP surface dependency
+
+A browser wake is useful only if the selected ChatGPT foreman surface can call the
+state-changing MCP contract after waking. As of the 2026-08-31 review, consumer
+ChatGPT Pro custom MCP is documented read/fetch-only, so it is not an end-to-end V1
+target. Business/Enterprise/Edu candidate workspaces must pass Gate A before this
+browser transport can be considered a complete foreman loop. Business currently
+exposes GPT-5.6 Sol Pro, so using the Pro model does not require weakening the MCP
+write requirement.
 
 ## Why a hybrid
 
@@ -102,7 +112,7 @@ Wrong target/redirect is a definite pre-submit failure when observed before the
 Send fence. The composer remains untouched.
 
 A staged probe should report which invariant failed rather than one generic
-"composer timeout". Useful safe diagnostics include readiness class, route class,
+"composer timeout". Safe diagnostics may include readiness class, route class,
 target identity, and element counts/boolean presence; diagnostics must not copy
 conversation text or cookies.
 
@@ -117,16 +127,33 @@ current UI affordance. The implementation may need to use the ChatGPT app picker
 `@` mention flow, or another first-party UI control; the exact selector is an
 adapter detail discovered by the live spike.
 
-If the app token/selection cannot be proved, delivery fails before the activation
-fence. Command Governor must not send a wake that merely tells ChatGPT in prose to
-use a connector that is not actually available to the turn.
+If app selection cannot be proved, delivery fails before the activation fence.
+Command Governor must not send a wake that merely tells ChatGPT in prose to use a
+connector that is not actually available to the turn.
 
-## Wake payload
+## Delivery identity and wake payload
 
-Text is deterministic, tiny, and non-sensitive. Initial shape:
+Do not overload one identifier with two jobs.
 
 ```text
-[command-governor wake v1] obligation=<opaque-id> delivery=<opaque-id>. Use the Command Governor app now. Resume this obligation, reconcile the owning worker/result, perform the required review/action, then ACK only after processing.
+delivery_key = H("command-governor/wake-key/v1",
+                 obligation_id,
+                 binding_generation,
+                 delivery_revision)
+
+delivery_id = CSPRNG(>=192 bits)
+```
+
+`delivery_key` is the deterministic non-secret idempotency/deduplication key for
+one scheduled revision. `delivery_id` is generated once when the durable delivery
+is created and is the random anti-confusion correlation value carried in the wake.
+It is not returned by bootstrap/status and cannot be derived from the deterministic
+inputs.
+
+Wake text is tiny and non-sensitive. Initial shape:
+
+```text
+[command-governor wake v1] obligation=<opaque-id> delivery=<random-opaque-id>. Use the Command Governor app now. Resume this obligation, reconcile the owning worker/result, perform the required review/action, then ACK only after processing.
 ```
 
 The app-selection UI token is separate from the payload when the ChatGPT surface
@@ -149,27 +176,27 @@ The real content is fetched through authenticated MCP after the foreman wakes.
 ## CDP evidence model
 
 `chromiumoxide` exposes generated CDP domains. The implementation should consume
-only the minimal events needed for safety. Candidate evidence includes:
+only the minimal events needed for safety.
 
-### Target/Page
+Candidate Target/Page evidence:
 
 - target creation/destruction;
 - navigation and frame changes;
 - execution-context loss/recreation;
 - page lifecycle/readiness.
 
-### Network
+Candidate Network evidence:
 
-- request initiation (`Network.requestWillBeSent` and related redirect metadata);
+- request initiation (`Network.requestWillBeSent` and redirect metadata);
 - response receipt;
 - streamed byte/activity evidence (`Network.dataReceived`);
 - loading completion/failure;
-- request/response IDs that allow exact in-memory correlation.
+- request/response IDs for exact in-memory correlation.
 
 Private endpoint names and JSON layouts are **observations**, not interfaces. The
 adapter may inspect the SPA-generated request in memory to extract a provider
 message ID/conversation ID needed for proof. It must not log or persist whole
-request bodies, headers, cookies, or wake-bearing protocol dumps.
+request bodies, headers, cookies, or private protocol dumps.
 
 ## Accepted submission evidence
 
@@ -184,7 +211,7 @@ Preferred evidence is a conjunction such as:
 - provider-generated user message identifier or equivalent exact message-tree
   identity;
 - conversation identifier matches the current binding;
-- message content/opaque delivery ID matches in memory;
+- random `delivery_id` matches the intended staged wake in memory;
 - later conversation/message-tree observation contains that exact new user
   message.
 
@@ -204,15 +231,10 @@ Physical settlement is useful only to decide when a bounded resume might be
 considered; it never closes the obligation.
 
 Prefer correlated network/message-tree evidence that the assistant turn has
-started and completed. Current ChatGPT streaming mechanics may expose response
-headers and `Network.dataReceived` without giving a convenient complete SSE body.
-That is acceptable: Command Governor needs lifecycle evidence, not a copied
-transcript.
-
-A direct conversation read may corroborate the final assistant node if the
-read-only path remains robust. DOM completion indicators are fallback evidence.
-If the adapter cannot determine whether a turn is active, the safe state is
-`observation_lost`; no new wake overlaps it.
+started and completed. A direct conversation read may corroborate the final node
+if the read-only path remains robust. DOM completion indicators are fallback
+evidence. If the adapter cannot determine whether a turn is active, the safe state
+is `observation_lost`; no new wake overlaps it.
 
 ## Private read/observation layer
 
@@ -220,8 +242,8 @@ Allowed:
 
 - passive interpretation of requests/responses produced by the real page;
 - browser-context authenticated reads;
-- direct authenticated conversation/message-tree reads only when they are shown
-  by tests to be stable and require no protective-mechanism reproduction;
+- direct authenticated conversation/message-tree reads only when tests show them
+  stable and requiring no protective-mechanism reproduction;
 - model/account metadata reads useful for diagnostics.
 
 Not allowed:
@@ -234,7 +256,7 @@ Not allowed:
 - retry strategies intended to evade abuse controls.
 
 When a read endpoint drifts, reconciliation may become less convenient. That must
-not cause the adapter to fall back to an unofficial direct write.
+not cause fallback to an unofficial direct write.
 
 ## At-most-once Send boundary
 
@@ -244,19 +266,20 @@ Immediately before the exact composer-local Send action:
 
 1. re-verify target conversation ID;
 2. re-verify app selection;
-3. re-verify staged payload identity;
-4. commit `activation_armed` to SQLite;
-5. invoke exactly one Send action.
+3. re-verify staged payload and random `delivery_id`;
+4. re-verify target obligation version/source/binding generation;
+5. commit `activation_armed` to SQLite;
+6. invoke exactly one Send action.
 
-The commit in step 4 deliberately precedes physical I/O. If the daemon dies
-between 4 and 5, recovery says ambiguous even though zero messages may have been
-sent. This is the safe side of the impossibility boundary.
+The commit deliberately precedes physical I/O. If the daemon dies between 5 and
+6, recovery says ambiguous even though zero messages may have been sent. This is
+the safe side of the external-I/O impossibility boundary.
 
 After Send activation there is no generic "try click again" path.
 
 ## Send activation mechanism
 
-The live adapter should use one exact composer-local control. Candidate hierarchy:
+Use one exact composer-local control. Candidate hierarchy:
 
 1. a stable first-party/test-id Send control scoped to the verified composer;
 2. an accessible-name Send control scoped to the verified composer;
@@ -264,31 +287,23 @@ The live adapter should use one exact composer-local control. Candidate hierarch
 
 Never use a page-global generic submit selector.
 
-Keyboard Enter may be an implementation fallback only if the live spike proves it
-is the exact first-party submit behavior and all multiline/composition states are
-fenced. The ambiguity boundary is the invocation of whichever exact action is
-chosen.
+Keyboard Enter may be a fallback only if the live spike proves it is the exact
+first-party submit behavior and all multiline/composition states are fenced. The
+ambiguity boundary is invocation of whichever exact action is chosen.
 
 ## Single-flight behavior
 
-V1 has one browser wake worker. It serializes:
-
-- target reconciliation;
-- app selection;
-- staging;
-- Send activation;
-- accepted/ambiguous evidence collection.
-
-This prevents two obligations from racing the same composer and simplifies exact
-message correlation. Concurrency belongs in worker execution, not in the one
-foreman wake surface.
+V1 has one browser wake worker. It serializes target reconciliation, app selection,
+staging, Send activation, and accepted/ambiguous evidence collection. This
+prevents two obligations from racing one composer and simplifies exact message
+correlation.
 
 ## Reconnect and crash recovery
 
 Browser process death:
 
 - does not close obligations;
-- does not reset delivery IDs;
+- does not reset delivery rows/IDs;
 - does not cause accepted/ambiguous sends to replay;
 - creates a new browser incarnation;
 - requires profile/binding verification before any new delivery.
@@ -316,19 +331,21 @@ This spike is a **gate**. Unit tests and source review cannot substitute for it.
 
 ### Prerequisites
 
+- Gate A has identified a write-capable ChatGPT workspace surface; consumer Pro is
+  not currently eligible under published product policy;
 - dedicated Command Governor Chrome profile;
 - normal user login completed manually;
 - test Command Governor MCP app/connector installed through the supported ChatGPT
   path;
-- a disposable ChatGPT conversation explicitly bound;
+- disposable ChatGPT conversation explicitly bound;
 - fake local obligations/results so no real worker is needed;
 - browser/daemon failpoints enabled;
 - no Tandem orchestration dependency.
 
 ### Headed Chrome run
 
-Record exact Chrome version, OS, `chromiumoxide` version/commit, ChatGPT account
-plan/surface, connector ABI, and test timestamp.
+Record exact Chrome version, OS, `chromiumoxide` version/commit, ChatGPT workspace
+plan/surface/model, connector ABI, and test timestamp.
 
 Tests:
 
@@ -338,45 +355,36 @@ Tests:
    redirect, and auth page all fail before composer mutation.
 3. **App selection** — ten wake turns each independently prove the Command Governor
    app is selected for that message.
-4. **Ten unique wakes** — submit ten unique delivery IDs sequentially. Expected:
-   ten and only ten user-message identities in the bound conversation.
-5. **Network evidence** — for every accepted wake, capture safe extracted evidence
-   sufficient to bind target + conversation + user-message identity without
-   persisting request secrets/body.
-6. **Pre-Send failure** — deliberately break composer/app readiness. Expected:
+4. **Ten unique wakes** — submit ten random `delivery_id` values sequentially.
+   Expected: ten and only ten user-message identities in the bound conversation.
+5. **Network evidence** — every accepted wake yields safe extracted target +
+   conversation + user-message evidence without persisting request secrets/body.
+6. **Pre-Send failure** — deliberately break composer/app readiness. Expected
    `failed`, safe retry allowed, zero message.
-7. **Crash after claim** — kill daemon after durable `claimed`. Restart must first
-   mark attempt ambiguous and must not Send.
-8. **Crash after activation fence / before CDP command** — expected ambiguous,
-   zero or one message, never automatic retry.
-9. **Crash immediately after CDP Send activation** — expected ambiguous unless
+7. **Crash after claim** — kill daemon after durable `claimed`; restart marks
+   attempt ambiguous before browser recovery and does not Send.
+8. **Crash after activation fence / before CDP command** — ambiguous, zero or one
+   message, never automatic retry.
+9. **Crash immediately after CDP Send activation** — ambiguous unless exact
    reconciliation proves accepted; never a second message.
-10. **Ambiguous reconciliation** — when exact user-message identity exists,
-    promote ambiguous to accepted without Send; when evidence is absent/unclear,
-    remain ambiguous.
-11. **Physical settlement != ACK** — allow ChatGPT turn to finish while fake MCP
-    never ACKs. Obligation must remain outstanding.
-12. **Bounded resume** — after policy delay, one new delivery revision may wake
-    the same obligation; never overlap a live/unknown ChatGPT turn.
-13. **Rebind generation** — bind chat B, increment generation; a delayed tool call
-    carrying generation A must receive stale-generation error and cannot ACK.
-14. **Browser crash/restart** — kill Chrome after an accepted/settled wake; restart
-    profile and confirm no replay.
-15. **MCP outage** — make connector unavailable. Wake must not be treated as
-    processed; `doctor` exposes capability failure and obligation persists.
+10. **Ambiguous reconciliation** — exact user-message identity promotes to accepted
+    without Send; absent/unclear evidence leaves ambiguous.
+11. **Physical settlement != ACK** — let ChatGPT finish while fake MCP never ACKs;
+    obligation remains outstanding.
+12. **Bounded resume** — after policy delay, one new delivery revision/new random
+    `delivery_id` may wake the same obligation; never overlap a live/unknown turn.
+13. **Rebind generation** — bind chat B; delayed generation-A tool call cannot ACK.
+14. **Browser crash/restart** — kill Chrome after accepted/settled wake; no replay.
+15. **MCP outage** — connector unavailable; wake is not processed and obligation
+    persists.
+16. **Correlation non-derivability** — a caller given bootstrap output plus
+    obligation/generation/revision cannot reconstruct the random `delivery_id`.
 
 ### Headless comparison
 
-With Chrome fully stopped and the same dedicated profile used sequentially, run
-an equivalent `--headless=new` matrix:
-
-- auth persistence;
-- navigation;
-- app selection;
-- ten wakes;
-- network evidence;
-- challenge/bot-detection frequency;
-- restart/reconciliation.
+With Chrome fully stopped and the same dedicated profile used sequentially, run an
+equivalent `--headless=new` matrix for auth, navigation, app selection, ten wakes,
+network evidence, challenge frequency, and restart/reconciliation.
 
 Do not relax anti-bot protections or add stealth/challenge bypass to make headless
 pass. If headless is materially less reliable, V1 remains headed.
@@ -392,16 +400,15 @@ Headed support requires:
   them to accepted;
 - 100% stale-generation ACKs rejected;
 - app selection proven for every wake;
+- random wake correlation cannot be derived from bootstrap/deterministic metadata;
 - no credential/protocol-body leakage in safe logs/state.
 
 A single duplicate Send is a **gate failure**, not an acceptable flaky test.
 
 ## Current spike result
 
-**Not executed as of 2026-08-31.** This architecture session has no authorized
-local Command Governor Chrome profile, and the project explicitly forbids using
-the currently unreliable Tandem/Claude loop as bootstrap machinery. No live
-result is fabricated.
+**Not executed as of 2026-08-31.** This architecture review has no authorized local
+Command Governor Chrome profile and does not fabricate a live result.
 
 The first implementation milestone that touches real ChatGPT must produce a
 versioned spike report with raw *safe* evidence summaries and exact software
