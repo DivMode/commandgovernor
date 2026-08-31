@@ -14,6 +14,10 @@ SPA can perform the current authentication/challenge/submission behavior.
 A DOM-only implementation, however, has weak evidence after Send. UI states such
 as empty composer or Stop button do not prove which user message was accepted.
 
+The MCP side also lacks a documented trustworthy ChatGPT conversation principal,
+so the browser wake needs an opaque correlation value that cannot be reconstructed
+from deterministic scheduling metadata by another connector conversation.
+
 ## Decision
 
 V1 uses a **browser-backed hybrid**:
@@ -49,9 +53,30 @@ Governor app is selected/mentioned for that exact message before Send. A plain
 prose instruction to use the app is insufficient if the first-party UI has not
 made the connector available to the turn.
 
-## Delivery semantics
+## Delivery identity
 
-Each obligation/binding-generation/revision has a deterministic delivery ID.
+One logical obligation/binding-generation/revision has two identities with
+separate jobs:
+
+```text
+delivery_key = H("command-governor/wake-key/v1",
+                 obligation_id,
+                 binding_generation,
+                 delivery_revision)
+
+delivery_id = CSPRNG(>=192 bits)
+```
+
+`delivery_key` is deterministic and non-secret. It prevents duplicate scheduling
+of one logical revision and is never accepted as authorization/possession proof.
+
+`delivery_id` is generated exactly once when the durable delivery is created. It
+is carried in the tiny browser wake, omitted from bootstrap/status, and is required
+by `foreman_resume` in addition to connector authentication and current obligation/
+generation/version fences. A caller that knows the deterministic inputs cannot
+derive it.
+
+## Delivery semantics
 
 The store commits:
 
@@ -83,6 +108,10 @@ ambiguous is never automatically resent.
 This deliberately chooses at-most-once safety over guaranteed delivery. A crash
 can produce zero sends and a durable ambiguity.
 
+A later bounded wake of the same still-open obligation is a new delivery revision
+with a new deterministic key and a new independently random delivery ID. The old
+accepted/ambiguous revision is never replayed.
+
 ## Observation
 
 Prefer correlated SPA-generated request/message-tree evidence. Whole private
@@ -101,6 +130,17 @@ Current public field evidence makes headed real Chrome the V1 support target.
 `--headless=new` gets a separate conformance run and is experimental unless it
 matches headed behavior without stealth/challenge bypass.
 
+## Current MCP deployment constraint
+
+As of the 2026-08-31 architecture review, consumer ChatGPT Pro custom MCP is
+documented read/fetch-only. Because V1 requires state-changing resume/ACK/input
+answer tools, Gate B browser support does not by itself make consumer Pro an
+end-to-end supported foreman.
+
+A candidate Business/Enterprise/Edu workspace must first pass Gate A. Business
+currently exposes the Pro model powered by GPT-5.6 Sol Pro, so the desired
+Pro-model foreman can be tested without weakening the MCP mutation requirement.
+
 ## Alternatives
 
 ### Fully private API client
@@ -112,6 +152,13 @@ pressure to reproduce protective mechanisms.
 
 Rejected as the complete evidence plane. DOM remains necessary for structural
 control but is insufficient for Send/reconciliation truth by itself.
+
+### Deterministic delivery ID as possession fence
+
+Rejected during independent review. A deterministic hash is appropriate for
+idempotency, not an unguessable correlation secret when its inputs are observable
+or enumerable. V1 therefore separates deterministic `delivery_key` from random
+`delivery_id`.
 
 ### `headless_chrome` Rust crate
 
@@ -130,5 +177,7 @@ security, and cross-platform burden before system Chrome has failed a real need.
 
 ## Gate
 
-This ADR is not considered implementation-proven until the authenticated live
-spike in `docs/browser-transport.md` passes. A duplicate Send is a gate failure.
+This ADR is not considered implementation-proven until Gate A identifies a
+write-capable ChatGPT foreman surface and the authenticated live browser spike in
+`docs/browser-transport.md` passes. A duplicate Send or reconstructible random wake
+correlation is a gate failure.
