@@ -7,6 +7,18 @@ The MCP surface exists so a woken ChatGPT foreman can fetch durable truth and
 explicitly disposition it. MCP is not the wake mechanism. The browser wake is not
 the result transport.
 
+## Current deployment constraint
+
+As of the 2026-08-31 review, OpenAI's published ChatGPT developer-mode policy says
+consumer ChatGPT Pro custom MCP is read/fetch-only. Full custom MCP modify/write
+actions are currently a Business/Enterprise/Edu beta capability. Because
+`foreman_resume`, `foreman_ack`, and `foreman_answer_input` are real mutations,
+consumer Pro is not a supported end-to-end V1 foreman surface today.
+
+Business currently exposes GPT-5.6 Sol Pro in its model picker, so Business is a
+candidate for the desired Pro-model foreman while preserving truthful MCP writes.
+The actual workspace/account must still pass the action/confirmation preflight.
+
 ## Compatibility objective
 
 ChatGPT conversations and configured apps can retain/cached tool schemas. Current
@@ -77,29 +89,41 @@ reconcile rather than guessing. Important classes include:
 - `connector_abi_mismatch`
 - `reconciliation_required`
 
-## Wake correlation fence
+## Delivery identity versus wake correlation
 
 MCP itself does not currently give Command Governor a stable, documented ChatGPT
 conversation ID that can be relied on as a tool-call security principal. The
 browser binding still knows the exact target conversation, but a connector can be
-available elsewhere in the same ChatGPT account.
+available elsewhere in the same authenticated workspace.
 
-V1 therefore adds an **anti-confusion correlation fence**:
+V1 therefore separates two concepts:
 
-- every accepted browser wake has an unguessable opaque `delivery_id`;
-- the tiny wake message contains `obligation_id` and `delivery_id`;
-- `foreman_resume` requires that exact `delivery_id`;
-- the daemon verifies the delivery is accepted, belongs to the obligation, and
-  was sent under the current `binding_generation`;
-- bootstrap/status APIs never expose the current accepted wake delivery ID to an
-  arbitrary connector call;
+```text
+delivery_key = H("command-governor/wake-key/v1",
+                 obligation_id,
+                 binding_generation,
+                 delivery_revision)
+
+delivery_id = CSPRNG(>=192 bits)
+```
+
+- `delivery_key` is deterministic, non-secret, and used only for idempotency and
+  deduplication. It never grants possession or mutation authority.
+- `delivery_id` is a cryptographically random opaque correlation ID generated once
+  when the durable delivery is created.
+- the tiny browser wake contains `obligation_id` and the random `delivery_id`;
+- `foreman_resume` requires that exact random `delivery_id`;
+- the daemon verifies the delivery is accepted, belongs to the obligation, targets
+  the current obligation version/source fact, and was sent under the current
+  `binding_generation`;
+- bootstrap/status APIs never expose the current accepted `delivery_id`;
 - `foreman_resume` mints a new claim ID bound to that delivery and generation;
 - ACK/input mutation requires the claim.
 
-`delivery_id` is not advertised as an authentication secret and does not replace
-connector authentication. It is a possession/correlation nonce that prevents a
-stale or unrelated ChatGPT conversation from claiming current work merely by
-calling `foreman_bootstrap` and learning the latest generation.
+The random `delivery_id` is not advertised as the sole authentication secret and
+does not replace connector authentication. It is a possession/correlation nonce
+that prevents a stale or unrelated ChatGPT conversation from claiming current work
+merely by learning deterministic scheduling metadata.
 
 If a future official MCP/ChatGPT metadata field provides a cryptographically
 trustworthy conversation/turn identity, add it as another fence without changing
@@ -110,7 +134,8 @@ the domain model.
 Purpose: let any compatible conversation inspect Command Governor health and
 learn that durable work exists, including conversations that have gone stale.
 
-This tool is read-only and does not claim work.
+This tool is read-only and does not claim work. Because the caller is not proven to
+be the exact bound conversation, bootstrap is deliberately low-information.
 
 Conceptual input:
 
@@ -128,15 +153,20 @@ Conceptual result:
 ```json
 {
   "outstanding_count": 3,
-  "urgent": [
+  "attention_summary": [
     {
-      "obligation_id": "obl_...",
-      "obligation_version": 4,
       "kind": "completed_result",
-      "attention_state": "completed_unprocessed",
-      "priority": 100,
-      "project_ref": "github:DivMode/example",
-      "age_seconds": 42
+      "count": 2,
+      "highest_priority": 100,
+      "oldest_age_seconds": 42,
+      "wake_state": "scheduled_or_accepted"
+    },
+    {
+      "kind": "needs_input",
+      "count": 1,
+      "highest_priority": 90,
+      "oldest_age_seconds": 17,
+      "wake_state": "pending"
     }
   ],
   "binding": {
@@ -153,11 +183,13 @@ Conceptual result:
 }
 ```
 
-`urgent` is a bounded index, not the full result. It intentionally does not return
-the accepted wake delivery ID needed to claim an obligation.
+Bootstrap intentionally does **not** return repository/project refs, task/session
+refs, result content, raw obligation metadata, or the accepted wake `delivery_id`.
+A stale conversation can discover "work exists / this is no longer the active
+binding generation" without learning the possession value needed to claim it.
 
-A stale conversation can therefore discover "work exists / this is no longer the
-active binding generation" without being able to ACK the work.
+The exact browser wake already gives the bound foreman the opaque obligation and
+random delivery IDs needed for resume.
 
 ## `foreman_resume`
 
@@ -174,7 +206,7 @@ Conceptual first-page input:
   "obligation_id": "obl_...",
   "expected_obligation_version": 4,
   "binding_generation": 7,
-  "wake_delivery_id": "del_..."
+  "wake_delivery_id": "del_random_..."
 }
 ```
 
@@ -370,7 +402,8 @@ on command lines when a safer file/stdin/IPC mechanism exists.
 ## Binding capability preflight
 
 `command-governor chatgpt bind` is not successful merely because the connector is
-visible. It must prove the actual account/surface can execute the V1 contract.
+visible. It must prove the actual candidate workspace/account can execute the V1
+contract.
 
 At minimum the preflight verifies:
 
@@ -378,16 +411,19 @@ At minimum the preflight verifies:
 2. bootstrap tool is visible;
 3. a harmless test mutation round trip proves state-changing MCP actions are
    available on this account/surface;
-4. app selection can be attached to the exact browser message;
-5. stale-generation test mutation is rejected;
-6. no user confirmation/plan restriction makes unattended ACK impossible.
+4. the actual confirmation behavior permits the intended legitimate model-driven
+   mutation flow without bypass;
+5. app selection can be attached to the exact browser message;
+6. stale-generation test mutation is rejected.
 
 The test mutation operates on a synthetic preflight record, never a real
 engineering obligation.
 
-If current ChatGPT product policy exposes only read/fetch tools, binding is marked
-`write_capability_unavailable` and the browser may remain logged in, but V1
-foreman automation is unsupported. The daemon does not weaken the invariant.
+Consumer Pro is documented read/fetch-only at this review snapshot and is marked
+unsupported without pretending a preflight can manufacture missing plan
+capabilities. If a candidate Business/Enterprise/Edu surface fails writes or
+confirmation semantics, binding records the exact unsupported state. The daemon
+does not weaken the invariant.
 
 ## Stable-schema upgrade policy
 
