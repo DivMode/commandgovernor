@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/governor-core",
+    "crates/governor-store-sqlite",
+    "crates/governor-testkit",
+    "crates/governor-daemon",
+    "crates/command-governor",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/DivMode/commandgovernor"
+authors = ["Command Governor contributors"]
+
+[workspace.dependencies]
+# Domain and storage crates expose typed errors with `thiserror`; `anyhow` is
+# reserved for binary/composition boundaries and is not added until a boundary
+# genuinely needs it (docs/adr/0002-rust-daemon-and-sqlite.md, "Error policy").
+#
+# Everything else (rusqlite, tokio, clap, ...) is added by the crate that first
+# needs it, so this central list stays honest about what Phase 1 actually uses.
+thiserror = "2.0"
+
+# Internal crates are addressed through the workspace so paths and versions have
+# a single source of truth. Member crates opt in with `foo.workspace = true`.
+governor-core = { path = "crates/governor-core" }
+governor-store-sqlite = { path = "crates/governor-store-sqlite" }
+governor-testkit = { path = "crates/governor-testkit" }
+governor-daemon = { path = "crates/governor-daemon" }
+
+# Repository-wide lint policy, inherited by every member via `[lints] workspace = true`.
+# CI escalates warnings to errors (`cargo clippy ... -- -D warnings`), so this is
+# deliberately modest and durable: it encodes the invariants this project cares
+# about rather than a maximal pedantic ruleset that later work would fight.
+[workspace.lints.rust]
+# Phase 1 needs no unsafe anywhere.
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+mem_forget = "warn"
+# SQLite stores signed 64-bit integers while sequences, generations, and versions
+# are naturally unsigned. A silent truncation or wrap there breaks a durability
+# fence, so numeric conversions must be deliberate rather than implicit.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"

@@ -1,0 +1,15 @@
+[package]
+name = "governor-daemon"
+version = "0.0.0"
+description = "Composition library wiring the Command Governor kernel to its store."
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

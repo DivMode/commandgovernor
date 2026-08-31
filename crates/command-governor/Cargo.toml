@@ -1,0 +1,19 @@
+[package]
+name = "command-governor"
+version = "0.0.0"
+description = "Command Governor command-line entry point."
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "command-governor"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
