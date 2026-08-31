@@ -1,6 +1,6 @@
 # ADR 0004: Stable foreman MCP ABI, exact binding generation, explicit ACK
 
-- **Status:** Proposed, gated by ChatGPT capability preflight
+- **Status:** Proposed, gated by a write-capable ChatGPT workspace surface
 - **Date:** 2026-08-31
 
 ## Context
@@ -14,10 +14,13 @@ Long-lived ChatGPT conversations/apps can retain tool schemas, and current app
 updates require explicit refresh/action enablement. The public ABI must be small
 and stable.
 
-Current OpenAI published product behavior also matters: as of this review, custom
-MCP on Pro cannot be assumed to expose arbitrary state-changing actions, while
-full MCP actions are documented for other plan/beta combinations. A write-capable
-ACK cannot be faked as a read.
+Current OpenAI published product behavior also matters. As of this review,
+consumer **ChatGPT Pro custom MCP is read/fetch-only** in developer mode; full
+custom MCP modify/write actions are currently documented for Business,
+Enterprise, and Edu beta surfaces. Business currently exposes the GPT-5.6 Sol Pro
+model, so a Business workspace can satisfy the desired Pro-model foreman role if
+the live action/confirmation gate passes. A write-capable ACK cannot be faked as a
+read.
 
 ## Decision
 
@@ -41,20 +44,45 @@ answer records a decision/schedules a separate worker-resume delivery.
 Breaking public tool semantics require a new connector ABI/explicit refresh, not
 an invisible mutation under an old conversation.
 
-## Exact binding
+## Exact binding and wake correlation
 
 One active ChatGPT foreman conversation is stored with monotonic
 `binding_generation`. Every mutation requires the current generation plus
 obligation/source/claim fences.
 
-Because MCP does not currently supply a documented trustworthy ChatGPT
-conversation ID as the mutation principal, `foreman_resume` also requires the
-opaque `delivery_id` from the accepted current-generation browser wake. Bootstrap
-never discloses that accepted delivery ID to an unrelated/stale connector turn.
-Resume then mints a claim ID; ACK/input mutation requires that claim.
+MCP does not currently supply a documented trustworthy ChatGPT conversation ID as
+the mutation principal. Therefore browser delivery uses two different identities:
 
-The delivery ID is an anti-confusion correlation nonce, not a replacement for
-connector authentication.
+```text
+delivery_key = H("command-governor/wake-key/v1",
+                 obligation_id,
+                 binding_generation,
+                 delivery_revision)
+
+delivery_id = CSPRNG(>=192 bits)
+```
+
+`delivery_key` is a deterministic, non-secret idempotency/deduplication key. It
+never authorizes a mutation.
+
+`delivery_id` is a random opaque correlation ID generated once when the durable
+delivery is created. The browser wake contains it; bootstrap/status never return
+it. `foreman_resume` requires the exact current accepted `delivery_id`, and the
+daemon verifies that it belongs to the obligation/current generation/current
+version. Resume then mints a claim ID; ACK/input mutation requires that claim.
+
+The random delivery ID is an anti-confusion possession fence, not a replacement
+for connector authentication. A caller that knows only an obligation ID,
+generation, and revision cannot derive it.
+
+## Bootstrap confidentiality
+
+`foreman_bootstrap` is intentionally low-information because the connector may be
+visible from another conversation in the same authenticated workspace. It may
+return health, counts, urgency classes, compatibility and active binding
+generation, but it does not disclose repository/project refs, result contents,
+worker/session refs, or the current accepted delivery ID required for mutation.
+The actual bound wake carries the opaque IDs needed for `foreman_resume`.
 
 ## ACK semantics
 
@@ -79,16 +107,23 @@ may adapt the tunnel to the daemon, but it owns no orchestration state.
 
 ## Capability gate
 
-`chatgpt bind` must feature-test the real account/surface with a synthetic safe
-mutation. If state-changing MCP actions are unavailable, binding records
-`write_capability_unavailable` and V1 automatic foreman processing is unsupported
-on that surface.
+Consumer ChatGPT Pro is **not currently an end-to-end V1 foreman target** because
+its custom MCP surface is documented read/fetch-only. The Rust kernel does not
+weaken its invariant to accommodate that limitation.
 
-The invariant is not weakened. In particular:
+For Business/Enterprise/Edu candidate surfaces, `chatgpt bind` must feature-test
+the real account/workspace with a synthetic safe mutation and must characterize
+confirmation behavior. If state-changing MCP actions are unavailable, blocked, or
+require an interaction incompatible with the intended unattended loop, binding
+records the exact unsupported capability state.
+
+In particular:
 
 - assistant settlement cannot substitute for ACK;
 - browser DOM events cannot substitute for ACK;
-- a read-only tool is not mislabeled to mutate state.
+- a read-only tool is not mislabeled to mutate state;
+- a product confirmation that the model cannot legitimately complete unattended
+  is not bypassed.
 
 ## Alternatives
 
@@ -96,6 +131,13 @@ The invariant is not weakened. In particular:
 
 Rejected because a ChatGPT response can finish without calling Command Governor,
 without reviewing the result, or after a connector/tool failure.
+
+### Deterministic delivery ID as possession token
+
+Rejected. A deterministic unkeyed value derived from obligation/generation/revision
+is suitable as an idempotency key but is not an unguessable possession fence when
+those inputs are observable or enumerable. V1 therefore separates deterministic
+`delivery_key` from random `delivery_id`.
 
 ### One MCP tool per internal feature
 
@@ -114,6 +156,7 @@ foreman's semantic review decision from UI text.
 
 ## Consequences
 
-The V1 architecture may temporarily support fewer ChatGPT plan/surface
-combinations than desired. That is preferable to claiming a durable review loop
-that cannot actually close obligations correctly.
+The V1 architecture currently supports fewer ChatGPT plan/surface combinations
+than desired. A Business/Enterprise/Edu workspace with a supported Pro model is a
+candidate; consumer Pro is not. That is preferable to claiming a durable review
+loop that cannot actually close obligations correctly.
