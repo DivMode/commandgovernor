@@ -11,10 +11,10 @@ Command Governor core
         │
         ├── Worker adapter (Claude semantics)
         │     ├── launch/resume command construction
-        │     ├── structured `claude -p` stream/result parser
+        │     ├── structured `claude -p` online parser
         │     ├── managed lifecycle hooks
         │     ├── native session/turn correlation
-        │     └── bounded final result capture
+        │     └── bounded final-result capture
         │
         └── Runtime adapter (Herdr semantics)
               ├── process/session spawn/adopt
@@ -86,9 +86,9 @@ Primary sources:
 | `Stop` callback | Claude proposed ending a response | **candidate only**; another parallel Stop hook can block and continue |
 | `StopFailure` | turn ended because of Claude API error | strong native failure evidence; reconcile with command exit/result |
 | `SessionEnd` | Claude session termination | strong session-end evidence, not successful-result proof |
-| `PreToolUse` `defer` + confirmed structured run end | durable non-interactive input boundary | authoritative after the provider confirms the deferred/pending stop |
-| `PermissionRequest` | interactive permission dialog evidence | **not available in preferred `-p` mode**; do not depend on it for managed V1 |
-| `PermissionDenied` | auto-mode classifier denial | denial observation; not necessarily terminal |
+| `PreToolUse` `defer` + confirmed `tool_deferred` result | durable non-interactive single-tool input boundary | authoritative only after exact single-tool fence and provider confirmation |
+| `PermissionRequest` | non-interactive/interactive permission decision signal | current docs say it can fire when no prompt UI exists; weaker exact tool correlation than PreToolUse because current input lacks `tool_use_id` |
+| `PermissionDenied` | permission denial observation | denial evidence; not necessarily terminal |
 | `UserPromptSubmit` / structured resumed-turn start | continued/new turn accepted | authoritative start evidence when fenced correlation matches |
 | `PostToolUse` / `PostToolBatch` | progress heartbeat | bounded liveness evidence only |
 | `PostToolUseFailure` | progress/error evidence | not terminal unless the managed protocol subsequently terminates |
@@ -111,10 +111,15 @@ Reasons:
 
 - explicit structured final result rather than PTY text inference;
 - `system/init` exposes session metadata/capabilities in current releases;
-- current `PreToolUse` can defer a tool call in non-interactive mode;
+- current `PreToolUse` can defer one tool call in non-interactive mode;
 - documented print-mode success/failure exit behavior;
 - bounded final result can be captured explicitly;
 - process lifetime and Claude logical session can be fenced separately.
+
+The worker-host consumes the structured stream online. Current stream-json can
+contain intermediate tool-use/tool-result records, so those records are **never
+written to a durable raw spool**. Only allowlisted sanitized run receipts and the
+bounded final assistant result candidate may be persisted.
 
 Feature-detect capabilities where available rather than relying only on Claude
 version strings.
@@ -124,8 +129,7 @@ structured protocol as semantic evidence rather than treating PTY status as the
 semantic API.
 
 Interactive Claude is a separate/future adapter mode. It must define its own
-evidence contract and may use interactive-only events such as `PermissionRequest`;
-it cannot inherit `-p` semantics by analogy.
+evidence contract; it cannot inherit `-p` semantics by analogy.
 
 ## Configuration isolation
 
@@ -152,11 +156,11 @@ The Command Governor settings file:
 - is validated before each managed spawn/adoption that relies on it;
 - has a hook-contract epoch.
 
-## Durable worker-host / spool boundary
+## Durable worker-host / managed-run staging boundary
 
-The structured programmatic result must survive the **authoritative daemon**
-restarting while Claude continues. Relying only on the daemon's stdout reader would
-recreate the original lost-completion failure.
+The final programmatic result must survive the **authoritative daemon** restarting
+while Claude continues. Relying only on the daemon's stdout reader would recreate
+the original lost-completion failure.
 
 V1 therefore uses a small Rust worker-host mode in the same product/runtime:
 
@@ -164,40 +168,43 @@ V1 therefore uses a small Rust worker-host mode in the same product/runtime:
 Herdr/session runtime
   -> command-governor worker-host claude <opaque-turn-id>
        -> launches/resumes `claude -p`
-       -> captures structured stream in owner-private bounded spool
+       -> parses structured stdout online
+       -> writes allowlisted sanitized managed-run receipts
+       -> writes one bounded final-result candidate if/when complete
        -> writes sanitized child-exit receipt
        -> exits
 ```
 
 The worker-host owns **no task/obligation truth**. It is a crash-surviving transport
-shim. Its sensitive spool is separate from SQLite/general logs. The daemon later
-validates the stream/exit fence, extracts only the bounded final response into the
-immutable result-artifact store, and applies transport-spool retention.
+shim. The daemon later validates the final-result/run/exit fences, promotes the
+bounded final response through the immutable result-artifact store, and applies
+staging retention.
 
-The spool must:
+There is intentionally **no complete provider-stream spool**. Intermediate
+stream-json records—including tool_use/tool_result blocks—are processed in memory
+and discarded after required safe evidence is extracted.
+
+Managed-run staging must:
 
 - be owner-private;
 - be allocated by Command Governor, never a worker-supplied path;
-- distinguish a complete final structured record from truncation;
-- persist a sanitized exit receipt only after child completion;
+- distinguish a complete final structured result from truncation;
+- persist only allowlisted run/exit metadata plus the bounded final-result candidate;
+- exclude raw prompt text, tool args/results, commands, cwd, transcript paths,
+  terminal transcript, arbitrary environment data, and generic provider JSON;
 - be excluded from routine diagnostics;
-- be integrity-checked before result extraction;
-- have an explicit size ceiling and retention policy.
+- be integrity-checked before result promotion;
+- have explicit size ceilings and retention policy.
 
 ## Durable sanitized hook inbox
 
-Hooks remain useful for progress, defer intent, starts/stops-as-candidates, and
-other native observations that happen before final process settlement. A hook that
-only sends live IPC can lose exactly those observations during daemon restart.
+Hooks remain useful for progress, defer intent, starts/stops-as-candidates,
+permission decisions, and other native observations that happen before final
+process settlement. A hook that only sends live IPC can lose exactly those
+observations during daemon restart.
 
 Managed hooks therefore first deposit a **sanitized durable envelope** to a private
-hook inbox, then return to Claude:
-
-```text
-~/.command-governor/
-  hook-inbox/          # owner private
-    <event-id>.json    # atomic temp -> rename
-```
+per-turn hook inbox location, then return to Claude.
 
 Deposit sequence:
 
@@ -205,7 +212,7 @@ Deposit sequence:
 2. validate event class and Command Governor correlation fences;
 3. extract only allowed IDs/safe fields;
 4. derive/dedupe source identity from stable non-secret facts;
-5. write owner-only temp envelope;
+5. write owner-only temp envelope to the allocated narrow inbox location;
 6. fsync as required;
 7. atomic rename;
 8. sync directory as required;
@@ -213,12 +220,12 @@ Deposit sequence:
 10. exit under Claude's documented hook contract.
 
 Daemon ingestion deduplicates the event transactionally and only then removes or
-archives the inbox file. The inbox contains lifecycle envelopes, **not transcript
-or structured provider-result content**.
+archives the inbox file. The inbox contains lifecycle envelopes, **not transcript,
+raw tool input, or provider-result content**.
 
-## Hook correlation
+## Hook correlation and minimum worker environment
 
-Managed turns pass only non-secret opaque Governor IDs needed for correlation, for
+Managed turns pass only opaque Governor IDs/locators needed for correlation, for
 example:
 
 ```text
@@ -226,20 +233,30 @@ COMMAND_GOVERNOR_SESSION_ID
 COMMAND_GOVERNOR_SESSION_INCARNATION_ID
 COMMAND_GOVERNOR_TURN_ID
 COMMAND_GOVERNOR_HOOK_EPOCH
-COMMAND_GOVERNOR_STATE_ROOT
+COMMAND_GOVERNOR_HOOK_INBOX
 ```
+
+`COMMAND_GOVERNOR_HOOK_INBOX` is a narrow per-turn location allocated for hook
+deposits. The general Command Governor state-root path is not intentionally
+exported to Claude.
 
 When Claude exposes a native session ID through its structured protocol/hook
 schema, record it as a safe external identity. An event that cannot prove it
 belongs to the current incarnation/turn is quarantined for history/reconciliation
 and cannot mutate the current turn.
 
-## Forbidden safe persistence
+This minimizes accidental exposure; it is not an OS sandbox against a malicious
+process running as the same user.
 
-The hook inbox, SQLite event ledger, safe logs and diagnostics must never persist:
+## Forbidden durable persistence
+
+Except for the explicitly bounded **final assistant result** needed for review,
+Command Governor durable stores—including hook inbox, SQLite/WAL, safe logs,
+diagnostics, managed-run receipts, and worker-host staging—must never persist:
 
 - prompt text;
 - raw tool arguments;
+- raw tool results;
 - shell commands;
 - cwd;
 - transcript path;
@@ -248,8 +265,9 @@ The hook inbox, SQLite event ledger, safe logs and diagnostics must never persis
 - browser/GitHub credentials;
 - complete Claude structured stream/provider response bodies.
 
-Progress persists only identity/time/safe class. Sensitive provider stream/result
-content belongs only in the explicit worker-host/result-artifact privacy boundary.
+Progress persists only identity/time/safe class. The final-result candidate and
+immutable result artifact contain only the bounded final worker result required by
+the central durable-review invariant.
 
 For blocking input, SQLite stores safe opaque input identity/classification, not
 raw tool arguments. Current question detail is obtained ephemerally from the native
@@ -260,54 +278,59 @@ answer.
 ## `AskUserQuestion` / non-interactive defer
 
 Current Claude docs support `defer` from `PreToolUse` in non-interactive `-p`; the
-process can exit with the tool call preserved for later resume.
+process can exit with the tool call preserved for later same-session resume.
+Current docs also state that `defer` is **ignored if Claude emits several tool calls
+at once**.
 
-V1 flow:
+V1 clean-defer flow therefore requires an exact single-tool case:
 
 ```text
-Claude calls AskUserQuestion
-  -> CG PreToolUse hook identifies exact fenced tool call
+Claude calls AskUserQuestion as one tool call
+  -> CG PreToolUse hook identifies exact fenced tool_use_id
   -> sanitized defer intent is durable
-  -> hook returns current documented DEFER decision
-  -> structured managed-run result confirms the call is pending/deferred
+  -> hook returns current documented defer decision
+  -> structured managed-run result confirms stop_reason/tool_deferred
   -> obligation = needs_input
   -> exact ChatGPT foreman wakes and claims it
   -> current question is obtained ephemerally from native session/provider
   -> foreman_answer_input records authorized structured answer
   -> worker continuation delivery is claimed/fenced
-  -> same Claude session resumes via current supported mechanism
+  -> same Claude session resumes via current supported `--resume` mechanism
   -> structured/native resumed-turn evidence arrives
   -> obligation returns to running
 ```
 
 Do not project clean `needs_input` merely because the hook attempted defer. If the
-provider ignores/misparses it or a multi-tool shape cannot be safely preserved,
-create reconciliation attention instead.
+provider ignores/misparses it or a multi-tool shape exists, create
+reconciliation/manual attention instead.
+
+The durable receipt for a deferred call stores only safe opaque identity/class,
+not `deferred_tool_use.input` or the raw question/options.
 
 ## Permission handling in preferred `-p` mode
 
-Current Claude hook guidance explicitly says **`PermissionRequest` hooks do not
-fire in non-interactive mode (`-p`)** and directs automated permission decisions to
-`PreToolUse`.
+The independent review corrected the earlier draft: current Claude hook docs say
+**`PermissionRequest` hooks can run in sessions that cannot show a prompt**, which
+includes non-interactive/background contexts. If no hook decides in such a
+context, the tool is denied.
 
-Therefore the preferred managed V1 path is:
+Current `PermissionRequest` input carries `tool_name` and `tool_input` but lacks the
+same exact `tool_use_id` correlation available to `PreToolUse`. Therefore V1 uses
+these surfaces differently:
 
-1. classify the exact fenced tool call in `PreToolUse` before permission-mode
-   execution;
-2. for already delegated low-risk engineering work, return only the current
-   provider-supported decision consistent with user/managed deny rules;
-3. for a decision that must leave the worker (foreman/user), use confirmed
-   non-interactive `defer` where the current tool/provider shape supports it;
-4. for destructive, credential-sensitive, materially broader, or unknown actions,
-   preserve user-owned authorization and fail closed.
+1. `PreToolUse` is the preferred exact tool-call policy/defer boundary;
+2. `PermissionRequest` may make/record a bounded permission decision only under
+   the pinned release's proven correlation/ordering contract;
+3. a `PermissionRequest` event alone is not treated as proof of a durable,
+   later-resumable pause;
+4. already delegated low-risk engineering actions may proceed only as current
+   Claude settings/permission rules permit;
+5. destructive, credential-sensitive, materially broader, or unknown actions stay
+   user-owned and fail closed.
 
-Current docs also state that a PreToolUse allow cannot override deny/ask rules from
-settings; hooks can tighten restrictions but cannot necessarily loosen them. The
-adapter must model that explicitly.
-
-`PermissionRequest` remains relevant only for an interactive/future adapter mode
-or another provider mode where conformance proves it fires. It is **not** a source
-of truth in the preferred `claude -p` V1 contract.
+Current docs also state permission hook outcomes interact with settings/rule
+precedence; an allow is not treated as authority to override a stronger recorded
+user/managed restriction. The adapter models that explicitly.
 
 Current `--permission-prompt-tool` may be investigated, but it does not become V1
 lifecycle authority until live testing proves disconnect/restart/pending-decision
@@ -375,10 +398,11 @@ Closing over unresolved work creates reconciliation attention, not success.
 
 ## Result capture
 
-For managed `claude -p`, the worker-host private spool contains the provider
-structured stream. The daemon validates the exact session/turn and child exit,
-extracts the bounded final response, and commits it through the immutable
-result-artifact sequence in [data-model.md](data-model.md).
+For managed `claude -p`, the worker-host parses provider structured output online.
+When and only when a complete final `result` arrives, it writes the bounded final
+assistant response candidate plus sanitized run/exit receipts. The daemon validates
+the exact session/turn/result and child exit, then commits the candidate through
+the immutable result-artifact sequence in [data-model.md](data-model.md).
 
 Only after artifact durability and the terminal event/obligation transaction may
 `completed_unprocessed` become visible to wake scheduling.
@@ -388,17 +412,33 @@ not the entire stream/transcript; large code/diff evidence remains in GitHub.
 
 ## Failure capture
 
-`StopFailure`, non-zero child outcome, truncated/no-final-result spool, explicit
+`StopFailure`, non-zero child outcome, truncated/no-final-result run, explicit
 interrupt, and transport loss are separate evidence classes. The adapter maps them
-deterministically and does not persist raw provider error bodies into the safe
-ledger.
+deterministically and does not persist raw provider error bodies into durable safe
+state.
 
 ## Session re-adoption / incarnation
 
 After restart, re-adopt a Claude session only when continuity is proven from stable
 native/runtime identities and stored fences. Otherwise create a new incarnation.
-Delayed old-incarnation hook/spool receipts can be retained for history but cannot
-mutate current work.
+Delayed old-incarnation hook/run receipts can be retained for history only if their
+safe form passes the same redaction contract; they cannot mutate current work.
+
+## Same-user trust boundary
+
+The worker-host owns no orchestration API authority, but V1 does not claim hostile
+same-user process containment. Claude and tools normally run as the same OS user as
+Command Governor, so owner-only filesystem modes do not stop a deliberately
+malicious same-user process from modifying files it can discover.
+
+V1 therefore:
+
+- minimizes exposed state paths/capabilities;
+- does not export the general state root to Claude;
+- validates all imported staging/inbox data as untrusted;
+- treats repository/worker text as untrusted policy input;
+- explicitly leaves hostile-worker OS containment to a future separate-user or
+  sandbox/broker design.
 
 ## Deterministic fake worker requirements
 
@@ -409,16 +449,20 @@ The testkit must simulate:
 - Stop candidate allowed;
 - Stop candidate blocked by another parallel hook followed by continued work;
 - later final structured result + exit;
-- truncated stream / missing exit;
+- truncated final result / missing exit;
 - StopFailure / SessionEnd;
-- AskUserQuestion defer intent + confirmed deferred result;
+- single-tool AskUserQuestion defer intent + confirmed `tool_deferred` result;
+- multi-tool defer ignored/unsupported;
+- non-interactive PermissionRequest decision behavior;
 - PreToolUse permission policy/defer/deny;
 - resumed turn;
 - duplicate terminal event;
 - late old-incarnation event;
 - stale runtime `working` disagreement;
 - daemon-offline sanitized hook inbox;
-- daemon-offline worker-host final-result/exit spool.
+- daemon-offline final-result candidate + run/exit receipts;
+- provider stream containing prompt/tool-use/tool-result sentinels that must never
+  appear in durable staging/DB/logs.
 
 Core lifecycle correctness is proven against these fakes. Real Claude is a
 provider-adapter conformance gate, not the only place lifecycle bugs can be found.
