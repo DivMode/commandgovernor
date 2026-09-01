@@ -31,6 +31,7 @@ use governor_core::fence::{
 };
 use governor_core::id::ClaimId;
 use governor_core::obligation::{Disposition, ObligationState};
+use governor_core::session::SessionRelation;
 use governor_core::time::DurationMs;
 use governor_store_sqlite::{AcknowledgeRequest, MintClaimRequest};
 use governor_testkit::browser::{BrowserWorld, FakeBrowser, WakePayload, deliver_wake};
@@ -40,14 +41,16 @@ use governor_testkit::foreman::bootstrap;
 use governor_testkit::harness::Harness;
 use governor_testkit::rng::SplitMix64;
 use governor_testkit::scenario::{
-    FINAL_RESULT, LIVE_CLAIM, RETENTION_GRACE, accept_wake, accepted_work, arm_send, bind,
-    expire_claim, handoff, id, lapse_claim, mint_claim, open_turn, publish_result, schedule_wake,
-    sentinel_message_ref, sentinel_turn_request, snapshot, source, start_worker,
+    FINAL_RESULT, LIVE_CLAIM, LoadoutFixture, MANAGED_CONFIG, RETENTION_GRACE, accept_wake,
+    accepted_work, arm_send, bind, bind_loadout, expire_claim, handoff, id, lapse_claim,
+    mint_claim, open_named_turn, open_turn, publish_managed_config_as, publish_result,
+    record_lineage, resolve_loadout_as, schedule_wake, sentinel_message_ref, sentinel_turn_request,
+    snapshot, source, start_worker,
 };
 use governor_testkit::sentinels::{
     FINAL_RESULT_SENTINEL, FORBIDDEN, assert_injected_confined, assert_no_forbidden_bytes,
     assert_none_of, assert_result_sentinel_confined, contains, sweep, token_shaped,
-    unrepresentable,
+    unrepresentable, value_of,
 };
 
 /// The workspace root, from this crate's manifest directory.
@@ -210,6 +213,31 @@ fn sec_001_injected_token_shaped_sentinels_reach_one_column_each() {
             retention_grace: RETENTION_GRACE,
         })
         .expect("a fully fenced ACK");
+    // The Slice-2 half: four more token-shaped credentials, one per public
+    // request field that accepts a `SafeToken` and did not exist before. Each
+    // is pushed through the ordinary API and must land in exactly one column.
+    let (_, config) = publish_managed_config_as(
+        &store,
+        &mut artifacts,
+        MANAGED_CONFIG,
+        value_of("config signing key"),
+    );
+    let fixture = LoadoutFixture::new(77, config);
+    let loadout = resolve_loadout_as(
+        &store,
+        &fixture,
+        &["read"],
+        &["scout"],
+        value_of("worker adapter key"),
+        value_of("runtime access token"),
+        value_of("role bearer token"),
+    )
+    .expect("resolving a loadout whose adapter labels carry sentinels");
+    let child = open_named_turn(&store, "sentinel-child");
+    bind_loadout(&store, &child, loadout.fence()).expect("binding the launch loadout");
+    record_lineage(&store, &turn, child.session, SessionRelation::Scout)
+        .expect("recording lineage");
+
     store
         .verify_projections()
         .expect("replay still matches with sentinels in the columns");

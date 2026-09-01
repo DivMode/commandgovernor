@@ -34,15 +34,18 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use governor_core::fence::{DeliveryRevision, SafeToken};
+use governor_core::session::SessionRelation;
 use governor_testkit::harness::Harness;
 use governor_testkit::scenario::{
-    FINAL_RESULT, accept_wake, accepted_work, open_turn, publish_result, record_failure,
-    schedule_wake, sentinel_message_ref, sentinel_turn_request, start_worker,
+    FINAL_RESULT, LoadoutFixture, MANAGED_CONFIG, accept_wake, accepted_work, bind_loadout,
+    open_named_turn, open_turn, publish_managed_config_as, publish_result, record_failure,
+    record_lineage, resolve_loadout_as, schedule_wake, sentinel_message_ref, sentinel_turn_request,
+    start_worker,
 };
 use governor_testkit::sentinels::{
     FINAL_RESULT_SENTINEL, FORBIDDEN, assert_absent, assert_injected_confined,
     assert_no_forbidden_bytes, assert_none_of, assert_result_sentinel_confined, contains, sweep,
-    token_shaped, unrepresentable,
+    token_shaped, unrepresentable, value_of,
 };
 
 /// The binary under test.
@@ -848,6 +851,32 @@ fn sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes() {
         )
         .expect("scheduling");
         accept_wake(&store, &wake, work.generation, sentinel_message_ref());
+
+        // And a delegated child whose adapter labels and configuration media
+        // type carry the four Slice-2 sentinels, so the daemon's own startup —
+        // which now reads every bound loadout and every managed configuration —
+        // has something real to leak into a status line or a log record.
+        let (_, config) = publish_managed_config_as(
+            &store,
+            &mut artifacts,
+            MANAGED_CONFIG,
+            value_of("config signing key"),
+        );
+        let fixture = LoadoutFixture::new(55, config);
+        let loadout = resolve_loadout_as(
+            &store,
+            &fixture,
+            &["read"],
+            &["scout"],
+            value_of("worker adapter key"),
+            value_of("runtime access token"),
+            value_of("role bearer token"),
+        )
+        .expect("a loadout whose adapter labels carry sentinels");
+        let child = open_named_turn(&store, "sentinel-child");
+        bind_loadout(&store, &child, loadout.fence()).expect("binding the launch loadout");
+        record_lineage(&store, &injected, child.session, SessionRelation::Scout)
+            .expect("recording lineage");
 
         work.wake.delivery_id.expose_hex()
     };

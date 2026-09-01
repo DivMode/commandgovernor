@@ -19,22 +19,36 @@ use governor_artifacts::{
 };
 use governor_core::artifact::{ArtifactDigest, RetentionState};
 use governor_core::binding::{ConversationRef, WriteCapabilityState};
+use governor_core::effect::DestinationRef;
 use governor_core::fence::{
     AttemptNo, BindingGeneration, DeliveryRevision, IncarnationGeneration, ObligationVersion,
     SafeToken, SourceRef,
 };
 use governor_core::foreman_turn::ProviderMessageRef;
-use governor_core::id::{ClaimId, Id, IdKind, ObligationId};
+use governor_core::id::{
+    CapabilityProfileId, ClaimId, DelegationPolicyId, Id, IdKind, ObligationId, SessionId,
+    WorkerLoadoutId,
+};
 use governor_core::obligation::Disposition;
+use governor_core::session::{
+    CapabilityName, CapabilityProfileDigest, HookContractEpoch, ManagedConfigRef,
+    ModelPolicyDigest, ModelPolicyRef, ResumePolicy, RuntimeKind, SessionRelation, WorkerKind,
+    WorkerLoadoutDigest, WorkerLoadoutFence, WorkerRole,
+};
 use governor_core::time::{DurationMs, Timestamp};
 use governor_core::worker_evidence::{ChildExitStatus, ManagedRunOutcome, WorkerFailureClass};
+use governor_daemon::worker::{
+    ResumeRefusal, ResumeWorkerRequest, WorkerSpawnAuthorization, authorize_worker_resume,
+};
 use governor_store_sqlite::{
-    AcknowledgeRequest, Acknowledged, ArmDeliverySendRequest, BindForemanRequest, ClaimedDelivery,
-    CompletionReceipts, CreateOrClaimDeliveryRequest, DeliverHandoffRequest, DeliveryOutcome,
-    ExpireClaimRequest, ExpiredClaim, MintClaimRequest, MintedClaim, ObligationAdvanced,
-    ObligationSnapshot, OpenWorkerTurnRequest, OpenedWorkerTurn, ProjectSpec,
-    PublishWorkerResultRequest, PublishedResult, RecordDeliveryOutcomeRequest,
-    RecordWorkerFailureRequest, RecordWorkerStartedRequest, SessionSpec, Store, StoreError,
+    AcknowledgeRequest, Acknowledged, ArmDeliverySendRequest, BindForemanRequest,
+    BindSessionLoadoutRequest, BoundSessionLoadout, ClaimedDelivery, CompletionReceipts,
+    CreateOrClaimDeliveryRequest, DeliverHandoffRequest, DeliveryOutcome, ExpireClaimRequest,
+    ExpiredClaim, MintClaimRequest, MintedClaim, ObligationAdvanced, ObligationSnapshot,
+    OpenWorkerTurnRequest, OpenedWorkerTurn, ProjectSpec, PublishWorkerResultRequest,
+    PublishedResult, RecordDeliveryOutcomeRequest, RecordManagedConfigRequest,
+    RecordSessionLineageRequest, RecordWorkerFailureRequest, RecordWorkerStartedRequest,
+    RecordedLineage, ResolveWorkerLoadoutRequest, ResolvedLoadout, SessionSpec, Store, StoreError,
     StoreResult,
 };
 use rusqlite::Connection;
@@ -644,6 +658,12 @@ pub fn artifact_rows(conn: &Connection) -> Vec<ArtifactRow> {
 
 /// Every `storage_ref` a committed row references.
 ///
+/// **Both** artifact families, because both live in `objects/` and an orphan
+/// sweep given a partial reference set quarantines bytes the ledger still
+/// requires. A managed configuration missing from here would be swept away and
+/// every session bound to the loadout that embeds it would stop resuming — so
+/// this mirrors the daemon's own reference set rather than approximating it.
+///
 /// # Panics
 ///
 /// As [`artifact_rows`].
@@ -652,7 +672,28 @@ pub fn committed_keys(conn: &Connection) -> BTreeSet<StorageKey> {
     artifact_rows(conn)
         .into_iter()
         .filter_map(|row| row.key().ok())
+        .chain(
+            managed_config_rows(conn)
+                .into_iter()
+                .filter_map(|storage_ref| StorageKey::parse(&storage_ref).ok()),
+        )
         .collect()
+}
+
+/// Every committed managed configuration's storage key, as text.
+///
+/// # Panics
+///
+/// Panics when the table cannot be read.
+#[must_use]
+pub fn managed_config_rows(conn: &Connection) -> Vec<String> {
+    let mut statement = conn
+        .prepare("SELECT storage_ref FROM managed_config_artifacts ORDER BY storage_ref")
+        .expect("preparing the managed-configuration query");
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("querying managed configurations");
+    rows.map(|row| row.expect("a configuration row")).collect()
 }
 
 /// Storage refs referenced by an obligation in `completed_unprocessed`.
@@ -714,4 +755,333 @@ pub fn assert_no_completion_without_durable_bytes(harness: &Harness, context: &s
             "{context}: the stored length disagrees with the committed row"
         );
     }
+}
+
+// --- Session loadouts, lineage, and resume ------------------------------------
+
+/// The bounded managed configuration a fixture worker is launched under.
+///
+/// Real bytes, published through `governor-artifacts` like any other artifact,
+/// because a configuration a test could not corrupt on disk would not exercise
+/// the resume path's re-read at all.
+pub const MANAGED_CONFIG: &[u8] =
+    b"# managed worker configuration\nhooks = 1\ncapabilities = explicit\n";
+
+/// Publishes one managed configuration and records its metadata row.
+///
+/// # Panics
+///
+/// Panics when either half refuses, which no fence in this sequence permits.
+pub fn publish_managed_config(
+    store: &Store,
+    artifacts: &mut ArtifactStore,
+    bytes: &[u8],
+) -> (PublishedArtifact, ManagedConfigRef) {
+    publish_managed_config_as(store, artifacts, bytes, "text.toml")
+}
+
+/// As [`publish_managed_config`], with an explicit opaque media-type label.
+///
+/// The label is a separate parameter so the SEC-001 suite can push a
+/// token-shaped sentinel through it and prove where it lands.
+///
+/// # Panics
+///
+/// Panics when either half refuses.
+pub fn publish_managed_config_as(
+    store: &Store,
+    artifacts: &mut ArtifactStore,
+    bytes: &[u8],
+    media_type: &str,
+) -> (PublishedArtifact, ManagedConfigRef) {
+    let published = artifacts
+        .publish(PublishRequest {
+            bytes,
+            media_type: token(media_type),
+        })
+        .expect("publishing a managed configuration");
+    let recorded = store
+        .record_managed_config(RecordManagedConfigRequest {
+            artifact: published.durable(),
+            hook_contract_epoch: HookContractEpoch::new(1),
+        })
+        .expect("recording the configuration metadata");
+    (published, recorded.reference)
+}
+
+/// The stable configuration identities one logical loadout is resolved from.
+///
+/// They are the *caller's* in the real system too — a role, a profile and a
+/// policy each outlive any one snapshot of their contents — which is what makes
+/// "the same loadout id with different contents" expressible at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadoutFixture {
+    /// Stable loadout identity.
+    pub loadout: WorkerLoadoutId,
+    /// Stable capability-profile identity.
+    pub capability_profile: CapabilityProfileId,
+    /// Stable delegation-policy identity.
+    pub delegation_policy: DelegationPolicyId,
+    /// Model policy, identity and digest, resolved outside the store.
+    pub model_policy: ModelPolicyRef,
+    /// The managed configuration the loadout embeds.
+    pub config: ManagedConfigRef,
+}
+
+impl LoadoutFixture {
+    /// Builds a fixture whose identities all derive from one seed.
+    #[must_use]
+    pub fn new(seed: u128, config: ManagedConfigRef) -> Self {
+        Self {
+            loadout: id(seed * 10 + 1),
+            capability_profile: id(seed * 10 + 2),
+            delegation_policy: id(seed * 10 + 3),
+            model_policy: ModelPolicyRef::new(
+                id(seed * 10 + 4),
+                ModelPolicyDigest::from_persisted([u8::try_from(seed % 251).unwrap_or(0); 32]),
+            ),
+            config,
+        }
+    }
+}
+
+/// Resolves and commits one immutable loadout snapshot.
+///
+/// # Errors
+///
+/// Returns whatever the store refused on.
+pub fn resolve_loadout(
+    store: &Store,
+    fixture: &LoadoutFixture,
+    capabilities: &[&str],
+    delegates: &[&str],
+) -> StoreResult<ResolvedLoadout> {
+    resolve_loadout_as(
+        store,
+        fixture,
+        capabilities,
+        delegates,
+        "claude",
+        "herdr",
+        "worker",
+    )
+}
+
+/// As [`resolve_loadout`], with explicit adapter and role labels.
+///
+/// The three labels are parameters so the SEC-001 suite can push token-shaped
+/// sentinels through them; every other caller takes the defaults.
+///
+/// # Errors
+///
+/// Returns whatever the store refused on.
+pub fn resolve_loadout_as(
+    store: &Store,
+    fixture: &LoadoutFixture,
+    capabilities: &[&str],
+    delegates: &[&str],
+    worker_kind: &str,
+    runtime_kind: &str,
+    role: &str,
+) -> StoreResult<ResolvedLoadout> {
+    store.resolve_worker_loadout(ResolveWorkerLoadoutRequest {
+        loadout: fixture.loadout,
+        worker_kind: WorkerKind::new(token(worker_kind)),
+        runtime_kind: RuntimeKind::new(token(runtime_kind)),
+        role: WorkerRole::new(token(role)),
+        model_policy: fixture.model_policy,
+        capability_profile: fixture.capability_profile,
+        capabilities: capabilities
+            .iter()
+            .map(|name| CapabilityName::new(token(name)))
+            .collect(),
+        delegation_policy: fixture.delegation_policy,
+        delegated_roles: delegates
+            .iter()
+            .map(|role| WorkerRole::new(token(role)))
+            .collect(),
+        managed_config: fixture.config,
+        hook_contract_epoch: HookContractEpoch::new(1),
+        resume_policy: ResumePolicy::ExactLoadout,
+    })
+}
+
+/// Binds one incarnation to one launch loadout.
+///
+/// # Errors
+///
+/// Returns whatever the store refused on.
+pub fn bind_loadout(
+    store: &Store,
+    session: &OpenedWorkerTurn,
+    fence: WorkerLoadoutFence,
+) -> StoreResult<BoundSessionLoadout> {
+    store.bind_session_loadout(BindSessionLoadoutRequest {
+        session: session.session,
+        incarnation: session.incarnation,
+        loadout: fence,
+    })
+}
+
+/// Records one lineage edge from a parent turn to a child session.
+///
+/// # Errors
+///
+/// Returns whatever guard the store refused on.
+pub fn record_lineage(
+    store: &Store,
+    parent: &OpenedWorkerTurn,
+    child: SessionId,
+    relation: SessionRelation,
+) -> StoreResult<RecordedLineage> {
+    store.record_session_lineage(RecordSessionLineageRequest {
+        parent_session: parent.session,
+        child_session: child,
+        parent_turn: parent.turn,
+        relation,
+    })
+}
+
+/// One delegated child: its own session, its launch loadout, and its lineage.
+#[derive(Debug)]
+pub struct SpawnedChild {
+    /// The child's registered session, incarnation and first turn.
+    pub session: OpenedWorkerTurn,
+    /// The immutable snapshot the child was launched under.
+    pub loadout: ResolvedLoadout,
+    /// The configuration identities that snapshot was resolved from.
+    pub fixture: LoadoutFixture,
+    /// The published configuration bytes, for a test that wants to corrupt them.
+    pub config: PublishedArtifact,
+    /// How the child relates to its parent.
+    pub relation: SessionRelation,
+}
+
+impl SpawnedChild {
+    /// The exact identity+digest pair a resume must present.
+    #[must_use]
+    pub const fn fence(&self) -> WorkerLoadoutFence {
+        self.loadout.fence()
+    }
+}
+
+/// Registers a child session, gives it a launch loadout, and records lineage.
+///
+/// The whole spawn prefix in one call, in the order the daemon performs it: the
+/// configuration is durable before the loadout embeds it, the loadout is
+/// committed before the incarnation is bound to it, and the lineage edge is
+/// recorded last.
+///
+/// # Panics
+///
+/// Panics when any step refuses, which no fence in this sequence permits.
+pub fn spawn_child(
+    store: &Store,
+    artifacts: &mut ArtifactStore,
+    parent: &OpenedWorkerTurn,
+    relation: SessionRelation,
+    seed: u128,
+    capabilities: &[&str],
+) -> SpawnedChild {
+    let session = open_named_turn(store, &format!("child-{seed}"));
+    let (config, reference) = publish_managed_config(store, artifacts, MANAGED_CONFIG);
+    let fixture = LoadoutFixture::new(seed, reference);
+    let loadout = resolve_loadout(store, &fixture, capabilities, &["scout"])
+        .expect("resolving a launch loadout");
+    bind_loadout(store, &session, loadout.fence()).expect("binding the launch loadout");
+    record_lineage(store, parent, session.session, relation).expect("recording lineage");
+    SpawnedChild {
+        session,
+        loadout,
+        fixture,
+        config,
+        relation,
+    }
+}
+
+/// Runs the daemon's eleven-step resume authorization for one child.
+///
+/// The real composition, not a stand-in: the artifact read and the
+/// `ManagedConfigVerified` witness happen outside any transaction and the store
+/// re-checks them inside one.
+///
+/// # Errors
+///
+/// Returns whatever the resume path refused on.
+pub fn authorize_resume(
+    store: &Store,
+    artifacts: &ArtifactStore,
+    child: &SpawnedChild,
+    presented: WorkerLoadoutFence,
+) -> Result<WorkerSpawnAuthorization, ResumeRefusal> {
+    authorize_worker_resume(
+        store,
+        artifacts,
+        &ResumeWorkerRequest {
+            session: child.session.session,
+            incarnation: child.session.incarnation,
+            presented,
+            destination: DestinationRef::new(token("herdr"), token("spawn"), token("pane.v1")),
+            source: source("cg.internal", "resume-1", "spawn"),
+            daemon_epoch: store.daemon_epoch(),
+        },
+    )
+}
+
+/// Every `(capability_profile_id, digest_hex, capability_name)` row.
+///
+/// # Panics
+///
+/// Panics when the table cannot be read.
+#[must_use]
+pub fn capability_entries(conn: &Connection) -> Vec<(String, String, String)> {
+    let mut statement = conn
+        .prepare(
+            "SELECT capability_profile_id, digest_hex, capability_name
+               FROM capability_profile_entries
+              ORDER BY capability_profile_id, digest_hex, capability_name",
+        )
+        .expect("preparing the capability query");
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("querying capability entries");
+    rows.map(|row| row.expect("a capability row")).collect()
+}
+
+/// The capability names one exact profile snapshot granted.
+///
+/// # Panics
+///
+/// As [`capability_entries`].
+#[must_use]
+pub fn capabilities_of(
+    conn: &Connection,
+    profile: CapabilityProfileId,
+    digest_hex: &str,
+) -> Vec<String> {
+    capability_entries(conn)
+        .into_iter()
+        .filter(|(id, digest, _)| id == &profile.to_string() && digest == digest_hex)
+        .map(|(_, _, name)| name)
+        .collect()
+}
+
+/// The lowercase hex form of one loadout digest, as the row stores it.
+#[must_use]
+pub fn digest_hex(digest: WorkerLoadoutDigest) -> String {
+    hex_of(digest.as_bytes())
+}
+
+/// The lowercase hex form of one capability-profile digest.
+#[must_use]
+pub fn profile_digest_hex(digest: CapabilityProfileDigest) -> String {
+    hex_of(digest.as_bytes())
+}
+
+fn hex_of(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }

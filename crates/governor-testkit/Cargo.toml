@@ -19,6 +19,13 @@ authors.workspace = true
 governor-core.workspace = true
 governor-store-sqlite.workspace = true
 governor-artifacts.workspace = true
+# The resume authorization is a *composition*: the artifact read happens in the
+# daemon because the store cannot open a file, and the store re-checks what the
+# daemon proved. Testing that anywhere else would mean writing the sequence a
+# second time, and two copies of an ordering rule are two things that can
+# disagree. This crate is `publish = false` dev tooling and no production crate
+# depends on it, so the dependency ships nowhere.
+governor-daemon.workspace = true
 
 # Read-only inspection connections. A fake that asserts "the store already
 # shows `claimed`" has to look at the committed bytes through its own

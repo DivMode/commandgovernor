@@ -67,7 +67,6 @@ use sha2::{Digest as _, Sha256};
 
 /// What the daemon is being asked to launch or resume.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct ResumeWorkerRequest {
     /// Logical session being resumed.
     pub session: SessionId,

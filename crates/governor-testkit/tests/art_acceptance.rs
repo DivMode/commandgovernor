@@ -35,9 +35,10 @@ use governor_testkit::failpoints::{ArtifactCrash, StoreCrash};
 use governor_testkit::harness::Harness;
 use governor_testkit::keys::SeededKeys;
 use governor_testkit::scenario::{
-    ArtifactRow, FINAL_RESULT, LIVE_CLAIM, accepted_work, acknowledge, artifact_rows,
-    assert_no_completion_without_durable_bytes, committed_keys, expire_claim, handed_over, handoff,
-    lapse_claim, mint_claim, open_turn, publish_bytes, publish_result, snapshot, start_worker,
+    ArtifactRow, FINAL_RESULT, LIVE_CLAIM, MANAGED_CONFIG, accepted_work, acknowledge,
+    artifact_rows, assert_no_completion_without_durable_bytes, committed_keys, expire_claim,
+    handed_over, handoff, lapse_claim, mint_claim, open_turn, publish_bytes, publish_result,
+    snapshot, start_worker,
 };
 
 /// The store failpoints the publication transaction actually passes through.
@@ -363,6 +364,25 @@ fn art_005_private_modes_survive_a_composed_lifecycle() {
     );
     let work = accepted_work(&store, &mut artifacts, "conv-A");
 
+    // The managed-configuration population is new, and it lives in the same
+    // `objects/` directory under the same regime. That is a reason to assert
+    // it, not a reason to assume it: "it is covered for free" is exactly the
+    // claim a test is for.
+    let (config, _) =
+        governor_testkit::scenario::publish_managed_config(&store, &mut artifacts, MANAGED_CONFIG);
+    assert!(
+        harness
+            .files_in("objects")
+            .iter()
+            .any(|name| name == config.key().as_str()),
+        "ART-005: a managed configuration is published into objects/ like any artifact"
+    );
+    assert_ne!(
+        config.key().as_str(),
+        work.artifact.key().as_str(),
+        "ART-005: and under its own immutable key"
+    );
+
     let assert_private = |stage: &str| {
         for dir in ["objects", "incoming", "quarantine"] {
             let mode = std::fs::metadata(harness.artifact_root().join(dir))
@@ -382,6 +402,20 @@ fn art_005_private_modes_survive_a_composed_lifecycle() {
         }
     };
     assert_private("after publication");
+    assert_eq!(
+        std::fs::metadata(
+            harness
+                .artifact_root()
+                .join("objects")
+                .join(config.key().as_str())
+        )
+        .expect("the published configuration")
+        .permissions()
+        .mode()
+            & 0o777,
+        0o600,
+        "ART-005: a managed configuration is owner-only too"
+    );
 
     // A restart re-opens and repairs the layout; it must not widen it.
     drop(store);

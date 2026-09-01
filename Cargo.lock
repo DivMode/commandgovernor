@@ -230,6 +230,7 @@ version = "0.0.0"
 dependencies = [
  "governor-artifacts",
  "governor-core",
+ "governor-daemon",
  "governor-store-sqlite",
  "rusqlite",
  "tempfile",

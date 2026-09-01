@@ -107,6 +107,30 @@ pub const FORBIDDEN: &[Sentinel] = &[
         value: "CGSENTINELENVSECRET",
         token_shaped: true,
     },
+    // Four more token-shaped credentials, one per public request field that
+    // Slice 2 added and that accepts a `SafeToken`. Each is credential-shaped
+    // on purpose: the confusion worth catching is a secret arriving in a field
+    // meant for an opaque adapter or role label.
+    Sentinel {
+        label: "worker adapter key",
+        value: "sk-worker-CGSENTINELWORKERKEY",
+        token_shaped: true,
+    },
+    Sentinel {
+        label: "runtime access token",
+        value: "rt_CGSENTINELRUNTIMETOKEN",
+        token_shaped: true,
+    },
+    Sentinel {
+        label: "role bearer token",
+        value: "role-CGSENTINELROLETOKEN",
+        token_shaped: true,
+    },
+    Sentinel {
+        label: "config signing key",
+        value: "cfg_CGSENTINELCONFIGKEY",
+        token_shaped: true,
+    },
 ];
 
 /// One token-shaped sentinel, pushed through a real API on purpose.
@@ -159,6 +183,29 @@ pub const INJECTED: &[Injection] = &[
             ("browser_deliveries", "accepted_message_ref"),
             ("events", "safe_metadata_json"),
         ],
+    },
+    // The four Slice-2 fields. None reaches `events.safe_metadata_json`: the
+    // loadout event carries identities and the loadout digest only, precisely
+    // so each of these lands in exactly one column.
+    Injection {
+        label: "worker adapter key",
+        field: "ResolveWorkerLoadoutRequest.worker_kind",
+        allowed: &[("worker_loadouts", "worker_kind")],
+    },
+    Injection {
+        label: "runtime access token",
+        field: "ResolveWorkerLoadoutRequest.runtime_kind",
+        allowed: &[("worker_loadouts", "runtime_kind")],
+    },
+    Injection {
+        label: "role bearer token",
+        field: "ResolveWorkerLoadoutRequest.role",
+        allowed: &[("worker_loadouts", "role")],
+    },
+    Injection {
+        label: "config signing key",
+        field: "PublishRequest.media_type",
+        allowed: &[("managed_config_artifacts", "media_type")],
     },
 ];
 

@@ -107,6 +107,17 @@ pub const WRITE_OPERATIONS: &[&str] = &[
     "renew_lease",
     "release_lease",
     "recover_startup",
+    "record_managed_config",
+    "resolve_worker_loadout",
+    "bind_session_loadout",
+    "record_session_lineage",
+    "authorize_worker_spawn",
+    "raise_loadout_unverifiable",
+    "resolve_loadout_unverifiable",
+    "raise_managed_config_missing",
+    "resolve_managed_config_missing",
+    "raise_lineage_broken",
+    "resolve_lineage_broken",
 ];
 
 /// A store failpoint that aborts one transaction, once.

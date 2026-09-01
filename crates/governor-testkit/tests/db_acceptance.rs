@@ -32,12 +32,14 @@ use governor_core::lease::{
 };
 use governor_core::mutation::{MutationCommandKind, MutationFingerprint, SafeMutationResult};
 use governor_core::obligation::{Disposition, ObligationState};
+use governor_core::session::SessionRelation;
 use governor_core::time::DurationMs;
 use governor_store_sqlite::{
     AckMutationReceiptRequest, AcquireLeaseRequest, BeginMutationRequest, CancelObligationRequest,
     CompleteMutationRequest, ExternalOutcome, LeaseHolderRequest, MarkExternalDispatchedRequest,
     OpenCondition, PublishWorkerResultRequest, RecordExternalIntentRequest,
-    RecordExternalOutcomeRequest, ResourceRef, ResultArtifactMissingRequest, Store, StoreError,
+    RecordExternalOutcomeRequest, ResourceRef, ResultArtifactMissingRequest, SessionHealthRequest,
+    Store, StoreError, StoreResult,
 };
 use governor_testkit::browser::{BrowserWorld, FakeBrowser};
 use governor_testkit::clock::DEFAULT_CLOCK_START_MS;
@@ -48,10 +50,12 @@ use governor_testkit::harness::Harness;
 use governor_testkit::restart::{KillWindow, restart_loop, run_kill_window};
 use governor_testkit::rng::SplitMix64;
 use governor_testkit::scenario::{
-    ALREADY_LAPSED, FINAL_RESULT, LIVE_CLAIM, accept_wake, accepted_work, acknowledge, arm_send,
-    artifact_rows, bind, bind_request, completion_receipts, expire_claim, handed_over, handoff, id,
-    lapse_claim, mint_claim, open_turn, publish_bytes, publish_result, record_failure,
-    record_outcome, schedule_wake, snapshot, source, start_worker, token, worker_turn_request,
+    ALREADY_LAPSED, FINAL_RESULT, LIVE_CLAIM, LoadoutFixture, MANAGED_CONFIG, accept_wake,
+    accepted_work, acknowledge, arm_send, artifact_rows, authorize_resume, bind, bind_loadout,
+    bind_request, completion_receipts, expire_claim, handed_over, handoff, id, lapse_claim,
+    mint_claim, open_named_turn, open_turn, publish_bytes, publish_managed_config, publish_result,
+    record_failure, record_lineage, record_outcome, resolve_loadout, schedule_wake, snapshot,
+    source, spawn_child, start_worker, token, worker_turn_request,
 };
 
 // --- DB-001: replay equivalence ----------------------------------------------
@@ -73,6 +77,37 @@ fn db_001_projection_replay_equivalence() {
         let turn = open_turn(&store);
         let generation = bind(&store, "conv-A");
         store.verify_projections().expect("replay after setup");
+
+        // Branch: the turn sometimes delegates a child session, which adds an
+        // immutable loadout, a binding and a lineage edge to the ledger. All
+        // three have to replay alongside everything else, on every step.
+        let child = (rng.next_below(2) == 0).then(|| {
+            let child = spawn_child(
+                &store,
+                &mut artifacts,
+                &turn,
+                SessionRelation::Scout,
+                u128::from(seed) + 100,
+                &["read"],
+            );
+            let verified = store
+                .verify_projections()
+                .expect("replay after the delegation");
+            assert_eq!(verified.lineage_edges, 1, "seed {seed}");
+            assert_eq!(verified.loadouts, 1, "seed {seed}");
+            child
+        });
+
+        // Branch: a delegated child is sometimes resumed, which commits a spawn
+        // intent beside everything else.
+        if let Some(child) = &child
+            && rng.next_below(2) == 0
+        {
+            let artifacts_ro = harness.open_artifacts();
+            authorize_resume(&store, &artifacts_ro, child, child.fence())
+                .expect("the launch fence resumes");
+            store.verify_projections().expect("replay after the resume");
+        }
 
         start_worker(&store, turn.obligation, "run-1");
         store.verify_projections().expect("replay after the start");
@@ -208,7 +243,16 @@ fn db_001_projection_replay_equivalence() {
         drop(store);
         let store = harness.open().expect("reopen");
         let verified = store.verify_projections().expect("replay after a restart");
-        assert_eq!(verified.obligations, 1, "seed {seed}");
+        assert_eq!(
+            verified.obligations,
+            if child.is_some() { 2 } else { 1 },
+            "seed {seed}"
+        );
+        assert_eq!(
+            verified.lineage_edges,
+            usize::from(child.is_some()),
+            "seed {seed}"
+        );
     }
 }
 
@@ -308,7 +352,63 @@ fn operations_under_test() -> &'static [&'static str] {
         "raise_result_artifact_missing",
         "resolve_result_artifact_missing",
         "record_terminal_evidence_conflict",
+        "record_managed_config",
+        "resolve_worker_loadout",
+        "bind_session_loadout",
+        "record_session_lineage",
+        "authorize_worker_spawn",
+        "raise_managed_config_missing",
+        "resolve_managed_config_missing",
+        "raise_loadout_unverifiable",
+        "resolve_loadout_unverifiable",
+        "raise_lineage_broken",
+        "resolve_lineage_broken",
     ]
+}
+
+/// Raises then resolves one session-scoped condition under a crash.
+///
+/// The six session health operations differ only in which method they call, so
+/// the prefix — a spawned child with a bound launch loadout — is written once.
+fn session_health_cell(
+    harness: &Harness,
+    window: KillWindow,
+    resolve_first: bool,
+    operation: impl FnOnce(&Store, SessionHealthRequest) -> StoreResult<()>,
+) -> bool {
+    run_kill_window(
+        harness,
+        window,
+        |store| {
+            let mut artifacts = harness.open_artifacts();
+            let parent = open_turn(store);
+            let child = spawn_child(
+                store,
+                &mut artifacts,
+                &parent,
+                SessionRelation::Scout,
+                90,
+                &["read"],
+            );
+            let request = SessionHealthRequest {
+                session: child.session.session,
+            };
+            if resolve_first {
+                store
+                    .raise_managed_config_missing(request)
+                    .expect("something to resolve");
+                store
+                    .raise_loadout_unverifiable(request)
+                    .expect("something to resolve");
+                store
+                    .raise_lineage_broken(request)
+                    .expect("something to resolve");
+            }
+            request
+        },
+        |store, request| operation(store, request),
+    )
+    .fired
 }
 
 /// Builds the prefix one operation needs, runs it under the crash, and asserts.
@@ -707,6 +807,114 @@ fn run_cell(window: KillWindow) -> bool {
             },
             |store, request| store.resolve_result_artifact_missing(request).map(drop),
         ),
+        "record_managed_config" => run_kill_window(
+            &harness,
+            window,
+            |_store| (),
+            |store, ()| {
+                let mut artifacts = harness.open_artifacts();
+                let published = publish_bytes(&mut artifacts, MANAGED_CONFIG)
+                    .expect("publishing a configuration");
+                store
+                    .record_managed_config(governor_store_sqlite::RecordManagedConfigRequest {
+                        artifact: published.durable(),
+                        hook_contract_epoch: governor_core::session::HookContractEpoch::new(1),
+                    })
+                    .map(drop)
+            },
+        ),
+        "resolve_worker_loadout" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                let (_, reference) = publish_managed_config(store, &mut artifacts, MANAGED_CONFIG);
+                LoadoutFixture::new(91, reference)
+            },
+            |store, fixture| resolve_loadout(store, &fixture, &["read"], &["scout"]).map(drop),
+        ),
+        "bind_session_loadout" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                let session = open_turn(store);
+                let (_, reference) = publish_managed_config(store, &mut artifacts, MANAGED_CONFIG);
+                let fixture = LoadoutFixture::new(92, reference);
+                let loadout =
+                    resolve_loadout(store, &fixture, &["read"], &["scout"]).expect("resolving");
+                (session, loadout)
+            },
+            |store, (session, loadout)| bind_loadout(store, &session, loadout.fence()).map(drop),
+        ),
+        "record_session_lineage" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let parent = open_turn(store);
+                let child = open_named_turn(store, "crash-child");
+                (parent, child)
+            },
+            |store, (parent, child)| {
+                record_lineage(store, &parent, child.session, SessionRelation::Scout).map(drop)
+            },
+        ),
+        "authorize_worker_spawn" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                let parent = open_turn(store);
+                spawn_child(
+                    store,
+                    &mut artifacts,
+                    &parent,
+                    SessionRelation::Scout,
+                    93,
+                    &["read"],
+                )
+            },
+            |store, child| {
+                let artifacts = harness.open_artifacts();
+                match authorize_resume(store, &artifacts, &child, child.fence()) {
+                    Ok(_) => Ok(()),
+                    // The crash surfaces as the store refusal it is; every
+                    // other refusal would be a real defect and is re-raised.
+                    Err(governor_daemon::worker::ResumeRefusal::Store(error)) => Err(error),
+                    Err(other) => panic!("{}: {other:?}", window.label()),
+                }
+            },
+        ),
+        "raise_managed_config_missing" => {
+            return session_health_cell(&harness, window, false, |store, request| {
+                store.raise_managed_config_missing(request).map(drop)
+            });
+        }
+        "resolve_managed_config_missing" => {
+            return session_health_cell(&harness, window, true, |store, request| {
+                store.resolve_managed_config_missing(request).map(drop)
+            });
+        }
+        "raise_loadout_unverifiable" => {
+            return session_health_cell(&harness, window, false, |store, request| {
+                store.raise_loadout_unverifiable(request).map(drop)
+            });
+        }
+        "resolve_loadout_unverifiable" => {
+            return session_health_cell(&harness, window, true, |store, request| {
+                store.resolve_loadout_unverifiable(request).map(drop)
+            });
+        }
+        "raise_lineage_broken" => {
+            return session_health_cell(&harness, window, false, |store, request| {
+                store.raise_lineage_broken(request).map(drop)
+            });
+        }
+        "resolve_lineage_broken" => {
+            return session_health_cell(&harness, window, true, |store, request| {
+                store.resolve_lineage_broken(request).map(drop)
+            });
+        }
         "record_terminal_evidence_conflict" => run_kill_window(
             &harness,
             window,
