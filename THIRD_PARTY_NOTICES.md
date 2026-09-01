@@ -62,7 +62,6 @@ revisions, and changes here before distribution.
 
 No CCCC author or maintainer is implied to endorse Command Governor.
 
-
 ## Durable-orchestration implementation references — no code copied
 
 ### Salvor
@@ -106,6 +105,58 @@ No implementation source from them is currently vendored/copied. Any future sour
 incorporation requires file-level provenance and the applicable license/NOTICE
 obligations before distribution.
 
+## Pi session / memory implementation references — no code copied
+
+These projects were reviewed for ADR 0007 and the session/memory/analytics research
+review. Command Governor will independently implement the selected mechanisms in
+Rust rather than porting their TypeScript source.
+
+### pi-config
+
+- Project: `amosblomqvist/pi-config`
+- Revision reviewed: `f82da563ab05d66729492d64c7ed4e96db3663f3`
+- URL: <https://github.com/amosblomqvist/pi-config>
+
+Concepts studied include the `analyze-sessions` cost/session analytics workflow,
+role-specific extensions and agents, prompt-pattern mining, and the composition of
+interactive subagents with observational memory.
+
+### pi-interactive-subagents
+
+- Project: `amosblomqvist/pi-interactive-subagents`
+- License: MIT
+- Revision reviewed: `c3e8b53c0754ae5ccc19fdab5a7481ec039bc2f7`
+- URL: <https://github.com/amosblomqvist/pi-interactive-subagents>
+
+Concepts studied include persistent logical child addressability, immutable
+resolved loadout snapshots across resume, lineage-only/fork session relationships,
+recursive tool/delegation allowlists, asynchronous child result steering, parked
+input, and activity/stall observations.
+
+### pi-observational-memory
+
+- Project: `amosblomqvist/pi-observational-memory`
+- License: MIT
+- Revision reviewed: `78a1efcfdd46332253fb289724f05b26dfc7769e`
+- URL: <https://github.com/amosblomqvist/pi-observational-memory>
+
+Concepts studied include fixed source chunks, parallel observer workers,
+coverage watermarks, deterministic compaction rendering, bounded active memory,
+serialized consolidation into per-session long-term memory, fork seeding, and
+separate observer/consolidator cost accounting.
+
+### pi-dictate and learn
+
+- `amosblomqvist/pi-dictate`, revision
+  `3208b563e3adfd070ac7b256a09ba9fc7b869f50`, MIT — reviewed as operator UX;
+  not a V1 control-plane implementation priority.
+- `amosblomqvist/learn`, revision
+  `7cfd8942f82ab9476e63572387e1fe9bcea5082c` — reviewed for specialist
+  researcher/visual-agent composition.
+
+No author or maintainer of these projects is implied to endorse Command Governor.
+No implementation source from them is currently vendored/copied.
+
 ## Additional research references — no code copied
 
 These projects were studied to understand current ChatGPT Web browser/private-API
@@ -130,7 +181,9 @@ Rust browser alternatives examined but not copied/depended on yet:
   `a2e15ae659c4b3957883e34de879bd8b38360ce5`
 
 See [`docs/research/2026-08-31-technology-review.md`](docs/research/2026-08-31-technology-review.md)
-for the architecture evidence derived from these sources.
+for the browser architecture evidence, and
+[`docs/research/2026-08-31-session-memory-and-analytics-review.md`](docs/research/2026-08-31-session-memory-and-analytics-review.md)
+for the Pi/session/memory evidence.
 
 ## External dependencies
 
