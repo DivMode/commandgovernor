@@ -24,25 +24,27 @@
 //! | [`del_012_target_obligation_version_reverified_before_send`] | DEL-012 | covered here |
 //! | [`del_013_one_revision_is_never_submitted_twice`] | DEL-013 | covered here |
 //! | [`del_014_semantic_evidence_required_for_accepted`] | DEL-014 | covered here |
-//! | [`del_015_only_exact_reconciliation_promotes_ambiguous`] | DEL-015 | pure half covered here and in `governor-core`; **no store operation applies `ReconciledAccepted`** — see the note |
+//! | [`del_015_only_exact_reconciliation_promotes_ambiguous`] | DEL-015 | covered here: inexact evidence leaves the revision ambiguous, exact current-generation evidence promotes it without any Send, and the promoted revision stays frozen |
 //! | [`del_016_startup_recovery_precedes_browser_recovery`] | DEL-016 | covered here |
 //! | [`del_016_a_quarantined_attempt_refuses_browser_recovery`] | DEL-016 (negative) | covered here |
 //! | [`del_017_new_resume_revision_gets_new_random_correlation_id`] | DEL-017 | covered here |
 //! | [`del_018_deterministic_metadata_cannot_reconstruct_delivery_id`] | DEL-018 | covered here (64 independently seeded state roots) |
 
+use governor_core::binding::ConversationRef;
 use governor_core::delivery::{DELIVERY_ID_BYTES, DeliveryId, DeliveryKey, WeakBrowserSignal};
 use governor_core::fence::{AttemptNo, BindingGeneration, DeliveryRevision};
+use governor_core::foreman_turn::ProviderMessageRef;
 use governor_core::id::ObligationId;
 use governor_core::obligation::ObligationState;
 use governor_core::outbound::{AmbiguityReason, DeliveryState, FailureClass};
 use governor_core::time::DurationMs;
-use governor_store_sqlite::{DeliveryOutcome, Store};
+use governor_store_sqlite::{DeliveryOutcome, ReconcileAmbiguousDeliveryRequest, Store};
 use governor_testkit::browser::{BrowserWorld, FakeBrowser, SendBehaviour, deliver_wake};
 use governor_testkit::dump::{assert_unchanged, count, dump_domain, scalar};
 use governor_testkit::harness::Harness;
 use governor_testkit::scenario::{
     FINAL_RESULT, LIVE_CLAIM, accepted_work, arm_send, bind, mint_claim, open_turn, publish_result,
-    record_outcome, schedule_wake, snapshot, start_worker,
+    record_outcome, schedule_wake, snapshot, start_worker, token,
 };
 
 /// The `browser_deliveries.state` label the store holds.
@@ -773,19 +775,15 @@ fn del_015_only_exact_reconciliation_promotes_ambiguous() {
         DeliveryState::Ambiguous
     );
 
-    // Phase 1 has **no store operation** that applies `ReconciledAccepted`, so
-    // the promotion half cannot be driven durably here. What is provable is the
-    // half that matters for safety: nothing in the store's surface promotes an
-    // ambiguous revision, and trying changes nothing.
+    // The ordinary outcome path never promotes an ambiguous attempt: a late
+    // acceptance report is refused rather than believed.
     let before = dump_domain(&harness.inspect());
     let error = record_outcome(
         &store,
         &wake,
         wake.attempt,
         DeliveryOutcome::Accepted {
-            message: governor_core::foreman_turn::ProviderMessageRef::new(
-                governor_testkit::scenario::token("msg-late"),
-            ),
+            message: ProviderMessageRef::new(governor_testkit::scenario::token("msg-late")),
         },
     )
     .expect_err("an ambiguous attempt is terminal to the outcome operation");
@@ -796,11 +794,142 @@ fn del_015_only_exact_reconciliation_promotes_ambiguous() {
         "DEL-015: a late acceptance report changes nothing",
     );
     assert_eq!(delivery_state(&harness).as_deref(), Some("ambiguous"));
+
+    // Reconciliation is the one path that promotes, and only on exact evidence.
+    // Everything short of it is refused with zero rows changed, and the
+    // refusals do not say which half was wrong.
+    //
+    // "Wrong message" is exercised as a message presented against the wrong
+    // delivery, which is the only shape the store can decide. A revision is
+    // ambiguous precisely because no message was ever recorded for it, so there
+    // is nothing on this side to compare a *different* message identity
+    // against; what binds evidence to a revision is the pair the caller must
+    // present — the random correlation ID and the bound conversation.
+    let conversation = ConversationRef::new(token("conv-A"));
+    let message = ProviderMessageRef::new(token("msg-found"));
+    let wrong: [(&str, ReconcileAmbiguousDeliveryRequest); 2] = [
+        (
+            "a random correlation ID",
+            ReconcileAmbiguousDeliveryRequest {
+                delivery_id: DeliveryId::from_persisted_bytes([0x5a; DELIVERY_ID_BYTES]),
+                binding_generation: generation,
+                conversation: conversation.clone(),
+                message: message.clone(),
+            },
+        ),
+        (
+            "a conversation that is not the bound one",
+            ReconcileAmbiguousDeliveryRequest {
+                delivery_id: wake.delivery_id.clone(),
+                binding_generation: generation,
+                conversation: ConversationRef::new(token("conv-B")),
+                message: message.clone(),
+            },
+        ),
+    ];
+    for (label, request) in wrong {
+        let before = dump_domain(&harness.inspect());
+        let error = store
+            .reconcile_ambiguous_delivery(request)
+            .expect_err("inexact evidence never promotes");
+        assert_eq!(
+            error.conflict_code(),
+            Some("unknown_delivery_id"),
+            "DEL-015: {label} must be refused without saying which half was wrong"
+        );
+        assert_unchanged(
+            &before,
+            &dump_domain(&harness.inspect()),
+            &format!("DEL-015: {label} changed nothing"),
+        );
+        assert_eq!(delivery_state(&harness).as_deref(), Some("ambiguous"));
+    }
+
+    // A superseded generation is refused too: reconciliation is only ever
+    // against the surface that is bound *now*.
+    let rebound = bind(&store, "conv-B");
+    let error = store
+        .reconcile_ambiguous_delivery(ReconcileAmbiguousDeliveryRequest {
+            delivery_id: wake.delivery_id.clone(),
+            binding_generation: generation,
+            conversation: conversation.clone(),
+            message: message.clone(),
+        })
+        .expect_err("the wake's generation is no longer current");
+    assert_eq!(error.conflict_code(), Some("stale_binding_generation"));
+    assert_eq!(delivery_state(&harness).as_deref(), Some("ambiguous"));
+    assert_ne!(rebound, generation);
+
+    // Exact evidence, against the generation the wake actually belongs to.
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let mut artifacts = harness.open_artifacts();
+    let (obligation, wake, generation) = accepted_work_without_send(&store, &mut artifacts);
+    let mut browser = FakeBrowser::attach(
+        &harness.database_path(),
+        BrowserWorld {
+            send_behaviour: SendBehaviour::LoseObservation,
+            ..BrowserWorld::healthy("conv-A")
+        },
+    );
+    assert_eq!(
+        deliver_wake(&store, &mut browser, obligation, generation, &wake),
+        DeliveryState::Ambiguous
+    );
+
+    let sends = browser.sends().len();
+    let promoted = store
+        .reconcile_ambiguous_delivery(ReconcileAmbiguousDeliveryRequest {
+            delivery_id: wake.delivery_id.clone(),
+            binding_generation: generation,
+            conversation: ConversationRef::new(token("conv-A")),
+            message: ProviderMessageRef::new(token("msg-found")),
+        })
+        .expect("DEL-015: exact current-generation evidence promotes");
+    assert_eq!(promoted, DeliveryState::Accepted);
+    assert_eq!(delivery_state(&harness).as_deref(), Some("accepted"));
+    assert_eq!(
+        scalar(&harness.inspect(), "SELECT state FROM delivery_attempts").as_deref(),
+        Some("accepted"),
+        "the ambiguous attempt is the one that was promoted"
+    );
     assert_eq!(
         browser.sends().len(),
-        1,
-        "and produces no second submission"
+        sends,
+        "DEL-015: promotion happens without any Send"
     );
+
+    // The promoted revision is still frozen: it never resends, and a repeat of
+    // the exact same reconciliation converges instead of doing anything twice.
+    let before = dump_domain(&harness.inspect());
+    let error = schedule_wake(&store, obligation, generation, DeliveryRevision::FIRST)
+        .expect_err("an accepted revision never claims another attempt");
+    assert_eq!(error.conflict_code(), Some("delivery_revision_frozen"));
+    assert_eq!(
+        store
+            .reconcile_ambiguous_delivery(ReconcileAmbiguousDeliveryRequest {
+                delivery_id: wake.delivery_id.clone(),
+                binding_generation: generation,
+                conversation: ConversationRef::new(token("conv-A")),
+                message: ProviderMessageRef::new(token("msg-found")),
+            })
+            .expect("an exact repeat is idempotent"),
+        DeliveryState::Accepted
+    );
+    assert_unchanged(
+        &before,
+        &dump_domain(&harness.inspect()),
+        "DEL-015: the promoted revision is frozen",
+    );
+    assert_eq!(browser.sends().len(), sends);
+
+    // And the promotion is real rather than cosmetic: the revision is now the
+    // obligation's accepted wake, and it replays as one.
+    mint_claim(&store, obligation, &wake, generation, LIVE_CLAIM)
+        .expect("a promoted wake is an accepted wake");
+    store
+        .verify_projections()
+        .expect("the reconciliation replays from its event");
 }
 
 #[test]

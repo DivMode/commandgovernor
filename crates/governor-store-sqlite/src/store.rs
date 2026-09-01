@@ -40,11 +40,17 @@ use crate::ops::claim::{
 };
 use crate::ops::delivery::{
     ArmDeliverySend, ArmDeliverySendRequest, ClaimedDelivery, CreateOrClaimDelivery,
-    CreateOrClaimDeliveryRequest, RecordDeliveryOutcome, RecordDeliveryOutcomeRequest,
+    CreateOrClaimDeliveryRequest, ReconcileAmbiguousDelivery, ReconcileAmbiguousDeliveryRequest,
+    RecordDeliveryOutcome, RecordDeliveryOutcomeRequest,
 };
 use crate::ops::effect::{
     GrantedPermit, MarkExternalDispatched, MarkExternalDispatchedRequest, RecordExternalIntent,
     RecordExternalIntentRequest, RecordExternalOutcome, RecordExternalOutcomeRequest,
+};
+use crate::ops::health::{
+    HealthConditionRecorded, RaiseForemanUnreachable, RaiseForemanUnreachableRequest,
+    RaiseResultArtifactMissing, RecordTerminalEvidenceConflict, ResolveResultArtifactMissing,
+    ResultArtifactMissingRequest, TerminalEvidenceConflictRequest,
 };
 use crate::ops::lease::{
     AcquireLease, AcquireLeaseRequest, GrantedLease, LeaseHolderRequest, ReleaseLease, RenewLease,
@@ -295,6 +301,31 @@ impl Store {
             .call::<RecordDeliveryOutcome, _>(request, Command::RecordDeliveryOutcome)
     }
 
+    /// Promotes an ambiguous wake revision to accepted on exact evidence.
+    ///
+    /// No Send happens and none becomes possible: the revision was already
+    /// frozen and stays frozen (`docs/state-machines.md` "Ambiguous
+    /// reconciliation", `docs/testing.md` DEL-015).
+    ///
+    /// # Errors
+    ///
+    /// - [`governor_core::error::Conflict::UnknownDeliveryId`] when the
+    ///   correlation ID or the conversation does not name a current delivery —
+    ///   deliberately undifferentiated;
+    /// - [`governor_core::error::Conflict::StaleBindingGeneration`] when the
+    ///   revision is not from the current generation;
+    /// - [`governor_core::error::Conflict::IllegalDeliveryTransition`] when the
+    ///   revision is not ambiguous, and
+    ///   [`governor_core::error::Conflict::DeliveryRevisionFrozen`] when it is
+    ///   already accepted on *different* evidence.
+    pub fn reconcile_ambiguous_delivery(
+        &self,
+        request: ReconcileAmbiguousDeliveryRequest,
+    ) -> StoreResult<governor_core::outbound::DeliveryState> {
+        self.writer
+            .call::<ReconcileAmbiguousDelivery, _>(request, Command::ReconcileAmbiguousDelivery)
+    }
+
     /// Mints one claim from an accepted current-generation wake.
     ///
     /// # Errors
@@ -500,6 +531,77 @@ impl Store {
     /// Returns a corrupt-row error for an undecodable condition.
     pub fn open_health_conditions(&self) -> StoreResult<Vec<OpenCondition>> {
         self.writer.query(Command::OpenHealthConditions)
+    }
+
+    /// Opens `foreman_unreachable` for an obligation whose wake budget is spent.
+    ///
+    /// Attention only: it closes nothing, schedules nothing, and a repeat while
+    /// the condition is open changes no row (`docs/testing.md` GPT-006).
+    ///
+    /// # Errors
+    ///
+    /// [`governor_core::error::Conflict::ObligationClosed`] for work nobody is
+    /// owed any more.
+    pub fn raise_foreman_unreachable(
+        &self,
+        request: RaiseForemanUnreachableRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<RaiseForemanUnreachable, _>(request, Command::RaiseForemanUnreachable)
+    }
+
+    /// Opens `result_artifact_missing` for an artifact an open obligation pins.
+    ///
+    /// The explicit repair state `docs/testing.md` DB-008 requires. It does not
+    /// make the obligation processable, and it does not close it.
+    ///
+    /// # Errors
+    ///
+    /// - [`governor_core::error::Conflict::ObligationClosed`] for closed work;
+    /// - [`governor_core::error::Conflict::IllegalObligationTransition`] when
+    ///   the obligation does not require that artifact.
+    pub fn raise_result_artifact_missing(
+        &self,
+        request: ResultArtifactMissingRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<RaiseResultArtifactMissing, _>(request, Command::RaiseResultArtifactMissing)
+    }
+
+    /// Closes `result_artifact_missing` after the bytes verified again.
+    ///
+    /// # Errors
+    ///
+    /// [`governor_core::error::Conflict::IllegalObligationTransition`] when the
+    /// obligation does not require that artifact.
+    pub fn resolve_result_artifact_missing(
+        &self,
+        request: ResultArtifactMissingRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<ResolveResultArtifactMissing, _>(request, Command::ResolveResultArtifactMissing)
+    }
+
+    /// Records contradictory terminal evidence for a turn that already has one.
+    ///
+    /// `docs/testing.md` OBL-006. The arbitration is `governor-core`'s: only
+    /// [`governor_core::worker_evidence::WorkerOutcome::NeedsReconciliation`]
+    /// opens a condition, and what is stored is that class and the turn — never
+    /// a receipt, a payload, or a second obligation.
+    ///
+    /// # Errors
+    ///
+    /// [`governor_core::error::Conflict::IllegalObligationTransition`] when the
+    /// turn holds no confirmed terminal result to contradict, or when the
+    /// presented receipts are not contradictory at all.
+    pub fn record_terminal_evidence_conflict(
+        &self,
+        request: TerminalEvidenceConflictRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer.call::<RecordTerminalEvidenceConflict, _>(
+            request,
+            Command::RecordTerminalEvidenceConflict,
+        )
     }
 
     /// Resolves an external attempt without offering a permit.

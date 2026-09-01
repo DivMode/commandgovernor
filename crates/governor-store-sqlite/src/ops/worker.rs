@@ -148,7 +148,7 @@ pub struct CompletionReceipts {
 }
 
 impl CompletionReceipts {
-    fn classify(&self) -> WorkerOutcome {
+    pub(crate) fn classify(&self) -> WorkerOutcome {
         ManagedRunEvidence::new()
             .with_final_result(FinalResultReceipt {
                 run_ref: self.run_ref.clone(),

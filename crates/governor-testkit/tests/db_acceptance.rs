@@ -11,7 +11,7 @@
 //! | [`db_005_a_second_daemon_supersedes_the_first`] | DB-005 | **store-side half only** — see the note |
 //! | [`db_006_startup_quarantines_every_ambiguous_effect_first`] | DB-006 | browser half in `store_durability`; all three families together, with the fakes untouched, covered here |
 //! | [`db_007_source_event_uniqueness_survives_restart`] | DB-007 | covered here (100 restarts) |
-//! | [`db_008_restore_without_a_pinned_artifact_fails_closed`] | DB-008 | covered here |
+//! | [`db_008_restore_without_a_pinned_artifact_fails_closed`] | DB-008 | covered here, including the explicit durable `result_artifact_missing` repair state and its resolution on a successful verify |
 //!
 //! DB-005 asks for two daemon *instances* against one state root, with exactly
 //! one obtaining authority. That election is a daemon-lifecycle feature — a
@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 
 use governor_core::effect::{DestinationRef, ExternalEffectClass, IdempotencyKey};
 use governor_core::fence::{DeliveryRevision, IncarnationGeneration};
-use governor_core::health::HealthConditionKind;
+use governor_core::health::{HealthConditionKind, HealthScope};
 use governor_core::lease::{
     LeaseHolderProof, ProcessIncarnation, ProcessSlot, ProcessStartRef, ResourceIdentity,
     ResourceNamespace,
@@ -36,11 +36,11 @@ use governor_core::time::DurationMs;
 use governor_store_sqlite::{
     AckMutationReceiptRequest, AcquireLeaseRequest, BeginMutationRequest, CancelObligationRequest,
     CompleteMutationRequest, ExternalOutcome, LeaseHolderRequest, MarkExternalDispatchedRequest,
-    PublishWorkerResultRequest, RecordExternalIntentRequest, RecordExternalOutcomeRequest,
-    ResourceRef, Store, StoreError,
+    OpenCondition, PublishWorkerResultRequest, RecordExternalIntentRequest,
+    RecordExternalOutcomeRequest, ResourceRef, ResultArtifactMissingRequest, Store, StoreError,
 };
 use governor_testkit::browser::{BrowserWorld, FakeBrowser};
-use governor_testkit::dump::count;
+use governor_testkit::dump::{assert_unchanged, count, dump_domain};
 use governor_testkit::effect::FakeExternalDestination;
 use governor_testkit::failpoints::{MIGRATION_FAILPOINTS, StoreCrash, TRANSACTION_FAILPOINTS};
 use governor_testkit::harness::Harness;
@@ -96,6 +96,7 @@ fn db_001_projection_replay_equivalence() {
         store.verify_projections().expect("replay after scheduling");
 
         // Branch: the wake is accepted, proven failed, or lost.
+        let mut ambiguous = false;
         match rng.next_below(3) {
             0 => accept_wake(&store, &wake, generation, "msg-1"),
             1 => {
@@ -120,11 +121,47 @@ fn db_001_projection_replay_equivalence() {
                     },
                 )
                 .expect("a lost outcome");
+                ambiguous = true;
             }
         }
         store
             .verify_projections()
             .expect("replay after the delivery outcome");
+
+        // Branch: a lost outcome is sometimes reconciled by exact later
+        // evidence, which is the only escape from `ambiguous` and is folded
+        // back through the same delivery machine.
+        if ambiguous && rng.next_below(2) == 0 {
+            store
+                .reconcile_ambiguous_delivery(
+                    governor_store_sqlite::ReconcileAmbiguousDeliveryRequest {
+                        delivery_id: wake.delivery_id.clone(),
+                        binding_generation: generation,
+                        conversation: governor_core::binding::ConversationRef::new(token("conv-A")),
+                        message: governor_core::foreman_turn::ProviderMessageRef::new(token(
+                            "msg-found",
+                        )),
+                    },
+                )
+                .expect("exact evidence promotes");
+            store
+                .verify_projections()
+                .expect("replay after the reconciliation");
+        }
+
+        // Branch: attention is sometimes raised, and sometimes resolved by a
+        // later acceptance. Health conditions are ledger-derived like every
+        // other projection, so every sequence must still replay.
+        if rng.next_below(2) == 0 && snapshot(&store, turn.obligation).open {
+            store
+                .raise_foreman_unreachable(governor_store_sqlite::RaiseForemanUnreachableRequest {
+                    obligation: turn.obligation,
+                })
+                .expect("attention on open work");
+            store
+                .verify_projections()
+                .expect("replay after raising attention");
+        }
 
         // Branch: claim, expire, reclaim, close — or leave it owed. A failed
         // obligation is claimable too, so this is a coin toss rather than a
@@ -248,6 +285,7 @@ fn operations_under_test() -> &'static [&'static str] {
         "create_or_claim_delivery",
         "arm_delivery_send",
         "record_delivery_outcome",
+        "reconcile_ambiguous_delivery",
         "mint_foreman_claim",
         "deliver_handoff",
         "acknowledge_obligation",
@@ -261,6 +299,10 @@ fn operations_under_test() -> &'static [&'static str] {
         "acquire_lease",
         "renew_lease",
         "release_lease",
+        "raise_foreman_unreachable",
+        "raise_result_artifact_missing",
+        "resolve_result_artifact_missing",
+        "record_terminal_evidence_conflict",
     ]
 }
 
@@ -396,6 +438,41 @@ fn run_cell(window: KillWindow) -> bool {
                     },
                 )
                 .map(drop)
+            },
+        ),
+        "reconcile_ambiguous_delivery" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                let (_, wake, generation) = orphaned_prefix(store, &mut artifacts);
+                arm_send(store, &wake, generation).expect("arming");
+                record_outcome(
+                    store,
+                    &wake,
+                    wake.attempt,
+                    governor_store_sqlite::DeliveryOutcome::Ambiguous {
+                        reason: governor_core::outbound::AmbiguityReason::ObservationLost,
+                    },
+                )
+                .expect("a lost outcome");
+                (wake, generation)
+            },
+            |store, (wake, generation)| {
+                store
+                    .reconcile_ambiguous_delivery(
+                        governor_store_sqlite::ReconcileAmbiguousDeliveryRequest {
+                            delivery_id: wake.delivery_id.clone(),
+                            binding_generation: generation,
+                            conversation: governor_core::binding::ConversationRef::new(token(
+                                "conv-A",
+                            )),
+                            message: governor_core::foreman_turn::ProviderMessageRef::new(token(
+                                "msg-found",
+                            )),
+                        },
+                    )
+                    .map(drop)
             },
         ),
         "mint_foreman_claim" => run_kill_window(
@@ -575,6 +652,69 @@ fn run_cell(window: KillWindow) -> bool {
             },
             |store, (granted, epoch)| store.release_lease(holder(&granted, epoch)).map(drop),
         ),
+        "raise_foreman_unreachable" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                published_prefix(store, &mut artifacts).0
+            },
+            |store, obligation| {
+                store
+                    .raise_foreman_unreachable(
+                        governor_store_sqlite::RaiseForemanUnreachableRequest { obligation },
+                    )
+                    .map(drop)
+            },
+        ),
+        "raise_result_artifact_missing" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                pinned_artifact_prefix(store, &mut artifacts)
+            },
+            |store, request| store.raise_result_artifact_missing(request).map(drop),
+        ),
+        "resolve_result_artifact_missing" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                let request = pinned_artifact_prefix(store, &mut artifacts);
+                store
+                    .raise_result_artifact_missing(request)
+                    .expect("entering repair");
+                request
+            },
+            |store, request| store.resolve_result_artifact_missing(request).map(drop),
+        ),
+        "record_terminal_evidence_conflict" => run_kill_window(
+            &harness,
+            window,
+            |store| {
+                let mut artifacts = harness.open_artifacts();
+                published_prefix(store, &mut artifacts).0
+            },
+            |store, obligation| {
+                store
+                    .record_terminal_evidence_conflict(
+                        governor_store_sqlite::TerminalEvidenceConflictRequest {
+                            obligation,
+                            receipts: governor_store_sqlite::CompletionReceipts {
+                                run_ref: token("run-1"),
+                                final_result_complete: true,
+                                outcome: governor_core::worker_evidence::ManagedRunOutcome::Success,
+                                child_exit:
+                                    governor_core::worker_evidence::ChildExitStatus::Nonzero {
+                                        code: 1,
+                                    },
+                            },
+                        },
+                    )
+                    .map(drop)
+            },
+        ),
         other => panic!("no crash-matrix prefix for {other}"),
     };
     report.fired
@@ -593,6 +733,22 @@ fn published_prefix(
     start_worker(store, turn.obligation, "run-1");
     publish_result(store, artifacts, turn.obligation, "run-1", FINAL_RESULT).expect("publication");
     (turn.obligation, generation)
+}
+
+/// A published obligation, addressed by the artifact its open state pins.
+fn pinned_artifact_prefix(
+    store: &Store,
+    artifacts: &mut governor_artifacts::ArtifactStore,
+) -> ResultArtifactMissingRequest {
+    let (obligation, _) = published_prefix(store, artifacts);
+    ResultArtifactMissingRequest {
+        obligation,
+        artifact: store
+            .read_obligation(obligation)
+            .expect("the obligation")
+            .result_artifact
+            .expect("a published result"),
+    }
 }
 
 /// A published obligation with a wake claimed and nothing sent.
@@ -959,14 +1115,15 @@ fn db_008_restore_without_a_pinned_artifact_fails_closed() {
     drop(store);
 
     // The database is restored from backup; the artifact root is not. The bytes
-    // an open obligation pins are simply gone.
-    std::fs::remove_file(
-        harness
-            .artifact_root()
-            .join("objects")
-            .join(work.artifact.key().as_str()),
-    )
-    .expect("simulating a restore that lost the artifact root");
+    // an open obligation pins are simply gone. They are kept aside first, so
+    // the repair half — the artifact coming back — can be exercised too.
+    let object = harness
+        .artifact_root()
+        .join("objects")
+        .join(work.artifact.key().as_str());
+    let rescued = harness.state_root().join("rescued-object");
+    std::fs::copy(&object, &rescued).expect("keeping the bytes aside");
+    std::fs::remove_file(&object).expect("simulating a restore that lost the artifact root");
 
     // The store still opens — a missing file is not a corrupt ledger — and the
     // obligation is still owed. What must not happen is it being treated as
@@ -996,20 +1153,101 @@ fn db_008_restore_without_a_pinned_artifact_fails_closed() {
         "{error:?}"
     );
 
-    // That is the `result_artifact_missing` health condition's trigger. The
-    // classification exists in the domain; Phase 1's store has no operation
-    // that records it, so the durable half is a later gate and this test says
-    // so rather than asserting a row that cannot be written.
+    // That failure is the trigger for the explicit repair state, and the store
+    // records it: `result_artifact_missing`, scoped to the obligation that
+    // still pins the bytes.
+    let published = store
+        .read_obligation(work.obligation)
+        .expect("the obligation")
+        .result_artifact
+        .expect("an open obligation that requires an artifact");
+    let raised = store
+        .raise_result_artifact_missing(ResultArtifactMissingRequest {
+            obligation: work.obligation,
+            artifact: published,
+        })
+        .expect("an artifact an open obligation pins failed to verify");
+    assert!(!raised.duplicate);
     assert_eq!(
-        HealthConditionKind::ResultArtifactMissing.code(),
-        "result_artifact_missing"
+        store.open_health_conditions().expect("reading conditions"),
+        vec![OpenCondition {
+            kind: HealthConditionKind::ResultArtifactMissing,
+            scope: HealthScope::obligation(work.obligation),
+        }],
+        "DB-008: an explicit health/repair state, not a silent one"
     );
+
+    // Entering repair changes nothing about the work: the obligation is still
+    // owed, still not processable, still pinning. And a second report of the
+    // same missing artifact is convergence, not a second condition.
+    let repaired_state = dump_domain(&harness.inspect());
+    assert!(
+        store
+            .raise_result_artifact_missing(ResultArtifactMissingRequest {
+                obligation: work.obligation,
+                artifact: published,
+            })
+            .expect("a repeat is convergence")
+            .duplicate
+    );
+    assert_unchanged(
+        &repaired_state,
+        &dump_domain(&harness.inspect()),
+        "DB-008: one repair condition per missing artifact",
+    );
+    let current = snapshot(&store, work.obligation);
+    assert_eq!(current.state, ObligationState::CompletedUnprocessed);
+    assert!(current.open);
+    assert_eq!(
+        artifact_rows(&harness.inspect())[0].retention(),
+        governor_core::artifact::RetentionState::Pinned
+    );
+
+    // The condition survives a restart: repair is durable state, not a runtime
+    // flag a reopen would quietly clear.
+    drop(store);
+    let store = harness.open().expect("reopen in repair");
+    assert_eq!(
+        store
+            .open_health_conditions()
+            .expect("reading conditions")
+            .len(),
+        1,
+        "DB-008: the repair state survives a restart"
+    );
+
+    // And it leaves repair only on a *successful verify*, never on a guess.
+    std::fs::copy(&rescued, &object).expect("the artifact root is restored too");
+    let rows = artifact_rows(&harness.inspect());
+    assert_eq!(
+        artifacts
+            .read_verified(
+                &rows[0].key().expect("a valid key"),
+                rows[0].digest(),
+                rows[0].byte_len,
+            )
+            .expect("the restored bytes verify"),
+        FINAL_RESULT
+    );
+    let resolved = store
+        .resolve_result_artifact_missing(ResultArtifactMissingRequest {
+            obligation: work.obligation,
+            artifact: published,
+        })
+        .expect("a verified artifact closes the repair state");
+    assert!(!resolved.duplicate);
     assert!(
         store
             .open_health_conditions()
             .expect("reading conditions")
             .is_empty()
     );
+    store
+        .verify_projections()
+        .expect("the repair state replays from its events");
+
+    // Back to the broken world for the forbidden-outcome check below.
+    std::fs::remove_file(&object).expect("losing the artifact root again");
 
     // And the forbidden outcome is exactly what this state is not: the
     // completion is *not* treated as durable-and-verifiable anywhere.

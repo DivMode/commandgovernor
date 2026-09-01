@@ -29,19 +29,21 @@
 //! sequence of transitions can reach. That is the same property, enforced at a
 //! different boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use governor_core::artifact::{ArtifactDigest, ResultArtifact, RetentionState};
 use governor_core::fence::EventSeq;
+use governor_core::health::{HealthConditionKind, HealthConditionState, HealthScope};
 use governor_core::id::ObligationId;
 use governor_core::time::Timestamp;
 use rusqlite::params;
 
 use crate::codec::{
-    RetentionLabel, TurnLifecycle, decode_attempt_state, decode_delivery_state,
-    decode_obligation_state, decode_retention, decode_turn_lifecycle, encode_attempt_state,
-    encode_delivery_state, encode_obligation_state, encode_retention, encode_turn_lifecycle,
-    id_text, parse_delivery_id, parse_hex32, parse_id, parse_token, parse_u32, parse_u64,
+    RetentionLabel, TurnLifecycle, decode_attempt_state, decode_delivery_state, decode_health_kind,
+    decode_health_state, decode_obligation_state, decode_retention, decode_turn_lifecycle,
+    encode_attempt_state, encode_delivery_state, encode_health_kind, encode_health_state,
+    encode_obligation_state, encode_retention, encode_turn_lifecycle, id_text, parse_delivery_id,
+    parse_hex32, parse_id, parse_token, parse_u32, parse_u64,
 };
 use crate::error::{ProjectionMismatch, RepairNeeded, StoreResult};
 use crate::event::{self, EventKind, LedgerEvent};
@@ -89,6 +91,7 @@ pub(crate) fn verify(tx: &Tx<'_>) -> StoreResult<VerifiedProjections> {
 
     compare_turns(tx, &by_obligation, &mut mismatches)?;
     compare_retention(tx, &by_obligation, &mut mismatches)?;
+    compare_health(tx, &events, &mut mismatches)?;
     let deliveries = compare_deliveries(tx, &mut mismatches)?;
 
     if !mismatches.is_empty() {
@@ -334,6 +337,109 @@ fn compare_retention(
         }
     }
     Ok(())
+}
+
+/// Checks the health ledger against the conditions actually recorded.
+///
+/// Attention is ledger-derived like everything else here: every open and
+/// resolved condition is reachable only through an appended event, so folding
+/// those events must reproduce the `health_conditions` rows exactly.
+///
+/// What is compared is `(kind, scope, state)` and how many rows hold it — not
+/// the condition identities. An identity is a minted opaque value nothing
+/// branches on, and the fold cannot reproduce one it never saw; the semantic
+/// state is what a mismatch would have to corrupt to matter.
+fn compare_health(
+    tx: &Tx<'_>,
+    events: &[LedgerEvent],
+    mismatches: &mut Vec<ProjectionMismatch>,
+) -> StoreResult<()> {
+    const TABLE: &str = "health_conditions";
+    let mut replayed: BTreeMap<String, usize> = BTreeMap::new();
+    for condition in load::fold_health(events)?.conditions() {
+        *replayed
+            .entry(condition_key(
+                condition.kind(),
+                condition.scope(),
+                condition.state(),
+            ))
+            .or_default() += 1;
+    }
+
+    let mut statement = tx.conn().prepare(
+        "SELECT kind, state, task_id, turn_id, obligation_id, external_attempt_id
+           FROM health_conditions",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut stored: BTreeMap<String, usize> = BTreeMap::new();
+    for row in rows {
+        let (kind, state, task, turn, obligation, attempt) = row?;
+        let scope = HealthScope {
+            task: task
+                .map(|text| parse_id(&text, TABLE, "task_id"))
+                .transpose()?,
+            turn: turn
+                .map(|text| parse_id(&text, TABLE, "turn_id"))
+                .transpose()?,
+            obligation: obligation
+                .map(|text| parse_id(&text, TABLE, "obligation_id"))
+                .transpose()?,
+            external_attempt: attempt
+                .map(|text| parse_id(&text, TABLE, "external_attempt_id"))
+                .transpose()?,
+        };
+        // Decoded rather than string-compared, so an unknown stored label is a
+        // corrupt row rather than a silent mismatch.
+        let key = condition_key(
+            decode_health_kind(&kind, TABLE)?,
+            scope,
+            decode_health_state(&state, TABLE)?,
+        );
+        *stored.entry(key).or_default() += 1;
+    }
+
+    let keys: BTreeSet<&String> = stored.keys().chain(replayed.keys()).collect();
+    for key in keys {
+        let left = stored.get(key).copied().unwrap_or_default();
+        let right = replayed.get(key).copied().unwrap_or_default();
+        if left != right {
+            mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row: key.clone(),
+                column: "state",
+                stored: left.to_string(),
+                replayed: right.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The comparable identity of one condition: kind, scope, and state.
+fn condition_key(
+    kind: HealthConditionKind,
+    scope: HealthScope,
+    state: HealthConditionState,
+) -> String {
+    let part = |id: Option<String>| id.unwrap_or_else(|| "-".to_owned());
+    format!(
+        "{}|{}|{}|{}|{}|{}",
+        encode_health_kind(kind),
+        part(scope.task.map(id_text)),
+        part(scope.turn.map(id_text)),
+        part(scope.obligation.map(id_text)),
+        part(scope.external_attempt.map(id_text)),
+        encode_health_state(state),
+    )
 }
 
 fn compare_deliveries(tx: &Tx<'_>, mismatches: &mut Vec<ProjectionMismatch>) -> StoreResult<usize> {

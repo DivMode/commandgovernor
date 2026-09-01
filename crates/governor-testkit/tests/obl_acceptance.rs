@@ -10,26 +10,24 @@
 //! | [`obl_003_stale_binding_generation_cannot_ack`] | OBL-003 | covered here |
 //! | [`obl_004_stale_claim_cannot_ack`] | OBL-004 | reclaim case covered in `governor-store-sqlite` `store_lifecycle`; the expired-without-reclaim case is covered here |
 //! | [`obl_005_duplicate_terminal_source_event_is_idempotent`] | OBL-005 | covered here (100 replays across 10 restarts) |
-//! | [`obl_006_conflicting_terminal_evidence_is_visible`] | OBL-006 | partly covered here — see the note on the test |
+//! | [`obl_006_conflicting_terminal_evidence_is_visible`] | OBL-006 | covered here: no second obligation, and a durable turn-scoped reconciliation condition |
 //! | [`obl_007_physical_settlement_is_not_ack`] | OBL-007 | covered here |
 //! | [`obl_008_mcp_result_handoff_is_not_ack`] | OBL-008 | covered here |
 //! | [`obl_009_ack_requires_exact_source_and_version`] | OBL-009 | covered here |
 //! | [`obl_010_failure_is_unprocessed_work`] | OBL-010 | covered here |
-//!
-//! Deferred: the durable `adapter_conflict` condition OBL-006 also asks for.
-//! Phase 1's store raises exactly one health condition — `reconciliation_required`,
-//! from startup quarantine — and has no operation that records another, so the
-//! arbitration half is proven pure and the durable half is a later gate.
 
 use governor_core::foreman_turn::{ForemanTurn, ForemanTurnEvent, ForemanTurnState};
-use governor_core::health::HealthConditionKind;
+use governor_core::health::{HealthConditionKind, HealthScope};
 use governor_core::obligation::{Disposition, ObligationState};
 use governor_core::time::Timestamp;
 use governor_core::worker_evidence::{
     ChildExitReceipt, ChildExitStatus, FinalResultReceipt, ManagedRunEvidence, ManagedRunOutcome,
     RuntimeObservation, WorkerOutcome,
 };
-use governor_store_sqlite::{AcknowledgeRequest, PublishWorkerResultRequest, Store, StoreResult};
+use governor_store_sqlite::{
+    AcknowledgeRequest, CompletionReceipts, OpenCondition, PublishWorkerResultRequest, Store,
+    StoreResult, TerminalEvidenceConflictRequest,
+};
 use governor_testkit::dump::{assert_unchanged, count, dump_domain, scalar};
 use governor_testkit::harness::Harness;
 use governor_testkit::scenario::{
@@ -533,17 +531,77 @@ fn obl_006_conflicting_terminal_evidence_is_visible() {
         "a success record with a failing exit is reconciliation, never a second result"
     );
 
-    // Deferred: recording that condition durably needs a store operation that
-    // raises a health condition, and Phase 1 has exactly one — startup
-    // quarantine's `reconciliation_required`. Asserting the ledger holds an
-    // `adapter_conflict` row would be asserting something that cannot happen.
-    assert!(
-        store
-            .open_health_conditions()
-            .expect("reading conditions")
-            .is_empty(),
-        "no store path records this condition yet; see the suite's coverage note"
+    // And the durable half. The store runs the same arbitration — the caller
+    // hands in receipts, never a conclusion — and records the class it returned
+    // against the turn.
+    let recorded = store
+        .record_terminal_evidence_conflict(TerminalEvidenceConflictRequest {
+            obligation: turn.obligation,
+            receipts: CompletionReceipts {
+                run_ref: governor_testkit::scenario::token("run-1"),
+                final_result_complete: true,
+                outcome: ManagedRunOutcome::Success,
+                child_exit: ChildExitStatus::Nonzero { code: 1 },
+            },
+        })
+        .expect("contradictory evidence for a turn that already has a result");
+    assert!(!recorded.duplicate);
+    assert_eq!(
+        store.open_health_conditions().expect("reading conditions"),
+        vec![OpenCondition {
+            kind: HealthConditionKind::RuntimeStateConflict,
+            scope: HealthScope::turn(turn.turn),
+        }],
+        "OBL-006: a durable reconciliation condition, scoped to the turn"
     );
+
+    // It is attention and nothing else: no second obligation, no transition,
+    // and no closure. And it is raised once, not once per report.
+    let after_raise = dump_domain(&harness.inspect());
+    assert_eq!(count(&harness.inspect(), "obligations"), 1);
+    let current = snapshot(&store, turn.obligation);
+    assert_eq!(current.state, ObligationState::CompletedUnprocessed);
+    assert!(current.open, "OBL-006: attention never closes the work");
+    for _ in 0..5 {
+        assert!(
+            store
+                .record_terminal_evidence_conflict(TerminalEvidenceConflictRequest {
+                    obligation: turn.obligation,
+                    receipts: CompletionReceipts {
+                        run_ref: governor_testkit::scenario::token("run-1"),
+                        final_result_complete: true,
+                        outcome: ManagedRunOutcome::Success,
+                        child_exit: ChildExitStatus::Nonzero { code: 1 },
+                    },
+                })
+                .expect("a repeat is convergence")
+                .duplicate
+        );
+    }
+    assert_unchanged(
+        &after_raise,
+        &dump_domain(&harness.inspect()),
+        "OBL-006: one condition, not one per contradictory report",
+    );
+
+    // Evidence that is *not* contradictory cannot open one, so the ledger
+    // cannot be filled with conflicts that were never observed.
+    let error = store
+        .record_terminal_evidence_conflict(TerminalEvidenceConflictRequest {
+            obligation: turn.obligation,
+            receipts: completion_receipts("run-1"),
+        })
+        .expect_err("a confirmed completion is not a conflict");
+    assert_eq!(error.conflict_code(), Some("illegal_obligation_transition"));
+    assert_unchanged(
+        &after_raise,
+        &dump_domain(&harness.inspect()),
+        "OBL-006: a refused report changes nothing",
+    );
+
+    store
+        .verify_projections()
+        .expect("the condition replays from its event");
 }
 
 #[test]

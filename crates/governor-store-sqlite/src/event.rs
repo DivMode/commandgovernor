@@ -20,7 +20,7 @@ use governor_core::time::Timestamp;
 use rusqlite::OptionalExtension as _;
 use rusqlite::params;
 
-use crate::codec::{id_text, parse_source, parse_time, parse_u64, store_time};
+use crate::codec::{id_text, parse_id, parse_source, parse_time, parse_u64, store_time};
 use crate::error::{CorruptReason, CorruptValue, StoreResult};
 use crate::safe_metadata::{MetadataFields, SafeMetadata};
 use crate::tx::{Failpoint, Tx};
@@ -84,12 +84,26 @@ pub enum EventKind {
     ObligationCancelledByUser,
     /// A later obligation replaced this one.
     ObligationSuperseded,
+    /// Exact later evidence promoted an ambiguous revision to accepted.
+    ///
+    /// No Send happened: this records a reconciliation, and the revision stays
+    /// frozen. See the store's `reconcile_ambiguous_delivery` operation.
+    BrowserDeliveryReconciled,
     /// Startup found a consequential external effect whose fate was lost.
     ///
     /// The intent was durable, the outcome never was. This event records the
     /// finding and is what the `reconciliation_required` health condition hangs
     /// off; it authorises nothing and replays nothing.
     ExternalAttemptQuarantined,
+    /// A health condition was opened.
+    ///
+    /// Attention, never terminal worker state. The condition's *scope* is the
+    /// event's own scope columns and its *kind* is the one allowlisted metadata
+    /// field, so the health-ledger fold can rebuild the whole ledger from these
+    /// events alone.
+    HealthConditionOpened,
+    /// A health condition was resolved by later verified evidence.
+    HealthConditionResolved,
 }
 
 impl EventKind {
@@ -121,7 +135,10 @@ impl EventKind {
             Self::ForemanAcked => "foreman_acked",
             Self::ObligationCancelledByUser => "obligation_cancelled_by_user",
             Self::ObligationSuperseded => "obligation_superseded",
+            Self::BrowserDeliveryReconciled => "browser_delivery_reconciled",
             Self::ExternalAttemptQuarantined => "external_attempt_quarantined",
+            Self::HealthConditionOpened => "health_condition_opened",
+            Self::HealthConditionResolved => "health_condition_resolved",
         }
     }
 
@@ -156,7 +173,10 @@ impl EventKind {
             EventKind::ForemanAcked,
             EventKind::ObligationCancelledByUser,
             EventKind::ObligationSuperseded,
+            EventKind::BrowserDeliveryReconciled,
             EventKind::ExternalAttemptQuarantined,
+            EventKind::HealthConditionOpened,
+            EventKind::HealthConditionResolved,
         ];
         ALL.iter()
             .copied()
@@ -208,8 +228,17 @@ impl EventKind {
                 "expected_version",
                 "disposition",
             ],
+            // Reconciliation promotes the whole revision rather than a numbered
+            // attempt — the fold's `ReconciledAccepted` carries no attempt — so
+            // there is no `attempt_no` to record and none is allowed.
+            Self::BrowserDeliveryReconciled => &["revision", "message_ref"],
             Self::ObligationSuperseded => &["replacement"],
             Self::ExternalAttemptQuarantined => &["external_attempt", "ambiguity_reason"],
+            // A health condition's scope lives in the event's own scope
+            // columns, so the only metadata it needs is which kind it is. The
+            // two are never duplicated, and there is therefore nothing that can
+            // disagree with the projection row.
+            Self::HealthConditionOpened | Self::HealthConditionResolved => &["health_kind"],
         }
     }
 }
@@ -328,6 +357,12 @@ pub(crate) struct LedgerEvent {
     pub(crate) kind: EventKind,
     pub(crate) source: SourceRef,
     pub(crate) observed_at: Timestamp,
+    /// The entities the event is about, read back from the scope columns.
+    ///
+    /// Read rather than duplicated into metadata: a health condition's scope is
+    /// part of its identity, and two copies of it would be two things that can
+    /// disagree.
+    pub(crate) scope: EventScope,
     pub(crate) metadata: MetadataFields,
 }
 
@@ -347,11 +382,9 @@ pub(crate) fn read_for_obligation(
     tx: &Tx<'_>,
     obligation: ObligationId,
 ) -> StoreResult<Vec<LedgerEvent>> {
-    let mut statement = tx.conn().prepare(
-        "SELECT seq, kind, source_namespace, source_event_id, source_event_fence,
-                observed_at_ms, safe_metadata_json
-           FROM events WHERE obligation_id = ?1 ORDER BY seq",
-    )?;
+    let mut statement = tx.conn().prepare(&format!(
+        "SELECT {EVENT_COLUMNS} FROM events WHERE obligation_id = ?1 ORDER BY seq"
+    ))?;
     let rows = statement.query_map(params![id_text(obligation)], decode_row)?;
     collect(rows)
 }
@@ -365,11 +398,9 @@ pub(crate) fn read_for_obligation(
 ///
 /// Returns a SQLite error, or a corrupt-row error for an undecodable event.
 pub(crate) fn read_all(tx: &Tx<'_>) -> StoreResult<Vec<LedgerEvent>> {
-    let mut statement = tx.conn().prepare(
-        "SELECT seq, kind, source_namespace, source_event_id, source_event_fence,
-                observed_at_ms, safe_metadata_json
-           FROM events ORDER BY seq",
-    )?;
+    let mut statement = tx
+        .conn()
+        .prepare(&format!("SELECT {EVENT_COLUMNS} FROM events ORDER BY seq"))?;
     let rows = statement.query_map([], decode_row)?;
     collect(rows)
 }
@@ -388,31 +419,85 @@ pub(crate) fn highest_seq(tx: &Tx<'_>) -> StoreResult<Option<EventSeq>> {
     value.map(|seq| parse_seq(seq, "events", "seq")).transpose()
 }
 
-type RawRow = (i64, String, String, String, String, i64, String);
+/// The projection every ledger read selects, in [`RawEvent`]'s field order.
+const EVENT_COLUMNS: &str = "seq, kind, source_namespace, source_event_id, source_event_fence, \
+     observed_at_ms, safe_metadata_json, project_id, task_id, session_id, \
+     session_incarnation_id, turn_id, obligation_id";
 
-fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
-    Ok((
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
-    ))
+/// One `events` row, still as columns.
+struct RawEvent {
+    seq: i64,
+    kind: String,
+    namespace: String,
+    event: String,
+    fence: String,
+    observed: i64,
+    metadata: String,
+    project: Option<String>,
+    task: Option<String>,
+    session: Option<String>,
+    incarnation: Option<String>,
+    turn: Option<String>,
+    obligation: Option<String>,
 }
 
-fn collect(rows: impl Iterator<Item = rusqlite::Result<RawRow>>) -> StoreResult<Vec<LedgerEvent>> {
+fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawEvent> {
+    Ok(RawEvent {
+        seq: row.get(0)?,
+        kind: row.get(1)?,
+        namespace: row.get(2)?,
+        event: row.get(3)?,
+        fence: row.get(4)?,
+        observed: row.get(5)?,
+        metadata: row.get(6)?,
+        project: row.get(7)?,
+        task: row.get(8)?,
+        session: row.get(9)?,
+        incarnation: row.get(10)?,
+        turn: row.get(11)?,
+        obligation: row.get(12)?,
+    })
+}
+
+fn collect(
+    rows: impl Iterator<Item = rusqlite::Result<RawEvent>>,
+) -> StoreResult<Vec<LedgerEvent>> {
     let mut out = Vec::new();
     for row in rows {
-        let (seq, kind, namespace, event, fence, observed, metadata) = row?;
-        let kind = EventKind::parse(&kind)?;
+        let row = row?;
+        let kind = EventKind::parse(&row.kind)?;
         out.push(LedgerEvent {
-            seq: parse_seq(seq, "events", "seq")?,
+            seq: parse_seq(row.seq, "events", "seq")?,
             kind,
-            source: parse_source(&namespace, &event, &fence)?,
-            observed_at: parse_time(observed),
-            metadata: SafeMetadata::parse(&metadata, kind.allowed_metadata_fields())?,
+            source: parse_source(&row.namespace, &row.event, &row.fence)?,
+            observed_at: parse_time(row.observed),
+            scope: EventScope {
+                project: row
+                    .project
+                    .map(|text| parse_id(&text, "events", "project_id"))
+                    .transpose()?,
+                task: row
+                    .task
+                    .map(|text| parse_id(&text, "events", "task_id"))
+                    .transpose()?,
+                session: row
+                    .session
+                    .map(|text| parse_id(&text, "events", "session_id"))
+                    .transpose()?,
+                incarnation: row
+                    .incarnation
+                    .map(|text| parse_id(&text, "events", "session_incarnation_id"))
+                    .transpose()?,
+                turn: row
+                    .turn
+                    .map(|text| parse_id(&text, "events", "turn_id"))
+                    .transpose()?,
+                obligation: row
+                    .obligation
+                    .map(|text| parse_id(&text, "events", "obligation_id"))
+                    .transpose()?,
+            },
+            metadata: SafeMetadata::parse(&row.metadata, kind.allowed_metadata_fields())?,
         });
     }
     Ok(out)

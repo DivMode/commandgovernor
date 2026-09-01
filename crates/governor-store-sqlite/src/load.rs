@@ -37,8 +37,8 @@ use governor_core::fence::{
     ObligationVersion, SafeToken, SourceRef,
 };
 use governor_core::foreman_turn::ProviderMessageRef;
-use governor_core::health::{HealthConditionKind, HealthConditionState, HealthScope};
-use governor_core::id::{ObligationId, ResultArtifactId, TaskId, TurnId};
+use governor_core::health::{HealthConditionKind, HealthConditionState, HealthLedger, HealthScope};
+use governor_core::id::{HealthConditionId, ObligationId, ResultArtifactId, TaskId, TurnId};
 use governor_core::obligation::{AckRequest, Obligation, ObligationEvent, ObligationKind};
 use governor_core::outbound::{Delivery, DeliveryEvent};
 use governor_core::time::Timestamp;
@@ -597,6 +597,7 @@ fn delivery_event(
             | EventKind::BrowserDeliveryFailed
             | EventKind::BrowserDeliveryAmbiguous
             | EventKind::BrowserDeliveryOrphanQuarantined
+            | EventKind::BrowserDeliveryReconciled
     );
     if !is_delivery {
         return Ok(None);
@@ -643,6 +644,24 @@ fn delivery_event(
         EventKind::BrowserDeliveryOrphanQuarantined => DeliveryEvent::OrphanQuarantined {
             at: event.observed_at,
         },
+        // Reconciliation carries the same exact evidence acceptance does: the
+        // conversation is the delivery's bound one, never the reconciler's to
+        // assert, and the message is the one that was proven to exist.
+        EventKind::BrowserDeliveryReconciled => {
+            let message = accepted_message
+                .ok_or_else(|| dangling("browser_deliveries", "accepted_message_ref"))?;
+            DeliveryEvent::ReconciledAccepted {
+                evidence: AcceptedWakeEvidence::new(
+                    conversation.clone(),
+                    ProviderMessageRef::new(parse_token(
+                        message,
+                        "browser_deliveries",
+                        "accepted_message_ref",
+                    )?),
+                ),
+                at: event.observed_at,
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(translated))
@@ -739,6 +758,138 @@ pub struct OpenCondition {
     pub kind: HealthConditionKind,
     /// What the condition is about. Every field is optional and opaque.
     pub scope: HealthScope,
+}
+
+/// One transition a ledger event records against the health ledger.
+enum HealthTransition {
+    /// Open a condition, deduplicated on `(kind, scope)`.
+    Raise(HealthConditionKind, HealthScope),
+    /// Close the open condition for `(kind, scope)`, if there is one.
+    Resolve(HealthConditionKind, HealthScope),
+}
+
+/// Translates one ledger event into the health transition it recorded.
+///
+/// Returns `None` for every event that says nothing about attention, which is
+/// almost all of them.
+fn health_event(event: &LedgerEvent) -> StoreResult<Option<HealthTransition>> {
+    let translated = match event.kind {
+        // Startup quarantine's finding: the attempt scope is in metadata
+        // because `events` has no column that can express it.
+        EventKind::ExternalAttemptQuarantined => HealthTransition::Raise(
+            HealthConditionKind::ReconciliationRequired,
+            HealthScope::external_attempt(
+                event
+                    .metadata
+                    .id::<governor_core::id::kind::ExternalAttempt>("external_attempt")?,
+            ),
+        ),
+        EventKind::HealthConditionOpened => HealthTransition::Raise(
+            decode_health_kind(event.metadata.label("health_kind")?, "events")?,
+            scope_of(event),
+        ),
+        EventKind::HealthConditionResolved => HealthTransition::Resolve(
+            decode_health_kind(event.metadata.label("health_kind")?, "events")?,
+            scope_of(event),
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some(translated))
+}
+
+/// The health scope an event's own scope columns describe.
+///
+/// Exactly the columns, never more: a writer that recorded a task alongside an
+/// obligation would be describing a different scope, and `HealthLedger::raise`
+/// deduplicates on the whole tuple.
+const fn scope_of(event: &LedgerEvent) -> HealthScope {
+    HealthScope {
+        task: event.scope.task,
+        turn: event.scope.turn,
+        obligation: event.scope.obligation,
+        external_attempt: None,
+    }
+}
+
+/// Folds the whole health ledger from the durable event log.
+///
+/// # Errors
+///
+/// Returns a corrupt-row error for an undecodable condition kind or scope.
+pub(crate) fn health_ledger(tx: &Tx<'_>) -> StoreResult<HealthLedger> {
+    fold_health(&event::read_all(tx)?)
+}
+
+/// Folds a health ledger from an already-read slice.
+///
+/// The identity each raise is given is derived from the event sequence rather
+/// than read back: a condition's *identity* is a minted opaque value the ledger
+/// never branches on, while its `(kind, scope, state)` is the semantic state
+/// [`crate::replay`] compares. Deriving it keeps the fold total without
+/// pretending to reproduce a value only the writer knew.
+///
+/// # Errors
+///
+/// As [`health_ledger`].
+pub(crate) fn fold_health(events: &[LedgerEvent]) -> StoreResult<HealthLedger> {
+    let mut ledger = HealthLedger::new();
+    for event in events {
+        match health_event(event)? {
+            Some(HealthTransition::Raise(kind, scope)) => {
+                let id = HealthConditionId::from_uuid(uuid::Uuid::from_u128(u128::from(
+                    event.seq.get(),
+                )));
+                ledger = ledger
+                    .raise(id, kind, scope, event.observed_at)?
+                    .or_unchanged(ledger);
+            }
+            Some(HealthTransition::Resolve(kind, scope)) => {
+                ledger = ledger
+                    .resolve(kind, scope, event.observed_at)?
+                    .or_unchanged(ledger);
+            }
+            None => {}
+        }
+    }
+    Ok(ledger)
+}
+
+/// The identity of the one open condition for `(kind, scope)`, if there is one.
+///
+/// The partial unique index makes at most one such row possible, so this is a
+/// lookup rather than a scan with a policy.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error for an unparseable identity.
+pub(crate) fn open_condition_id(
+    tx: &Tx<'_>,
+    kind: HealthConditionKind,
+    scope: HealthScope,
+) -> StoreResult<Option<HealthConditionId>> {
+    const TABLE: &str = "health_conditions";
+    let found: Option<String> = tx
+        .conn()
+        .query_row(
+            "SELECT health_condition_id FROM health_conditions
+              WHERE state = 'open' AND kind = ?1
+                AND COALESCE(task_id, '') = ?2
+                AND COALESCE(turn_id, '') = ?3
+                AND COALESCE(obligation_id, '') = ?4
+                AND COALESCE(external_attempt_id, '') = ?5",
+            params![
+                crate::codec::encode_health_kind(kind),
+                scope.task.map(id_text).unwrap_or_default(),
+                scope.turn.map(id_text).unwrap_or_default(),
+                scope.obligation.map(id_text).unwrap_or_default(),
+                scope.external_attempt.map(id_text).unwrap_or_default(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    found
+        .map(|text| parse_id(&text, TABLE, "health_condition_id"))
+        .transpose()
 }
 
 /// Reads every open health condition.

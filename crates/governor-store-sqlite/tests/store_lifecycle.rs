@@ -21,6 +21,9 @@
 //! | [`a_live_claim_cannot_be_expired`] | claim/ACK fencing |
 //! | [`projection_replay_equals_committed_state`] | DB-001, research test 11 |
 //! | [`replay_still_matches_across_a_claim_expiry`] | DB-001 with expiry |
+//! | [`attention_is_refused_for_closed_work`] | health conditions are attention |
+//! | [`attention_must_name_the_artifact_the_obligation_pins`] | health condition scope |
+//! | [`a_health_condition_replays_from_its_events`] | DB-001 over `health_conditions` |
 
 mod support;
 
@@ -32,8 +35,9 @@ use governor_core::time::DurationMs;
 use governor_core::worker_evidence::WorkerFailureClass;
 use governor_store_sqlite::{
     AcknowledgeRequest, ClaimedDelivery, CreateOrClaimDeliveryRequest, DeliverHandoffRequest,
-    DeliveryOutcome, ExpireClaimRequest, MintClaimRequest, RecordDeliveryOutcomeRequest,
-    RecordWorkerFailureRequest, RecordWorkerStartedRequest, Store, StoreError,
+    DeliveryOutcome, ExpireClaimRequest, MintClaimRequest, RaiseForemanUnreachableRequest,
+    RecordDeliveryOutcomeRequest, RecordWorkerFailureRequest, RecordWorkerStartedRequest,
+    ResultArtifactMissingRequest, Store, StoreError,
 };
 use support::{
     Harness, accept_wake, bind, count, open_turn, publish_result, schedule_wake, source,
@@ -1080,5 +1084,116 @@ fn replay_still_matches_across_a_claim_expiry() {
     assert_eq!(
         store.read_obligation(obligation).expect("snapshot").state,
         ObligationState::Acknowledged
+    );
+}
+
+// --- Durable health conditions ------------------------------------------------
+
+#[test]
+fn attention_is_refused_for_closed_work() {
+    let (harness, obligation) = acknowledged();
+    let store = harness.open().expect("reopen");
+    let before = store.read_obligation(obligation).expect("snapshot");
+    let events = count(&harness.inspect(), "events");
+
+    let error = store
+        .raise_foreman_unreachable(RaiseForemanUnreachableRequest { obligation })
+        .expect_err("nobody is owed anything, so there is nothing to attend to");
+    assert_eq!(error.conflict_code(), Some("obligation_closed"));
+
+    assert_eq!(count(&harness.inspect(), "health_conditions"), 0);
+    assert_eq!(
+        count(&harness.inspect(), "events"),
+        events,
+        "a refused raise appends nothing"
+    );
+    assert_eq!(store.read_obligation(obligation).expect("snapshot"), before);
+}
+
+#[test]
+fn attention_must_name_the_artifact_the_obligation_pins() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let turn = open_turn(&store);
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let events = count(&harness.inspect(), "events");
+
+    let error = store
+        .raise_result_artifact_missing(ResultArtifactMissingRequest {
+            obligation: turn.obligation,
+            artifact: support::id(9_999),
+        })
+        .expect_err("an artifact this obligation does not require");
+    assert_eq!(error.conflict_code(), Some("illegal_obligation_transition"));
+    assert_eq!(count(&harness.inspect(), "health_conditions"), 0);
+    assert_eq!(count(&harness.inspect(), "events"), events);
+
+    // Resolving one that was never opened is convergence, not an error, and it
+    // writes nothing either.
+    let artifact = store
+        .read_obligation(turn.obligation)
+        .expect("snapshot")
+        .result_artifact
+        .expect("a published result");
+    assert!(
+        store
+            .resolve_result_artifact_missing(ResultArtifactMissingRequest {
+                obligation: turn.obligation,
+                artifact,
+            })
+            .expect("nothing to resolve is not a refusal")
+            .duplicate
+    );
+    assert_eq!(count(&harness.inspect(), "events"), events);
+}
+
+#[test]
+fn a_health_condition_replays_from_its_events() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let turn = open_turn(&store);
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let artifact = store
+        .read_obligation(turn.obligation)
+        .expect("snapshot")
+        .result_artifact
+        .expect("a published result");
+
+    let request = ResultArtifactMissingRequest {
+        obligation: turn.obligation,
+        artifact,
+    };
+    store
+        .raise_result_artifact_missing(request)
+        .expect("entering repair");
+    store.verify_projections().expect("replay after the raise");
+    store
+        .resolve_result_artifact_missing(request)
+        .expect("leaving repair");
+    store
+        .verify_projections()
+        .expect("replay after the resolution");
+
+    // Raise, resolve, raise again: the second condition is a *new* row, and the
+    // fold has to reproduce both.
+    store
+        .raise_result_artifact_missing(request)
+        .expect("entering repair again");
+    assert_eq!(count(&harness.inspect(), "health_conditions"), 2);
+    store
+        .verify_projections()
+        .expect("replay after the second raise");
+
+    drop(store);
+    let store = harness.open().expect("reopen");
+    assert_eq!(
+        store
+            .open_health_conditions()
+            .expect("reading conditions")
+            .len(),
+        1,
+        "one open, one resolved"
     );
 }

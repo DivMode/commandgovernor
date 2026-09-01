@@ -80,11 +80,15 @@ pub use ops::claim::{
 };
 pub use ops::delivery::{
     ArmDeliverySendRequest, ClaimedDelivery, CreateOrClaimDeliveryRequest, DeliveryOutcome,
-    RecordDeliveryOutcomeRequest,
+    ReconcileAmbiguousDeliveryRequest, RecordDeliveryOutcomeRequest,
 };
 pub use ops::effect::{
     ExternalOutcome, GrantedPermit, MarkExternalDispatchedRequest, RecordExternalIntentRequest,
     RecordExternalOutcomeRequest,
+};
+pub use ops::health::{
+    HealthConditionRecorded, RaiseForemanUnreachableRequest, ResultArtifactMissingRequest,
+    TerminalEvidenceConflictRequest,
 };
 pub use ops::lease::{AcquireLeaseRequest, GrantedLease, LeaseHolderRequest, ResourceRef};
 pub use ops::mutation::{

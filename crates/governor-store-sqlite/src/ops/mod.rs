@@ -12,17 +12,19 @@
 //! | --- | --- |
 //! | [`bootstrap`] | register the work structure; commit a foreman binding |
 //! | [`worker`] | worker start, verified failure, terminal result publication |
-//! | [`delivery`] | create/claim a wake, arm Send, record the outcome |
+//! | [`delivery`] | create/claim a wake, arm Send, record the outcome, reconcile an ambiguous one |
 //! | [`claim`] | `foreman_resume` claim minting, handoff, fenced ACK |
 //! | [`mutation`] | the mutation-command receipt journal |
 //! | [`effect`] | the durable-intent/permit protocol for external effects |
 //! | [`lease`] | exclusive resource ownership |
+//! | [`health`] | durable attention records, and nothing else |
 //! | [`recovery`] | startup quarantine, before any new external I/O |
 
 pub(crate) mod bootstrap;
 pub(crate) mod claim;
 pub(crate) mod delivery;
 pub(crate) mod effect;
+pub(crate) mod health;
 pub(crate) mod lease;
 pub(crate) mod mutation;
 pub(crate) mod recovery;

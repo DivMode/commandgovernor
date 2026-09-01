@@ -12,7 +12,7 @@
 //! | [`gpt_003_resume_claim_without_ack_stays_open`] | GPT-003 | covered here |
 //! | [`gpt_004_bounded_resume_creates_a_new_revision`] | GPT-004 | covered here |
 //! | [`gpt_005_never_overlap_an_active_or_unknown_turn`] | GPT-005 | covered here (pure turn machine plus the scheduling gate) |
-//! | [`gpt_006_resume_budget_exhausts_safely`] | GPT-006 | budget, zero further sends and the open obligation covered here; the **durable** `foreman_unreachable` row is deferred — see the note |
+//! | [`gpt_006_resume_budget_exhausts_safely`] | GPT-006 | covered here: budget, zero further sends, the open obligation, and the durable `foreman_unreachable` condition with its idempotence, restart survival and resolution |
 //! | [`gpt_007_bootstrap_is_low_information`] | GPT-007, SEC-002 | covered here |
 //! | [`gpt_008_unrelated_connector_cannot_claim_from_bootstrap`] | GPT-008 | covered here |
 //! | [`gpt_009_current_accepted_wake_can_claim`] | GPT-009 | covered here |
@@ -32,7 +32,7 @@ use governor_core::health::{HealthConditionKind, HealthLedger, HealthScope};
 use governor_core::obligation::ObligationState;
 use governor_core::outbound::DeliveryState;
 use governor_core::time::{DurationMs, Timestamp};
-use governor_store_sqlite::MintClaimRequest;
+use governor_store_sqlite::{MintClaimRequest, OpenCondition, RaiseForemanUnreachableRequest};
 use governor_testkit::browser::{BrowserWorld, FakeBrowser, deliver_wake};
 use governor_testkit::dump::{assert_unchanged, count, dump_domain};
 use governor_testkit::foreman::{ResumeBudget, ResumeDecision, WakeGate, bootstrap};
@@ -287,6 +287,26 @@ fn gpt_006_resume_budget_exhausts_safely() {
     let repeated = ResumeBudget::exhausted(&ledger, id(2), work.obligation, NOW);
     assert_eq!(repeated.open().count(), 1);
 
+    // The durable half: the same decision, committed, and scoped to the exact
+    // obligation rather than to the daemon.
+    let raised = store
+        .raise_foreman_unreachable(RaiseForemanUnreachableRequest {
+            obligation: work.obligation,
+        })
+        .expect("attention on an open obligation");
+    assert!(!raised.duplicate);
+    assert_eq!(
+        store.open_health_conditions().expect("reading conditions"),
+        vec![OpenCondition {
+            kind: HealthConditionKind::ForemanUnreachable,
+            scope: HealthScope::obligation(work.obligation),
+        }],
+        "GPT-006: exactly one durable attention record"
+    );
+
+    // The timer keeps firing. Nothing is scheduled, nothing is sent, and the
+    // repeated raise is a durable no-op rather than a second condition or a
+    // second event.
     let sends = browser.sends().len();
     let before = dump_domain(&harness.inspect());
     for _ in 0..50 {
@@ -294,6 +314,14 @@ fn gpt_006_resume_budget_exhausts_safely() {
             budget.take(),
             ResumeDecision::Exhausted,
             "the budget never refills"
+        );
+        assert!(
+            store
+                .raise_foreman_unreachable(RaiseForemanUnreachableRequest {
+                    obligation: work.obligation,
+                })
+                .expect("a repeat is convergence, not a refusal")
+                .duplicate
         );
     }
     assert_unchanged(
@@ -303,23 +331,51 @@ fn gpt_006_resume_budget_exhausts_safely() {
     );
     assert_eq!(browser.sends().len(), sends, "GPT-006: zero further sends");
 
-    // And the obligation is still owed, indefinitely.
+    // And the obligation is still owed, indefinitely, with its attention.
     assert!(snapshot(&store, work.obligation).open);
     drop(store);
     let store = harness
         .open_at(1_000 + 30 * 86_400_000, None)
         .expect("a month later");
     assert!(snapshot(&store, work.obligation).open);
+    assert_eq!(
+        store
+            .open_health_conditions()
+            .expect("reading conditions")
+            .len(),
+        1,
+        "GPT-006: the attention record survives a restart"
+    );
 
-    // Deferred: the durable half. Phase 1's store has one health-condition
-    // writer — startup quarantine — so there is no operation that would commit
-    // this row, and asserting it exists would be asserting a fiction.
+    // The condition's other half. A delivery that lands *is* the evidence that
+    // the foreman was reachable after all, so it closes the attention that said
+    // otherwise. This resume is operator-driven: the automatic budget is still
+    // spent and still refuses.
+    assert_eq!(budget.take(), ResumeDecision::Exhausted);
+    let mut browser =
+        FakeBrowser::attach(&harness.database_path(), BrowserWorld::healthy("conv-A"));
+    let resumed = schedule_wake(&store, work.obligation, work.generation, revision.next())
+        .expect("an operator-driven resume");
+    assert_eq!(
+        deliver_wake(
+            &store,
+            &mut browser,
+            work.obligation,
+            work.generation,
+            &resumed
+        ),
+        DeliveryState::Accepted
+    );
     assert!(
         store
             .open_health_conditions()
             .expect("reading conditions")
-            .is_empty()
+            .is_empty(),
+        "GPT-006: an accepted delivery resolves `foreman_unreachable`"
     );
+    store
+        .verify_projections()
+        .expect("the health ledger replays from its events");
 }
 
 #[test]

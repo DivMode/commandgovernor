@@ -47,8 +47,14 @@ use crate::ops::bootstrap::{BindForeman, OpenWorkerTurn};
 use crate::ops::claim::{
     AcknowledgeObligation, DeliverHandoff, ExpireForemanClaim, MintForemanClaim,
 };
-use crate::ops::delivery::{ArmDeliverySend, CreateOrClaimDelivery, RecordDeliveryOutcome};
+use crate::ops::delivery::{
+    ArmDeliverySend, CreateOrClaimDelivery, ReconcileAmbiguousDelivery, RecordDeliveryOutcome,
+};
 use crate::ops::effect::{MarkExternalDispatched, RecordExternalIntent, RecordExternalOutcome};
+use crate::ops::health::{
+    RaiseForemanUnreachable, RaiseResultArtifactMissing, RecordTerminalEvidenceConflict,
+    ResolveResultArtifactMissing,
+};
 use crate::ops::lease::{AcquireLease, ReleaseLease, RenewLease};
 use crate::ops::mutation::{AckMutationReceipt, BeginMutation, CompleteMutation};
 use crate::ops::recovery::RecoverStartup;
@@ -94,6 +100,7 @@ pub(crate) enum Command {
     CreateOrClaimDelivery(Job<CreateOrClaimDelivery>),
     ArmDeliverySend(Job<ArmDeliverySend>),
     RecordDeliveryOutcome(Job<RecordDeliveryOutcome>),
+    ReconcileAmbiguousDelivery(Job<ReconcileAmbiguousDelivery>),
     MintForemanClaim(Job<MintForemanClaim>),
     DeliverHandoff(Job<DeliverHandoff>),
     AcknowledgeObligation(Job<AcknowledgeObligation>),
@@ -107,6 +114,10 @@ pub(crate) enum Command {
     AcquireLease(Job<AcquireLease>),
     RenewLease(Job<RenewLease>),
     ReleaseLease(Job<ReleaseLease>),
+    RaiseForemanUnreachable(Job<RaiseForemanUnreachable>),
+    RaiseResultArtifactMissing(Job<RaiseResultArtifactMissing>),
+    ResolveResultArtifactMissing(Job<ResolveResultArtifactMissing>),
+    RecordTerminalEvidenceConflict(Job<RecordTerminalEvidenceConflict>),
     RecoverStartup(Job<RecoverStartup>),
     VerifyProjections(Query<VerifiedProjections>),
     OpenHealthConditions(Query<Vec<OpenCondition>>),
@@ -167,6 +178,7 @@ fn dispatch(
         Command::CreateOrClaimDelivery(job) => run(conn, ports, hook, job),
         Command::ArmDeliverySend(job) => run(conn, ports, hook, job),
         Command::RecordDeliveryOutcome(job) => run(conn, ports, hook, job),
+        Command::ReconcileAmbiguousDelivery(job) => run(conn, ports, hook, job),
         Command::MintForemanClaim(job) => run(conn, ports, hook, job),
         Command::DeliverHandoff(job) => run(conn, ports, hook, job),
         Command::AcknowledgeObligation(job) => run(conn, ports, hook, job),
@@ -180,6 +192,10 @@ fn dispatch(
         Command::AcquireLease(job) => run(conn, ports, hook, job),
         Command::RenewLease(job) => run(conn, ports, hook, job),
         Command::ReleaseLease(job) => run(conn, ports, hook, job),
+        Command::RaiseForemanUnreachable(job) => run(conn, ports, hook, job),
+        Command::RaiseResultArtifactMissing(job) => run(conn, ports, hook, job),
+        Command::ResolveResultArtifactMissing(job) => run(conn, ports, hook, job),
+        Command::RecordTerminalEvidenceConflict(job) => run(conn, ports, hook, job),
         Command::RecoverStartup(job) => run(conn, ports, hook, job),
         Command::VerifyProjections(query) => {
             // Writes the watermark, so it takes the write lock like any other

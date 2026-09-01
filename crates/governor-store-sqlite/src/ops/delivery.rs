@@ -400,6 +400,9 @@ pub struct RecordDeliveryOutcomeRequest {
 pub(crate) struct RecordDeliveryOutcome {
     request: RecordDeliveryOutcomeRequest,
     event: EventId,
+    /// Minted for the `foreman_unreachable` resolution an acceptance implies.
+    /// Discarded when the outcome is not an acceptance, or none is open.
+    resolution_event: EventId,
     now: Timestamp,
 }
 
@@ -414,6 +417,7 @@ impl WriteOp for RecordDeliveryOutcome {
         Ok(Self {
             request,
             event: ports.next_id(),
+            resolution_event: ports.next_id(),
             now: ports.now(),
         })
     }
@@ -541,6 +545,188 @@ impl WriteOp for RecordDeliveryOutcome {
             next.state(),
             accepted_message.as_deref(),
             Some(seq),
+        )?;
+
+        // A wake that landed is evidence the foreman *was* reachable, so it
+        // closes the attention that said otherwise. Attention only — nothing
+        // here touches the obligation.
+        if accepted_message.is_some() {
+            crate::ops::health::resolve_on_acceptance(
+                tx,
+                obligation.projection.id(),
+                self.resolution_event,
+                self.now,
+            )?;
+        }
+
+        tx.reach(Failpoint::AfterProjectionUpdate)?;
+        tx.reach(Failpoint::BeforeCommit)?;
+        Ok(next.state())
+    }
+
+    fn finish(self, committed: Self::Committed) -> Self::Output {
+        committed
+    }
+}
+
+/// Exact later evidence that an ambiguous revision did in fact submit.
+///
+/// Every field is a fence. There is no variant that takes less, and in
+/// particular there is none that takes an absence: `docs/state-machines.md`
+/// "Ambiguous reconciliation" — *absence is not proof of no submission*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileAmbiguousDeliveryRequest {
+    /// The random correlation ID of the ambiguous revision.
+    ///
+    /// Possession of this value is the only way to name a delivery, exactly as
+    /// it is for `foreman_resume`; a deterministic key does not identify one.
+    pub delivery_id: DeliveryId,
+    /// Binding generation the evidence was observed under. Must be current.
+    pub binding_generation: BindingGeneration,
+    /// Conversation the message was observed in. Must be the bound one.
+    pub conversation: governor_core::binding::ConversationRef,
+    /// Provider-native identity of the user message that was found.
+    pub message: ProviderMessageRef,
+}
+
+/// Promotes an ambiguous revision to accepted on exact evidence. No Send.
+///
+/// `docs/testing.md` DEL-015 and `docs/state-machines.md` "Ambiguous
+/// reconciliation". Four properties, and each is structural rather than
+/// asserted:
+///
+/// - **no external effect.** This operation is a transaction body, so it has no
+///   port to reach an adapter through, and it hands back no
+///   [`governor_core::outbound::IoPermit`] — the promoted revision's last
+///   attempt is `accepted`, and [`governor_core::outbound::Delivery::io_permit`]
+///   yields `Some` only for a *live* attempt.
+/// - **still frozen.** `accepted` satisfies
+///   [`governor_core::outbound::DeliveryState::is_frozen`], so a later claim on
+///   this revision is refused by the same rule that refuses one on an accepted
+///   wake.
+/// - **exact evidence only.** The conversation must be the delivery's bound
+///   one, and the correlation ID must be the delivery's own. A caller that has
+///   neither cannot name a delivery at all.
+/// - **replay-foldable.** The event is folded back through
+///   [`DeliveryEvent::ReconciledAccepted`] like every other delivery fact, so
+///   DB-001 equivalence covers the promotion.
+///
+/// # Undifferentiated refusals
+///
+/// A wrong correlation ID and a wrong conversation both report
+/// [`Conflict::UnknownDeliveryId`]. Together those two values *are* how a
+/// delivery is named for reconciliation, and a caller probing one of them must
+/// not learn which half it got right.
+pub(crate) struct ReconcileAmbiguousDelivery {
+    request: ReconcileAmbiguousDeliveryRequest,
+    event: EventId,
+    /// Minted for the `foreman_unreachable` resolution an acceptance implies.
+    /// Discarded when no such condition is open.
+    resolution_event: EventId,
+    now: Timestamp,
+}
+
+impl WriteOp for ReconcileAmbiguousDelivery {
+    type Request = ReconcileAmbiguousDeliveryRequest;
+    type Committed = DeliveryState;
+    type Output = DeliveryState;
+
+    const NAME: &'static str = "reconcile_ambiguous_delivery";
+
+    fn prepare(request: Self::Request, ports: &mut StorePorts) -> StoreResult<Self> {
+        Ok(Self {
+            request,
+            event: ports.next_id(),
+            resolution_event: ports.next_id(),
+            now: ports.now(),
+        })
+    }
+
+    fn commit(&self, tx: &Tx<'_>) -> StoreResult<Self::Committed> {
+        let bindings = load::bindings(tx)?;
+        let active = bindings.fence(self.request.binding_generation)?;
+
+        let loaded = load::wake_by_delivery_id(tx, &self.request.delivery_id)?;
+        let wake = loaded.wake;
+        if wake.binding_generation() != self.request.binding_generation {
+            return Err(Conflict::StaleBindingGeneration {
+                presented: self.request.binding_generation,
+                active: wake.binding_generation(),
+            }
+            .into());
+        }
+        if active.conversation() != &self.request.conversation {
+            return Err(Conflict::UnknownDeliveryId.into());
+        }
+
+        let obligation = load::obligation(tx, wake.target().obligation)?;
+        let transition = wake.apply(&DeliveryEvent::ReconciledAccepted {
+            // The conversation half is read from the binding, never taken from
+            // the caller's copy, so the stored evidence is the surface's own.
+            evidence: AcceptedWakeEvidence::new(
+                active.conversation().clone(),
+                self.request.message.clone(),
+            ),
+            at: self.now,
+        })?;
+        let Some(next) = transition.advanced() else {
+            return Ok(wake.state());
+        };
+
+        let seq = event::append(
+            tx,
+            &NewEvent {
+                event_id: self.event,
+                kind: EventKind::BrowserDeliveryReconciled,
+                source: crate::ops::internal_source_text(
+                    &self.request.delivery_id.expose_hex(),
+                    &format!("reconciled.{}", wake.revision()),
+                )?,
+                observed_at: self.now,
+                occurred_at: None,
+                scope: EventScope {
+                    task: Some(obligation.identity.task),
+                    obligation: Some(obligation.projection.id()),
+                    ..EventScope::default()
+                },
+                metadata: SafeMetadata::new()
+                    .int("revision", i64::from(wake.revision().get()))
+                    .token("message_ref", self.request.message.as_token()),
+            },
+        )?
+        .seq();
+
+        // Exactly the attempt the machine promoted, and only from `ambiguous`.
+        for attempt in next.delivery().attempts() {
+            if attempt.state() != AttemptState::Accepted {
+                continue;
+            }
+            tx.conn().execute(
+                "UPDATE delivery_attempts
+                    SET state = ?3, evidence_class = NULL, finished_at_ms = ?4
+                  WHERE delivery_id = ?1 AND attempt_no = ?2 AND state = 'ambiguous'",
+                params![
+                    self.request.delivery_id.expose_hex(),
+                    i64::from(attempt.number().get()),
+                    encode_attempt_state(AttemptState::Accepted),
+                    store_time(self.now),
+                ],
+            )?;
+        }
+        set_delivery_state(
+            tx,
+            next.delivery_id(),
+            next.state(),
+            Some(self.request.message.as_token().as_str()),
+            Some(seq),
+        )?;
+
+        // An acceptance is an acceptance however it was proven.
+        crate::ops::health::resolve_on_acceptance(
+            tx,
+            obligation.projection.id(),
+            self.resolution_event,
+            self.now,
         )?;
 
         tx.reach(Failpoint::AfterProjectionUpdate)?;
