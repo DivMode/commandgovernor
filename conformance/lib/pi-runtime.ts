@@ -114,10 +114,37 @@ export async function runPinnedPi(
 	args: readonly string[],
 	options: PiOptions = {},
 ): Promise<PiResult> {
+	return runIsolated(pinnedPiBinary(), args, options);
+}
+
+/** Absolute path to the launcher. */
+export function launcherPath(): string {
+	return join(REPO_ROOT, "bin", "cg-pi");
+}
+
+/**
+ * Run `bin/cg-pi` under the same isolation as {@link runPinnedPi}.
+ *
+ * Used to prove the launcher's trust confinement, which cannot be checked by
+ * reading the script: the property under test is what Pi resolves as "the
+ * project", and that depends on the working directory the launcher hands it.
+ */
+export async function runLauncher(
+	args: readonly string[],
+	options: PiOptions = {},
+): Promise<PiResult> {
+	return runIsolated(launcherPath(), args, options);
+}
+
+async function runIsolated(
+	command: string,
+	args: readonly string[],
+	options: PiOptions,
+): Promise<PiResult> {
 	const agentDir = mkdtempSync(join(tmpdir(), "cg-conformance-agent-"));
 	try {
 		return await new Promise<PiResult>((resolve, reject) => {
-			const child = spawn(pinnedPiBinary(), [...args], {
+			const child = spawn(command, [...args], {
 				cwd: options.cwd ?? REPO_ROOT,
 				env: {
 					...process.env,

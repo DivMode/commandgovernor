@@ -10,7 +10,7 @@
 #    modes and is a no-op in print mode. It is a request. Refusing before the
 #    process starts is the only refusal that is guaranteed.
 #
-# 2. `--approve` IS PASSED DELIBERATELY.
+# 2. `--approve` IS PASSED DELIBERATELY, AND IS CONFINED TO THIS REPOSITORY.
 #    Pi's non-interactive modes (-p, --mode json, --mode rpc) never prompt for
 #    project trust, and under the default `defaultProjectTrust: "ask"` they
 #    silently ignore every project-local resource: no extensions, no skills, no
@@ -18,16 +18,39 @@
 #    a successful exit. A distribution whose entire point is a curated
 #    project-level loadout cannot leave that to a default.
 #
-#    Read this narrowly. It is trust of THIS repository's own committed
-#    configuration, which is reviewed like any other code here. It is not a
-#    general trust bypass, it grants no permission Pi would otherwise withhold
-#    from the user, and it must not be extended to repositories whose `.pi`
-#    directory nobody has read. Pi has no sandbox: project trust governs which
-#    files are LOADED, not what the loaded code may do.
+#    But Pi resolves "the project" from the CURRENT WORKING DIRECTORY, not from
+#    wherever this script lives. So a bare `--approve` is not trust of this
+#    repository -- it is trust of whatever directory the caller happened to be
+#    standing in. Measured: run from an unrelated directory containing a
+#    `.pi/extensions/`, this launcher loaded that directory's extension and did
+#    NOT load cg-version-guard, because the guard ships with this repository's
+#    project loadout and that was not the project. A launcher that grants
+#    blanket trust to an arbitrary directory while dropping its own safety
+#    extension is worse than no launcher.
 #
-#    `--approve` is passed as the first argument, so a caller who supplies
-#    `--no-approve` afterwards is making a deliberate choice. (Which flag wins
-#    when both are present is Pi's business and was not characterized here.)
+#    So the trust is scoped structurally: refuse outright unless the working
+#    directory is inside this repository, then `cd` to the repository root
+#    before exec. Both halves are needed. The refusal is what stops the
+#    auto-trust of a foreign directory; the `cd` is what makes the approval mean
+#    this repository, since Pi only finds this loadout from the root.
+#
+#    Read the grant narrowly even so. It is trust of THIS repository's own
+#    committed configuration, reviewed like any other code here. It is not a
+#    general trust bypass and grants no permission Pi would otherwise withhold
+#    from the user: project trust governs which files are LOADED, not what the
+#    loaded code may do. Pi ships no sandbox.
+#
+#    A consumer-facing launcher will have a different trust story and must not
+#    copy this one. A consumer trusts THEIR project, which pins Command
+#    Governor as a package in its own `.pi/settings.json`; the confinement below
+#    would be to their repository root, not to ours, and the loadout would
+#    arrive through the pinned package rather than through this checkout.
+#
+#    `--approve` is passed as the first argument so a caller can override it.
+#    Characterized against the pinned binary: the LAST flag wins. `--approve
+#    --no-approve` resolves no project resources; `--no-approve --approve`
+#    resolves them. A caller appending `--no-approve` therefore gets what they
+#    asked for.
 #
 # 3. PI_SUBAGENTS_TEMP_ROOT IS POINTED SOMEWHERE DURABLE.
 #    The subagent package selected for Phase C hangs its async run status,
@@ -41,8 +64,8 @@
 # Usage: bin/cg-pi [pi arguments...]
 set -eu
 
-script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 pins_json="$repo_root/pins/pins.json"
 
 fail() {
@@ -52,6 +75,24 @@ fail() {
 
 [ -f "$pins_json" ] || fail "missing pin record: $pins_json"
 command -v node >/dev/null 2>&1 || fail 'node is not on PATH'
+
+# --- confine the trust grant to this repository -----------------------------
+
+# Pi resolves the project from the working directory, so `--approve` below is
+# only a statement about THIS repository if the working directory is inside it.
+invocation_dir=$(pwd -P)
+case "$invocation_dir" in
+"$repo_root" | "$repo_root"/*) ;;
+*)
+	fail "refusing to run outside the Command Governor checkout.
+  working directory  $invocation_dir
+  repository root    $repo_root
+  This launcher passes --approve, and Pi resolves the trusted project from the
+  working directory -- so running it elsewhere would trust that directory's
+  .pi/ files while leaving this repository's own loadout unloaded. Change into
+  $repo_root, or run pi directly if you meant to work on another project."
+	;;
+esac
 
 read_pin() {
 	node -e '
@@ -80,9 +121,12 @@ if [ -x "$local_pi" ]; then
 	pi_bin="$local_pi"
 	pi_origin="repo-local pin ($install_root_rel)"
 elif command -v pi >/dev/null 2>&1; then
-	# A pi on PATH is accepted only when it is byte-for-byte the right version.
-	# This is a convenience for a machine that already manages pi declaratively,
-	# not a fallback that lets the pin slide.
+	# A pi on PATH is accepted only when it reports the pinned version. That is
+	# a self-reported string, not proof of provenance -- it identifies the
+	# release the binary claims to be, nothing more. The repo-local install
+	# above is the one with a checksum behind it, and this branch exists as a
+	# convenience for a machine that already manages pi declaratively, not as a
+	# fallback that lets the pin slide.
 	pi_bin=$(command -v pi)
 	pi_origin="PATH ($pi_bin)"
 else
@@ -110,5 +154,10 @@ export PI_SUBAGENTS_TEMP_ROOT
 mkdir -p "$PI_SUBAGENTS_TEMP_ROOT" || fail "cannot create $PI_SUBAGENTS_TEMP_ROOT"
 
 # --- go ---------------------------------------------------------------------
+
+# From the repository root, so `--approve` approves this repository's loadout.
+# Pi discovers the project from the working directory and only finds
+# .pi/settings.json here.
+cd "$repo_root" || fail "cannot enter $repo_root"
 
 exec "$pi_bin" --approve "$@"
