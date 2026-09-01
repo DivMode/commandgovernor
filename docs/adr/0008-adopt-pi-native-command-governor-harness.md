@@ -339,3 +339,22 @@ Rejected. If Pi owns both outbound and inbound ChatGPT Web transport, a correlat
 ## Migration rule
 
 Until the Pi-native gates pass, old Rust behavior/specs remain useful reference material. After parity passes, there must be no ambiguous “two Command Governors” state: one production Pi-native architecture becomes authoritative and redundant old runtime code is removed/archived deliberately.
+
+## Erratum — 2026-09-01
+
+The decision above stands unchanged. Two factual corrections to the “Initial Command Governor Pi-native stack direction” table, established while pinning the substrate for Gate P1 and recorded here rather than by rewriting an accepted ADR.
+
+**1. The npm names do not resolve to the repositories this ADR reviewed.**
+
+| Name as used above | Repository this ADR reviewed | What `pi install npm:<name>` actually installs |
+| --- | --- | --- |
+| `pi-subagents` | `amosblomqvist/pi-subagents` — no LICENSE file, no `package.json` | `pi-subagents@0.62.0` → `nicobailon/pi-subagents`, MIT |
+| `pi-observational-memory` | `amosblomqvist/pi-observational-memory` — MIT, not published to npm | `pi-observational-memory@3.0.4` → `elpapi42/pi-observational-memory`, MIT |
+
+Verified with `npm view <name> repository.url`. An installer following this ADR literally would install a different, larger project than the one reviewed — in both cases the stronger of the two, but not the one the review covered. Separately, the `@mariozechner/*` scope was renamed to `@earendil-works/*` and `@mariozechner/pi-coding-agent` is frozen at 0.73.1, so any package still importing that scope cannot load against the pinned 0.84.4 runtime without a port.
+
+**2. “Overlapping packages can create conflicting authorities if installed carelessly” is listed above as a cost. It is an undetectable failure mode.**
+
+Pi 0.84.4 resolves competing extension handlers silently by load order: for a `session_before` event every handler’s result overwrites the previous one, so two extensions that both answer `session_before_compact` do not conflict — the last one loaded wins, with no error and no warning. Pi also exposes no runtime API for enumerating loaded extensions, so nothing can detect the collision from inside a session. Single authority per concern must therefore be an install-time assertion over the distribution’s own pinned manifest, not a documented convention. `harness/authorities.json` and the P1-AUTH conformance tests are that assertion.
+
+See [`../pi-native/dependency-matrix.md`](../pi-native/dependency-matrix.md) for the full evaluation and [`../pi-distribution.md`](../pi-distribution.md) for the pinned foundation.

@@ -43,6 +43,12 @@ MCP remains an optional interoperability mechanism rather than a mandatory
 architecture spine. Direct and browser-backed ChatGPT Web transports are
 capability-gated adapters; the conformance tests define the behavior.
 
+The pinned foundation for that direction exists on this branch: a reproducible
+bootstrap of a checksum-verified Pi release, the package and role structure, a
+version guard, a launcher, and the credential-free conformance suite that gates
+any re-pin. See [`docs/pi-distribution.md`](docs/pi-distribution.md) for how to
+bootstrap and launch it, and what it deliberately does not yet claim.
+
 ## Historical pre-ADR-0008 design
 
 The sections below describe the architecture that produced the reviewed Rust
