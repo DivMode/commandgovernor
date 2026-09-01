@@ -686,31 +686,33 @@ unapproved licenses/sources according to project policy.
 Do not run browser wake support against a surface that cannot truthfully mutate
 Governor state.
 
-Research baseline on 2026-08-31:
+Evidence baseline on 2026-08-31:
 
-- consumer ChatGPT Pro custom MCP: documented read/fetch-only -> **not eligible**;
-- Business/Enterprise/Edu: full MCP actions currently documented as beta ->
-  candidate only;
-- Business currently offers GPT-5.6 Sol Pro, satisfying the desired Pro-model role
-  without consumer-Pro MCP limitations.
+- published plan documentation was initially interpreted as a categorical
+  read/fetch-only restriction for consumer Pro;
+- a live test on the exact target ChatGPT Pro account/app/surface successfully
+  performed state-changing Tandem MCP actions and verified a host-filesystem
+  mutation by read-back;
+- ADR 0006 therefore makes eligibility capability-based, not plan-name-based.
 
-For each candidate workspace/account:
+For each candidate bound account/app/surface:
 
-1. record plan/workspace/model/date;
-2. install/refresh exact V1 connector ABI;
-3. call read-only bootstrap;
-4. execute a harmless synthetic claim mutation;
-5. execute a harmless synthetic ACK-like close mutation;
-6. characterize confirmation behavior and whether the legitimate ChatGPT model can
-   complete it unattended under product policy;
-7. verify stale generation mutation rejected;
-8. remove synthetic record.
+1. record plan/workspace/model/date as diagnostic metadata;
+2. install/refresh the exact V1 connector ABI;
+3. prove the app/tools are mounted for the turn;
+4. execute a harmless synthetic state-changing mutation;
+5. read back and correlate the exact committed synthetic record;
+6. prove a stale binding-generation mutation is rejected;
+7. characterize confirmation/permission behavior without bypass;
+8. record `capability_epoch` and re-run after relevant app/account/product/ABI
+   changes or repeated action rejection;
+9. classify mount, write availability/rejection, confirmation, reachability, and
+   ABI failures separately.
 
-Pass: truthful writes function through supported product behavior and no required
-confirmation/boundary forces an invariant-weakening bypass. Fail: surface remains
-unsupported; no fallback to browser-inferred ACK.
-
----
+Pass: the exact surface can execute the required truthful mutation class under the
+current capability epoch and stale-generation fencing works. Fail: the surface is
+unsupported for that epoch, no browser-inferred/read-mislabeled fallback exists,
+and all real obligations remain open.
 
 ## Live Gate B — headed Chrome/CDP
 

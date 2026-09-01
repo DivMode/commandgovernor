@@ -410,19 +410,26 @@ SQLite's one-writer property is not the daemon-election protocol.
 
 ## Threat: connector plan/capability mismatch
 
-**Failure:** architecture assumes ChatGPT Pro can execute `foreman_ack` even though
-current consumer Pro custom MCP is read/fetch-only, or assumes a candidate write
-workspace can execute mutations without confirmations that alter the unattended
-flow.
+**Failure:** architecture either trusts a plan matrix as categorical truth when the
+exact account/app/surface behaves differently, or treats one old successful probe
+as a permanent entitlement after the product/connector changes.
 
 **Mitigations:**
 
-- consumer Pro explicitly unsupported for end-to-end V1 at this research snapshot;
-- Business/Enterprise/Edu candidate surfaces feature-test synthetic mutation and
-  confirmation behavior;
+- ADR 0006 makes support capability-based rather than plan-name-based;
+- every bound surface performs a harmless synthetic mutation/read-back and
+  stale-generation test;
+- the result is fenced by `capability_epoch` and revalidated after relevant
+  connector/account/product/ABI changes or repeated rejection;
+- tool-mount failure, write unavailable/rejected, confirmation required,
+  connector unreachable, and ABI mismatch remain distinct failure classes;
 - no mutation is mislabeled read-only;
 - assistant/browser settlement never substitutes for ACK;
-- capability loss preserves obligations indefinitely.
+- capability loss preserves obligations indefinitely rather than silently
+  downgrading correctness.
+
+The target Pro surface's successful 2026-08-31 Tandem mutation proof is evidence
+for that exact surface at that time, not a universal plan guarantee.
 
 ## Threat: connector schema drift/caching
 

@@ -14,13 +14,16 @@ Long-lived ChatGPT conversations/apps can retain tool schemas, and current app
 updates require explicit refresh/action enablement. The public ABI must be small
 and stable.
 
-Current OpenAI published product behavior also matters. As of this review,
-consumer **ChatGPT Pro custom MCP is read/fetch-only** in developer mode; full
-custom MCP modify/write actions are currently documented for Business,
-Enterprise, and Edu beta surfaces. Business currently exposes the GPT-5.6 Sol Pro
-model, so a Business workspace can satisfy the desired Pro-model foreman role if
-the live action/confirmation gate passes. A write-capable ACK cannot be faked as a
-read.
+Published OpenAI developer-mode guidance reviewed earlier on 2026-08-31 described
+a plan-level split that suggested consumer Pro custom MCP should be treated as
+read/fetch-only while Business/Enterprise/Edu had broader modify/write support.
+ADR 0006 supersedes using that documentation as a categorical support decision: a
+live test on the exact target ChatGPT Pro account/app/surface successfully performed
+state-changing Tandem MCP actions and verified the mutation by read-back.
+
+The architecture therefore treats published plan documentation as compatibility
+evidence and the live capability probe as the support authority for the exact
+bound surface. A write-capable ACK still cannot be faked as a read.
 
 ## Decision
 
@@ -107,15 +110,26 @@ may adapt the tunnel to the daemon, but it owns no orchestration state.
 
 ## Capability gate
 
-Consumer ChatGPT Pro is **not currently an end-to-end V1 foreman target** because
-its custom MCP surface is documented read/fetch-only. The Rust kernel does not
-weaken its invariant to accommodate that limitation.
+Support is **capability-based, not plan-name-based**, as accepted by ADR 0006.
+`command-governor chatgpt bind` must feature-test the exact bound
+account/app/surface with a harmless synthetic state mutation and read-back. The
+probe must also prove stale binding-generation rejection and characterize current
+confirmation behavior.
 
-For Business/Enterprise/Edu candidate surfaces, `chatgpt bind` must feature-test
-the real account/workspace with a synthetic safe mutation and must characterize
-confirmation behavior. If state-changing MCP actions are unavailable, blocked, or
-require an interaction incompatible with the intended unattended loop, binding
-records the exact unsupported capability state.
+The support record is fenced by `capability_epoch`. Plan/workspace/model labels are
+recorded as diagnostics but are not sufficient to approve or reject the foreman
+loop. Revalidate after connector/app recreation or refresh, account/workspace/plan
+changes, relevant ChatGPT product changes, MCP ABI changes, or repeated action
+rejection that suggests capability drift.
+
+Keep tool-mount/runtime failures distinct from actual write denial. At minimum:
+
+- `app_tools_not_mounted`
+- `write_action_unavailable`
+- `write_action_rejected`
+- `confirmation_required`
+- `connector_unreachable`
+- `connector_abi_mismatch`
 
 In particular:
 
@@ -123,7 +137,9 @@ In particular:
 - browser DOM events cannot substitute for ACK;
 - a read-only tool is not mislabeled to mutate state;
 - a product confirmation that the model cannot legitimately complete unattended
-  is not bypassed.
+  is not bypassed;
+- a previously successful capability epoch does not authorize silent fallback if
+  writes later stop working.
 
 ## Alternatives
 
@@ -156,7 +172,11 @@ foreman's semantic review decision from UI text.
 
 ## Consequences
 
-The V1 architecture currently supports fewer ChatGPT plan/surface combinations
-than desired. A Business/Enterprise/Edu workspace with a supported Pro model is a
-candidate; consumer Pro is not. That is preferable to claiming a durable review
-loop that cannot actually close obligations correctly.
+The V1 support matrix is dynamic and evidence-based rather than hard-coded from
+plan names. The target Pro surface demonstrated state-changing Tandem MCP on
+2026-08-31, but Command Governor still must run its own exact synthetic mutation,
+stale-generation, confirmation, and ABI preflight before binding that surface.
+
+A later capability failure leaves obligations open and marks the surface
+unsupported for the current capability epoch. That is preferable to claiming a
+durable review loop that cannot actually close obligations correctly.

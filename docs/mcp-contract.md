@@ -7,17 +7,22 @@ The MCP surface exists so a woken ChatGPT foreman can fetch durable truth and
 explicitly disposition it. MCP is not the wake mechanism. The browser wake is not
 the result transport.
 
-## Current deployment constraint
+## Current capability gate
 
-As of the 2026-08-31 review, OpenAI's published ChatGPT developer-mode policy says
-consumer ChatGPT Pro custom MCP is read/fetch-only. Full custom MCP modify/write
-actions are currently a Business/Enterprise/Edu beta capability. Because
-`foreman_resume`, `foreman_ack`, and `foreman_answer_input` are real mutations,
-consumer Pro is not a supported end-to-end V1 foreman surface today.
+`foreman_resume`, `foreman_ack`, and `foreman_answer_input` are real mutations, so
+the exact bound ChatGPT account/app/surface must prove that mutation class.
+Published plan documentation is compatibility evidence rather than the support
+authority.
 
-Business currently exposes GPT-5.6 Sol Pro in its model picker, so Business is a
-candidate for the desired Pro-model foreman while preserving truthful MCP writes.
-The actual workspace/account must still pass the action/confirmation preflight.
+ADR 0006 records a live 2026-08-31 test in which the target ChatGPT Pro surface
+successfully performed state-changing Tandem MCP actions and verified the resulting
+host-filesystem mutation by read-back. Command Governor therefore uses a harmless
+synthetic mutation/read-back during binding, records a `capability_epoch`, and
+revalidates after relevant app/account/product/ABI changes or capability drift.
+
+Plan/workspace/model labels remain useful diagnostics. They neither grant nor deny
+support by themselves, and no surface is allowed to fake mutation semantics when a
+current probe fails.
 
 ## Compatibility objective
 
@@ -419,11 +424,12 @@ At minimum the preflight verifies:
 The test mutation operates on a synthetic preflight record, never a real
 engineering obligation.
 
-Consumer Pro is documented read/fetch-only at this review snapshot and is marked
-unsupported without pretending a preflight can manufacture missing plan
-capabilities. If a candidate Business/Enterprise/Edu surface fails writes or
-confirmation semantics, binding records the exact unsupported state. The daemon
-does not weaken the invariant.
+Published plan documentation is retained as dated compatibility evidence, but
+ADR 0006 forbids using plan name as the support decision. The target Pro surface
+demonstrated state-changing Tandem MCP on 2026-08-31. Every exact bound surface
+still must pass the Command Governor synthetic mutation/read-back and confirmation
+preflight for the current `capability_epoch`; if it fails, binding records the
+exact unsupported state and the daemon does not weaken the invariant.
 
 ## Stable-schema upgrade policy
 

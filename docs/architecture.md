@@ -17,27 +17,31 @@ runtimes, or Command Governor restart.
 V1 is a Rust daemon + CLI. No conventional GUI and no human completion-notification
 subsystem is part of correctness.
 
-## Current ChatGPT deployment constraint
+## Current ChatGPT capability gate
 
 The architecture requires state-changing MCP operations for claim, ACK, and input
-answers. As of the 2026-08-31 review, OpenAI's published ChatGPT developer-mode
-policy says consumer **ChatGPT Pro custom MCP is read/fetch-only**; full custom MCP
-modify/write actions are currently available to Business, Enterprise, and Edu beta
-surfaces. Business currently offers the GPT-5.6 Sol Pro model, so a Business
-workspace can be a current end-to-end V1 foreman target when the live capability
-gate passes.
+answers. Published OpenAI plan documentation is recorded as compatibility evidence,
+but ADR 0006 establishes the support rule: **feature-test the exact bound
+account/app/surface instead of inferring capability from a plan label**.
+
+On 2026-08-31 the target ChatGPT Pro account/app/surface successfully performed
+state-changing Tandem MCP operations and verified a host-filesystem mutation by
+read-back. That disproved the earlier categorical plan-name assumption for this
+actual target surface.
 
 Therefore:
 
-- the Rust kernel/store/testkit may proceed independently;
-- **consumer ChatGPT Pro is not currently a supported end-to-end V1 foreman
-  surface** because it cannot truthfully perform `foreman_ack`;
-- Business/Enterprise/Edu remain candidates, subject to the real account/surface
-  capability and confirmation-behavior spike;
+- the Rust kernel/store/testkit proceeds independently of any ChatGPT product
+  assumption;
+- `command-governor chatgpt bind` must execute a harmless synthetic
+  mutation/read-back on the exact account/app/surface and record a
+  `capability_epoch`;
+- plan/workspace/model labels remain diagnostic metadata only;
+- capability is revalidated after connector/account/product/ABI changes or drift;
 - no browser signal, assistant settlement, or mislabeled read tool may substitute
   for explicit ACK.
 
-This is a product-capability constraint, not a reason to weaken the invariant.
+This is a capability gate, not a reason to weaken the invariant.
 
 ## Authority model
 
@@ -361,11 +365,12 @@ supply a documented trustworthy ChatGPT conversation principal, resume also
 requires the random accepted wake `delivery_id`; bootstrap/status do not disclose
 it. Resume mints the claim needed for later mutation.
 
-Current ChatGPT plan/surface capabilities mean write-capable MCP cannot be assumed.
-Consumer Pro is currently read/fetch-only and therefore unsupported for the
-end-to-end V1 foreman loop. Business/Enterprise/Edu candidates must still pass the
-real account capability preflight; do not fake ACK from browser/assistant state or
-mislabel a mutation as read-only.
+Write-capable MCP cannot be assumed from a plan name or from an earlier capability
+epoch. Gate A feature-tests the exact bound account/app/surface with a harmless
+state mutation/read-back, stale-generation rejection, and confirmation
+characterization. The target Pro surface demonstrated state-changing Tandem MCP on
+2026-08-31, while any surface whose current probe fails remains unsupported without
+fake ACK, browser-inferred ACK, or a mutation mislabeled as read-only.
 
 See [MCP contract](mcp-contract.md).
 
@@ -454,11 +459,16 @@ Missing evidence never becomes success.
 
 ### Gate A — ChatGPT MCP mutation
 
-A target Business/Enterprise/Edu ChatGPT surface must prove state-changing foreman
-tools on the actual account, including any confirmation behavior relevant to
-unattended processing. Consumer Pro is documented read/fetch-only as of this
-review and is not a Gate A candidate unless OpenAI changes the product capability.
-If writes are unavailable, the surface is unsupported without weakening ACK.
+The exact bound ChatGPT account/app/surface must prove the state-changing foreman
+tool class with a harmless synthetic mutation/read-back, stale-generation
+rejection, tool-mount characterization, and current confirmation behavior. The
+support decision is fenced by `capability_epoch`; plan name is diagnostic only.
+
+The target Pro surface already demonstrated state-changing Tandem MCP on
+2026-08-31, but that is compatibility evidence rather than a permanent entitlement
+or a substitute for the Command Governor preflight. If writes become unavailable,
+the surface is unsupported for that epoch and obligations stay open without
+weakening ACK.
 
 ### Gate B — headed Chrome/CDP
 
@@ -488,6 +498,6 @@ Pinned Claude invocation must prove:
 
 The architecture is suitable for a **small pure Rust core/store/testkit Phase 1
 scaffold after this architecture PR is reviewed/accepted**. ChatGPT and Claude
-service adapters remain gated capabilities, not assumptions. End-to-end V1 foreman
-automation currently targets a write-capable ChatGPT workspace surface, not
-consumer Pro.
+service adapters remain gated capabilities, not assumptions. End-to-end V1 foreman automation targets any exact ChatGPT surface that
+passes the current ADR-0006 capability epoch; plan name alone neither admits nor
+excludes the surface.

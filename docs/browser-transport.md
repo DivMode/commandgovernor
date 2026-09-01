@@ -26,12 +26,15 @@ Wry and CEF are not V1 dependencies.
 ## Current MCP surface dependency
 
 A browser wake is useful only if the selected ChatGPT foreman surface can call the
-state-changing MCP contract after waking. As of the 2026-08-31 review, consumer
-ChatGPT Pro custom MCP is documented read/fetch-only, so it is not an end-to-end V1
-target. Business/Enterprise/Edu candidate workspaces must pass Gate A before this
-browser transport can be considered a complete foreman loop. Business currently
-exposes GPT-5.6 Sol Pro, so using the Pro model does not require weakening the MCP
-write requirement.
+state-changing MCP contract after waking. ADR 0006 makes that a live capability
+question rather than a plan-name assumption. The exact target ChatGPT Pro surface
+demonstrated state-changing Tandem MCP on 2026-08-31, but every Command Governor
+binding must still establish a current `capability_epoch` with its own harmless
+mutation/read-back, stale-generation, tool-mount, and confirmation checks.
+
+If the current capability probe fails, browser wake support is not a complete
+foreman loop for that surface. The browser adapter does not infer ACK or work around
+a missing MCP mutation capability.
 
 ## Why a hybrid
 
@@ -331,8 +334,7 @@ This spike is a **gate**. Unit tests and source review cannot substitute for it.
 
 ### Prerequisites
 
-- Gate A has identified a write-capable ChatGPT workspace surface; consumer Pro is
-  not currently eligible under published product policy;
+- Gate A has established a current write-capable `capability_epoch` for the exact bound ChatGPT account/app/surface; plan name alone is not an eligibility decision;
 - dedicated Command Governor Chrome profile;
 - normal user login completed manually;
 - test Command Governor MCP app/connector installed through the supported ChatGPT

@@ -117,20 +117,28 @@ an unguessable possession secret.
 
 ## ChatGPT MCP capability boundary
 
-As of the 2026-08-31 architecture review, OpenAI documents full custom MCP
-modify/write actions for ChatGPT Business, Enterprise, and Edu beta surfaces;
-consumer ChatGPT Pro custom MCP is read/fetch-only.
+Published OpenAI plan documentation is recorded as compatibility evidence, but it
+is not treated as an authorization oracle. ADR 0006 records a stronger empirical
+fact for the actual target: on 2026-08-31 the target ChatGPT Pro
+account/app/surface successfully performed state-changing Tandem MCP actions and
+verified the resulting host-filesystem mutation.
 
-Command Governor does not work around that limitation by:
+Command Governor therefore binds support to a harmless synthetic mutation/read-back
+on the exact account/app/surface and a fenced `capability_epoch`, not to the plan
+label. Capability is revalidated after relevant connector/account/product/ABI
+changes or repeated action rejection.
+
+Command Governor does not react to capability loss by:
 
 - treating assistant/browser settlement as ACK;
 - labeling a mutation as read-only;
 - bypassing product confirmations;
 - weakening the explicit-ACK invariant.
 
-Consumer Pro is therefore not a supported end-to-end V1 foreman target at this
-snapshot. Candidate Business/Enterprise/Edu surfaces must pass the real mutation
-and confirmation-behavior gate before support is claimed.
+A surface whose current probe cannot perform the required state-changing action is
+unsupported for that epoch and its obligations remain open. Tool-mount failures,
+write denial, confirmation requirements, connector reachability, and ABI mismatch
+remain distinct diagnostics.
 
 ## ChatGPT Web adapter posture
 

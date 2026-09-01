@@ -28,8 +28,9 @@ Exit criteria:
 - every consequential external write has an ambiguity boundary;
 - a worker result can survive daemon/runtime restart until ACK;
 - Claude Stop-hook veto behavior cannot create false completion;
-- consumer ChatGPT Pro's current read/fetch-only MCP limitation is represented as
-  a capability boundary rather than hidden by a fake ACK path;
+- Gate A is capability-based: the exact ChatGPT account/app/surface must pass a
+  harmless mutation/read-back probe for the current capability epoch, while plan
+  name remains diagnostic metadata only;
 - deterministic browser dedupe identity is separate from random wake-correlation
   possession fencing;
 - no complete Claude/provider stream must be durably spooled for correctness;
@@ -43,6 +44,9 @@ After the architecture PR is accepted:
 
 - scaffold the Cargo workspace with pinned stable Rust/edition 2024;
 - implement opaque typed IDs, source/domain events, pure state machines, policies;
+- implement explicit external-effect classes and write-ahead intent state before consequential I/O;
+- implement stable mutation command identity with completed-result replay but uncertain-result no-replay semantics;
+- implement incarnation/lease fencing for resources that require exclusive ownership;
 - implement deterministic browser `delivery_key` plus CSPRNG random `delivery_id`;
 - implement `rusqlite` single-writer DB actor;
 - implement schema epoch/migrations and replayable projections;
@@ -60,6 +64,9 @@ Exit criteria:
 - deterministic delivery metadata cannot derive random wake correlation;
 - result-artifact crash ordering passes;
 - projection replay equivalence passes;
+- kill-after-intent and kill-after-I/O-before-result both produce durable ambiguity/reconciliation with zero automatic replay;
+- a repeated completed mutation identity returns its recorded result while a repeated pending/uncertain identity never redispatches;
+- stale lease token/process incarnation/daemon epoch cannot mutate or release current ownership;
 - forbidden-data scan is clean.
 
 No real ChatGPT or Claude is required for this phase.
@@ -160,28 +167,34 @@ Exit criteria:
 
 ## Gate A — ChatGPT MCP mutation capability
 
-Research baseline on 2026-08-31:
+Research and live evidence on 2026-08-31 establish two separate facts:
 
-- consumer ChatGPT Pro custom MCP: documented read/fetch-only -> **not an
-  end-to-end V1 candidate**;
-- ChatGPT Business/Enterprise/Edu: full custom MCP modify/write beta -> candidate
-  surfaces only;
-- Business currently offers the Pro model option powered by GPT-5.6 Sol Pro.
+- published OpenAI plan documentation remains compatibility evidence and may not
+  match every account/app/surface behavior;
+- the exact target ChatGPT Pro surface successfully performed state-changing
+  Tandem MCP operations and verified the resulting host-filesystem mutation.
 
-For each candidate write-capable workspace/account:
+ADR 0006 therefore makes Gate A **capability-based, not plan-name-based**.
 
-- record exact plan/workspace/model/date;
-- install/configure the V1 Command Governor app through the supported path;
-- verify connector ABI/tool visibility;
-- perform a synthetic harmless mutation from the actual ChatGPT surface;
-- prove state-changing resume/ACK/input-action class tools are available;
-- characterize current confirmation behavior and whether the intended legitimate
+For every candidate bound account/app/surface:
+
+- record exact plan/workspace/model/date as diagnostic metadata;
+- install/refresh the exact V1 Command Governor connector ABI;
+- verify the app/tools are mounted for the message;
+- perform a harmless synthetic state mutation and read it back from the MCP
+  server;
+- prove the mutation is correlated to the exact test record;
+- prove stale binding generation is rejected;
+- characterize confirmation/permission behavior and whether the legitimate
   model-driven flow can complete it without bypass;
-- prove stale binding generation fails closed.
+- record a `capability_epoch` and revalidate it after relevant connector,
+  account/workspace, product, or ABI changes and on repeated action rejection.
 
-If a target surface is read/fetch-only or requires an incompatible confirmation
-path, record `write_capability_unavailable`. Do not fake ACK, mislabel a write as a
-read, or substitute browser/assistant settlement.
+Keep `app_tools_not_mounted`, `write_action_unavailable`,
+`write_action_rejected`, `confirmation_required`, `connector_unreachable`, and
+`connector_abi_mismatch` as distinct failure classes. If the current probe fails,
+leave obligations open and record the unsupported capability. Do not fake ACK,
+mislabel a write as a read, or substitute browser/assistant settlement.
 
 ## Phase 4 — generic Rust browser/CDP foundation
 

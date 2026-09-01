@@ -34,27 +34,34 @@ the first draft. Those corrections are now architectural requirements.
 
 ## Independent-review corrections
 
-### 1. Consumer ChatGPT Pro cannot currently satisfy the V1 ACK loop
+### 1. ChatGPT support must be capability-based, not plan-name-based
 
-Current OpenAI developer-mode documentation says full custom MCP support with
-modify/write actions is rolling out in beta to **ChatGPT Business, Enterprise, and
-Edu**. Consumer **Pro** may connect MCPs with read/fetch permissions, but cannot be
-assumed to execute the state-changing `foreman_resume`, `foreman_ack`, and
-`foreman_answer_input` contract.
+The initial review treated OpenAI's published developer-mode plan matrix as a hard
+support boundary. Those documents remain important compatibility evidence, but a
+live test later on 2026-08-31 disproved the categorical assumption for the actual
+target surface.
 
-OpenAI sources:
+Using a fresh ChatGPT conversation with the private Tandem app explicitly attached,
+the target ChatGPT Pro account/app/surface successfully performed state-changing
+MCP operations: it listed sessions, opened a disposable Claude session, sent a
+mutation that created/overwrote a host filesystem file, and read the result back as
+`MCP WRITE VERIFIED`. No plan/read-only/confirmation/permission rejection occurred
+on the writes.
+
+ADR 0006 therefore supersedes plan-name gating. Command Governor support is based
+on a harmless synthetic mutation/read-back against the exact bound
+account/app/surface, with stale-generation and confirmation checks recorded under a
+`capability_epoch`. Plan labels remain diagnostic metadata, and a past successful
+probe is not treated as a permanent entitlement guarantee.
+
+OpenAI sources reviewed as dated compatibility evidence:
 
 - <https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt>
 - <https://help.openai.com/en/articles/12003714-chatgpt-team-models-limits>
 - <https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt/>
 
-Business currently exposes the **Pro model option powered by GPT-5.6 Sol Pro**.
-Therefore a Business workspace can preserve the intended high-capability Pro-model
-foreman role while using a write-capable MCP plan surface, subject to the real
-Gate A action/confirmation test.
-
-**Architecture consequence:** consumer Pro is not an end-to-end V1 target today.
-The invariant is not weakened and MCP mutations are not mislabeled as reads.
+**Architecture consequence:** truthful state-changing MCP remains mandatory, but
+support is feature-tested on the exact surface instead of inferred from plan name.
 
 ### 2. Claude `PermissionRequest` does run in non-interactive contexts
 
@@ -140,6 +147,9 @@ release whose architecture was inspected where they differ.
 | `miuuyy/codex-chatgpt-web` | current main `06637f97a68faaa636986dad7514c7e2b3449347`; latest release `v4.0.7` published 2026-08-31 | strongest current public retained-conversation/browser ownership reference |
 | `miuuyy/codex-chatgpt-web` architecture blob | `4367828fae8ad0a53e4adb0af19c1589640cb37c` at current head | the architecture file inspected remained byte-identical while main advanced later that day |
 | `ChesterRa/CCCC` | main `5f0b83242d09c88b1e2267d1056fc5bf64feb626` | append-only event/delivery/read/reply semantics; claimed/accepted/failed/ambiguous inspiration |
+| `joseym/salvor` | main `dd9eb49f6bf854dc1c96b1b1ad7accbc509807b0`; Apache-2.0 | Rust event/replay kernel; write-ahead tool intent; dangling-write reconciliation; crash-exact tests |
+| `PrimeIntellect-ai/prime-agent` | main `9f5edc192cfe3d4737205a2f551d2b6b6e34fe09`; MIT | daemon mutation journal; uncertain-result no-replay; generation cursors; process-safe session leases |
+| `ralphkrauss/agent-orchestrator` | main `8b2f3b967e90877c3abac07061dbb2b1e67d2035`; MIT | daemon-owned orchestration truth; durable notification/list/ACK; request-id idempotency; short-lived reviewer turns |
 | `DivMode/tandem` | main `afc3192e9caaa1affb7c9ed97c6c66df0605c2ee` | current fork baseline / orchestration lessons |
 | `DivMode/tandem` PR #6 | open, head `af568233e1aae2d4cc343b38ca0e2a1a248e7857`; explicitly `DO NOT MERGE` | Stop-hook/lifecycle work and known stale-Herdr failure class |
 | `Maxmedawar/tandem` | main `a98bcafd2c40ae5473b85fe41183e4f391933799` | upstream runtime/fleet/MCP architecture reference |
@@ -155,6 +165,40 @@ release whose architecture was inspected where they differ.
 Rust stable was re-verified as **1.98.0**, released 2026-08-20. The scaffold must
 pin the exact stable toolchain at the implementation commit rather than assume this
 report remains current.
+
+---
+
+
+## Durable-orchestration implementation references
+
+A second implementation-oriented pass found three especially relevant projects:
+Salvor, Prime Agent, and Agent Orchestrator. None is a drop-in Command Governor,
+but together they independently validate the most important failure semantics.
+
+- **Salvor — ADAPT.** Its pure Rust replay cursor separates recorded outcomes from
+  typed permission to execute live. A tool intent is persisted before external
+  execution; a dangling non-idempotent write becomes `NeedsReconciliation` rather
+  than a retry. Command Governor should independently reimplement the pure-reducer,
+  write-ahead-intent, explicit effect-class, divergence, and kill/failpoint test
+  patterns. Reject Salvor's broader durable tool/model payload storage because
+  Command Governor's privacy boundary is intentionally narrower.
+- **Prime Agent — ADAPT.** Its daemon `CommandRecoveryJournal` fsyncs a `received`
+  record keyed by `(clientId, commandId)` before mutation dispatch, records the
+  result before reply, returns a stored result for completed retries, and reports
+  a pending receipt as uncertain without replay. Its session lease additionally
+  fences PID reuse with process-start identity. Command Governor should implement
+  equivalent semantics transactionally in SQLite, not copy the JSONL/TypeScript
+  store or transcript architecture.
+- **Agent Orchestrator — ADAPT.** It moved orchestration truth out of a long-lived
+  chat supervisor into the daemon, persists durable notifications before advisory
+  push hints, exposes list/reconcile plus explicit ACK, uses stable mutation
+  `request_id` values, and runs short-lived structured orchestrator/reviewer turns.
+  Command Governor should adopt those separations while keeping its stronger
+  semantic `foreman_ack` and stricter result/privacy boundaries.
+
+The complete ADOPT/ADAPT/REJECT mapping and Phase 1 Rust blueprint are in
+[`2026-08-31-durable-orchestration-pattern-review.md`](2026-08-31-durable-orchestration-pattern-review.md).
+No source from these projects is vendored or copied by this review.
 
 ---
 
@@ -416,9 +460,12 @@ changing the durable kernel.
 
 ### Gate A — MCP mutation
 
-Consumer Pro is currently excluded by published product capability. A candidate
-Business/Enterprise/Edu workspace must prove real state-changing actions and
-confirmation behavior on the actual account/surface.
+The exact bound ChatGPT account/app/surface must prove state-changing MCP
+actions with a harmless synthetic mutation/read-back, stale-generation
+rejection, and usable confirmation behavior. The target Pro surface
+demonstrated the required mutation class through Tandem on 2026-08-31,
+but Command Governor still requires its own current `capability_epoch`.
+Plan name alone neither accepts nor excludes a surface.
 
 ### Gate B — headed Chrome/CDP
 
