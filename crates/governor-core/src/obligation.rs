@@ -1229,7 +1229,14 @@ mod tests {
 
     #[test]
     fn claim_expiry_restores_attention_and_never_closes() {
-        for start in [completed(), failed_obligation()] {
+        // Every attention state a claim can be taken from, `needs_input`
+        // included: `docs/testing.md` OBL-002 says an expired internal claim
+        // "may return to their prior attention state but never close work", and
+        // that has to hold for the input state too. The store has no write path
+        // to `needs_input` in Phase 1 — there is no input-boundary event kind —
+        // so this is where the rule is provable, driven through the same
+        // `ConfirmedDefer` boundary the lifecycle requires.
+        for start in [completed(), failed_obligation(), needs_input_obligation()] {
             let expected = start.attention().expect("an attention state");
             let processing = processing(&start);
             let expired = processing
@@ -1247,6 +1254,11 @@ mod tests {
                 expired.result_artifact(),
                 start.result_artifact(),
                 "expiry never releases a required artifact"
+            );
+            assert_eq!(
+                expired.input_request(),
+                start.input_request(),
+                "expiry never discards the input a worker is still blocked on"
             );
         }
     }
@@ -1304,6 +1316,25 @@ mod tests {
         for obligation in [&completed, &claimed, &processing] {
             assert!(obligation.is_open());
         }
+    }
+
+    /// An obligation blocked on a confirmed single-tool defer boundary.
+    ///
+    /// Built through [`crate::input::evaluate_defer_boundary`], because
+    /// `ConfirmedDefer` has no other constructor: there is deliberately no way
+    /// to reach `needs_input` from an unconfirmed or multi-tool defer.
+    fn needs_input_obligation() -> Obligation {
+        running()
+            .apply(&ObligationEvent::InputBoundaryConfirmed {
+                source: defer_source(),
+                incarnation: IncarnationGeneration::FIRST,
+                input_request: input_support::pending_request().id(),
+                defer: input_support::confirmed_defer(),
+                at: at(5),
+            })
+            .unwrap()
+            .advanced()
+            .unwrap()
     }
 
     fn failed_obligation() -> Obligation {
