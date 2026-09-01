@@ -1,11 +1,15 @@
 # Third-Party Notices and Provenance
 
 Command Governor is licensed under MIT. This notice records architecture
-inspiration/research separately from the compiled dependency graph.
+inspiration/research separately from the compiled or packaged dependency graph.
 
-The repository contains no vendored or copied third-party implementation source
-code. The project is independently implementing the documented semantics
-described below in Rust.
+The repository currently contains no vendored or copied third-party implementation
+source code. Under ADR 0008 and proposed ADR 0009, Command Governor is now
+**composition-first**: reviewed third-party runtimes/packages may become pinned
+product dependencies after license, security, provenance, and conformance review.
+Research citation alone does not make a project a dependency, and any future source
+copy/adaptation requires file-level provenance plus the applicable license/NOTICE
+obligations before distribution.
 
 ## Architecture / protocol references
 
@@ -20,8 +24,8 @@ described below in Rust.
 - URL: <https://github.com/DivMode/tandem>
 
 Concepts studied include runtime/Herdr adaptation, ownership/provenance, MCP
-orchestration, native Claude lifecycle, stale-client behavior, completion
-barriers, and turn/session fencing.
+orchestration, native Claude lifecycle, stale-client behavior, completion barriers,
+and turn/session fencing.
 
 No Tandem author or maintainer is implied to endorse Command Governor.
 
@@ -33,8 +37,7 @@ No Tandem author or maintainer is implied to endorse Command Governor.
 - Current main re-verified at review completion:
   `06637f97a68faaa636986dad7514c7e2b3449347`
 - Architecture document blob at current main:
-  `4367828fae8ad0a53e4adb0af19c1589640cb37c` (unchanged from the source
-  actually inspected for the architectural findings)
+  `4367828fae8ad0a53e4adb0af19c1589640cb37c`
 - Release reviewed/re-verified: `v4.0.7`
 - URL: <https://github.com/miuuyy/codex-chatgpt-web>
 
@@ -53,12 +56,13 @@ No codex-chatgpt-web author or maintainer is implied to endorse Command Governor
 
 Command Governor studied CCCC primarily as a protocol/semantics reference,
 including append-only daemon authority and documented delivery states such as
-`claimed`, `accepted`, `failed`, and `ambiguous`.
+`claimed`, `accepted`, `failed`, and `ambiguous`. The pre-ADR-0008 Rust design
+planned an independent implementation; after the Pi-family pivot, the semantics
+remain useful conformance requirements but no CCCC source is copied.
 
-The current plan is to independently implement those safety semantics, not copy
-CCCC source code. If Apache-2.0 source is copied or adapted later, the repository
-must preserve all required license/NOTICE attribution and record the exact files,
-revisions, and changes here before distribution.
+If Apache-2.0 source is copied or adapted later, the repository must preserve all
+required license/NOTICE attribution and record exact files, revisions, and changes
+here before distribution.
 
 No CCCC author or maintainer is implied to endorse Command Governor.
 
@@ -73,21 +77,26 @@ No CCCC author or maintainer is implied to endorse Command Governor.
 
 Concepts studied include pure event replay, explicit external-effect classes,
 write-ahead tool intent, dangling-write reconciliation, idempotency-key handling,
-and deterministic kill/failpoint tests. Command Governor will independently
-implement the needed semantics and will not inherit Salvor's broader durable
-provider/tool payload model.
+and deterministic kill/failpoint tests.
 
 ### Prime Agent
 
 - Project: `PrimeIntellect-ai/prime-agent`
 - License: MIT
-- Revision reviewed: `9f5edc192cfe3d4737205a2f551d2b6b6e34fe09`
+- Earlier durable-orchestration review revision:
+  `9f5edc192cfe3d4737205a2f551d2b6b6e34fe09`
+- Substrate bake-off stable release: `v0.8.1`
+- Stable release commit: `514633727bf26d74f39f3119c2b0e31a5ceb2a9d`
 - URL: <https://github.com/PrimeIntellect-ai/prime-agent>
 
 Concepts studied include mutating-command identity, write-ahead command journaling,
 completed-result replay, uncertain-result no-replay, generation-aware cursors,
-supervisor/worker recovery, and process-safe session leases fenced against PID
-reuse.
+supervisor/worker recovery, process-safe session leases, RLM/persistent kernel
+state, recursive subagents, schedules/goals/heartbeats, Agent Skills, and ACP.
+
+Proposed ADR 0009 selects this stable release as the **initial substrate candidate**
+subject to real-machine conformance. Selection as a dependency must be reflected in
+the actual dependency/component manifest when the implementation lands.
 
 ### Agent Orchestrator
 
@@ -101,15 +110,25 @@ orchestrator/reviewer turns, durable notification reconciliation, explicit
 notification ACK, request-ID idempotency, and thin MCP/IPC/CLI transports.
 
 No author or maintainer of these projects is implied to endorse Command Governor.
-No implementation source from them is currently vendored/copied. Any future source
-incorporation requires file-level provenance and the applicable license/NOTICE
-obligations before distribution.
+No implementation source from them is currently vendored/copied.
 
-## Pi session / memory implementation references — no code copied
+## Pi-family session / memory / substrate references — no code copied yet
 
-These projects were reviewed for ADR 0007 and the session/memory/analytics research
-review. Command Governor will independently implement the selected mechanisms in
-Rust rather than porting their TypeScript source.
+These projects were first reviewed under ADR 0007. ADR 0008 superseded the earlier
+strategy of independently recreating their mechanisms in Rust: Command Governor now
+prefers pinned composition when a package meets the required contract.
+
+### upstream Pi
+
+- Project: `earendil-works/pi`
+- License: MIT
+- Substrate bake-off stable release: `v0.84.4`
+- Stable release commit: `b79e4cc834970cca69daebffab7df1da7d1e52c4`
+- URL: <https://github.com/earendil-works/pi>
+
+Concepts/capabilities studied include provider abstraction, agent core, persistent
+sessions, branching/tree/fork, compaction, RPC/JSON modes, extension loading,
+Agent Skills, telemetry, supply-chain hardening, and external sandbox integration.
 
 ### pi-config
 
@@ -117,9 +136,8 @@ Rust rather than porting their TypeScript source.
 - Revision reviewed: `f82da563ab05d66729492d64c7ed4e96db3663f3`
 - URL: <https://github.com/amosblomqvist/pi-config>
 
-Concepts studied include the `analyze-sessions` cost/session analytics workflow,
-role-specific extensions and agents, prompt-pattern mining, and the composition of
-interactive subagents with observational memory.
+Concepts studied include session analytics, role-specific extensions/agents,
+prompt-pattern mining, interactive subagents, and observational memory.
 
 ### pi-interactive-subagents
 
@@ -129,9 +147,9 @@ interactive subagents with observational memory.
 - URL: <https://github.com/amosblomqvist/pi-interactive-subagents>
 
 Concepts studied include persistent logical child addressability, immutable
-resolved loadout snapshots across resume, lineage-only/fork session relationships,
-recursive tool/delegation allowlists, asynchronous child result steering, parked
-input, and activity/stall observations.
+resolved loadout snapshots across resume, lineage-only/fork relationships,
+recursive delegation allowlists, result steering, parked input, and activity/stall
+observations.
 
 ### pi-observational-memory
 
@@ -140,22 +158,91 @@ input, and activity/stall observations.
 - Revision reviewed: `78a1efcfdd46332253fb289724f05b26dfc7769e`
 - URL: <https://github.com/amosblomqvist/pi-observational-memory>
 
-Concepts studied include fixed source chunks, parallel observer workers,
-coverage watermarks, deterministic compaction rendering, bounded active memory,
-serialized consolidation into per-session long-term memory, fork seeding, and
-separate observer/consolidator cost accounting.
+Concepts studied include fixed source chunks, observer workers, coverage
+watermarks, deterministic compaction rendering, bounded active memory, serialized
+consolidation, fork seeding, and observer/consolidator cost accounting.
 
 ### pi-dictate and learn
 
 - `amosblomqvist/pi-dictate`, revision
-  `3208b563e3adfd070ac7b256a09ba9fc7b869f50`, MIT — reviewed as operator UX;
-  not a V1 control-plane implementation priority.
+  `3208b563e3adfd070ac7b256a09ba9fc7b869f50`, MIT — operator UX research.
 - `amosblomqvist/learn`, revision
-  `7cfd8942f82ab9476e63572387e1fe9bcea5082c` — reviewed for specialist
-  researcher/visual-agent composition.
+  `7cfd8942f82ab9476e63572387e1fe9bcea5082c` — specialist
+  researcher/visual-agent composition research.
 
-No author or maintainer of these projects is implied to endorse Command Governor.
-No implementation source from them is currently vendored/copied.
+### Oh My Pi
+
+- Project: `can1357/oh-my-pi`
+- License: MIT
+- Substrate bake-off stable release: `v18.0.11`
+- Stable release commit: `b8ce33a58911c26bed1d84f0db9a5e2e727c49a2`
+- URL: <https://github.com/can1357/oh-my-pi>
+
+Concepts studied include hashline/content-hash editing, LSP/DAP integration,
+persistent Python/Bun execution, typed subagents, Agent Hub steering, advisor and
+review roles, approval tiers, rule-on-violation injection, memory backends, virtual
+resource namespaces, and ACP. Proposed ADR 0009 treats OMP as a tooling/UX research
+donor and possible interoperable worker rather than the primary substrate.
+
+No Pi-family implementation source is currently vendored/copied into Command
+Governor by the architecture documents alone. Any package actually composed into
+the product must be added to the machine-readable component/dependency manifest
+with its exact pin and license.
+
+## Agent protocol / portable-skill references — no code copied
+
+### Agent Client Protocol TypeScript SDK
+
+- Project: `agentclientprotocol/typescript-sdk`
+- License: Apache-2.0
+- URL: <https://github.com/agentclientprotocol/typescript-sdk>
+
+The official SDK is reviewed for stable ACP v1 client/agent interoperability,
+permission requests, session updates, and protocol extension behavior. Its current
+README explicitly labels ACP v2 experimental/draft. Proposed ADR 0009 therefore
+targets stable v1 first.
+
+### Goose ACP reference
+
+- Project: `aaif-goose/goose`
+- Main revision observed during bake-off:
+  `4ad43df42d8e6f5c9dae962d4cf4cbad2aadf3de`
+- URL: <https://github.com/aaif-goose/goose>
+
+Goose was reviewed as independent evidence that ACP can serve as a unifying client
+boundary and as an agent-provider bridge.
+
+### Agent Skills
+
+- Project: `agentskills/agentskills`
+- URL: <https://github.com/agentskills/agentskills>
+
+Reviewed for the portable skill format and progressive-disclosure model. Any
+executable skill remains a software dependency subject to Command Governor's
+admission policy.
+
+## Harness / agent-component security references — no code copied
+
+### Harness Eval
+
+- Project: `redhat-community-ai-tools/harness-eval`
+- License: Apache-2.0
+- URL: <https://github.com/redhat-community-ai-tools/harness-eval>
+
+Reviewed for deterministic harness/config linting, cross-component graphs,
+credential/confused-deputy analysis, skill verification, MCP/hook/agent checks, and
+CI gating patterns.
+
+### Snyk Agent Scan
+
+- Project: `snyk/agent-scan` (successor/current repository for earlier MCP-scan
+  lineage)
+- URL: <https://github.com/snyk/agent-scan>
+
+Reviewed for component discovery and skill/MCP/agent risk scanning. Its own
+security warning notes that inspecting configured stdio MCP servers may execute
+their commands; Command Governor therefore treats scanning untrusted executable
+MCP configuration as a sandboxed action.
 
 ## Additional research references — no code copied
 
@@ -180,40 +267,34 @@ Rust browser alternatives examined but not copied/depended on yet:
 - `tauri-apps/cef-rs` dev
   `a2e15ae659c4b3957883e34de879bd8b38360ce5`
 
-See [`docs/research/2026-08-31-technology-review.md`](docs/research/2026-08-31-technology-review.md)
-for the browser architecture evidence, and
-[`docs/research/2026-08-31-session-memory-and-analytics-review.md`](docs/research/2026-08-31-session-memory-and-analytics-review.md)
-for the Pi/session/memory evidence.
+See the research documents under `docs/research/` for the architecture evidence and
+exact adoption/rejection reasoning.
 
-## External dependencies
+## Existing Rust dependencies
 
-Rust dependencies now exist. The exact resolved set and its versions are
-recorded in `Cargo.lock`, which is committed, and every one of them is a
-published crates.io release: none is vendored or copied into this repository.
+The frozen Phase-1 Rust scaffold still has resolved Rust dependencies. Their exact
+versions are recorded in committed `Cargo.lock`; every one is a published crates.io
+release and none is vendored/copied into this repository.
 
-They are vetted by this repository's `cargo-deny` policy in `deny.toml`, which
+They remain vetted by this repository's `cargo-deny` policy in `deny.toml`, which
 CI runs as `cargo deny --all-features check`:
 
 - **Licenses** must appear on an explicit permissive allowlist (MIT, MIT-0,
   Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC,
-  Zlib, CC0-1.0, Unicode-3.0, Unlicense). Anything unlisted fails, and no
-  per-crate exception is recorded.
-- **Sources** are restricted to crates.io. Unknown registries and unknown git
-  sources are denied and the git allowlist is empty, so a dependency cannot
-  arrive by a path that bypasses the license and advisory checks.
-- **Known-malicious versions** from the August 2026 crates.io compromise are
-  banned by exact version — `arrayref@0.3.10`, `internment@0.8.7`, and
-  `append-only-vec@0.1.9` — while the legitimate crate names remain usable.
-- **Advisories** are enforced against the RUSTSEC database with an empty
-  `ignore` list, so silencing one is a reviewed change to `deny.toml`. Yanked
-  crates are denied, and unmaintained advisories are considered for every crate
-  in the graph rather than direct dependencies only. Wildcard version
-  requirements are denied except for path dependencies.
+  Zlib, CC0-1.0, Unicode-3.0, Unlicense).
+- **Sources** are restricted to crates.io; unknown registries and unknown git
+  sources are denied.
+- Known-malicious versions from the August 2026 crates.io compromise are banned by
+  exact version — `arrayref@0.3.10`, `internment@0.8.7`, and
+  `append-only-vec@0.1.9`.
+- RUSTSEC advisories are enforced with an empty ignore list; yanked crates are
+  denied and wildcard version requirements are denied except for path
+  dependencies.
 
 The official Rust MCP SDK was re-verified at main
 `ad9832ec212baf526e1a69d73ee04cd8305ae331`, workspace version `3.1.4`; that is
-research context, not a commitment to depend on an unreleased main SHA, and it
-is not currently a dependency.
+historical/research context, not a current commitment to the old mandatory-MCP
+architecture.
 
-A dependency manifest and generated license report do not replace this provenance
+A dependency manifest or generated license report does not replace this provenance
 record when source/patterns are materially copied or adapted.
