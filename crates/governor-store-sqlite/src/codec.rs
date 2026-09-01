@@ -430,6 +430,8 @@ code_labels! {
         ConflictKind::IllegalObligationTransition,
         ConflictKind::ObligationClosed,
         ConflictKind::DeliveryRevisionFrozen,
+        ConflictKind::DeliveryRevisionStillLive,
+        ConflictKind::DeliveryRevisionSuperseded,
         ConflictKind::IllegalDeliveryTransition,
         ConflictKind::UnknownAttempt,
         ConflictKind::RetryBudgetExhausted,

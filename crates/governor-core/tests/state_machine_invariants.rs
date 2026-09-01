@@ -1482,6 +1482,8 @@ fn conflict_codes_are_stable_and_unique() {
         ConflictKind::IllegalObligationTransition,
         ConflictKind::ObligationClosed,
         ConflictKind::DeliveryRevisionFrozen,
+        ConflictKind::DeliveryRevisionStillLive,
+        ConflictKind::DeliveryRevisionSuperseded,
         ConflictKind::IllegalDeliveryTransition,
         ConflictKind::UnknownAttempt,
         ConflictKind::RetryBudgetExhausted,

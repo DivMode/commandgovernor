@@ -62,6 +62,10 @@ pub enum ConflictKind {
     ObligationClosed,
     /// The delivery revision reached `accepted`/`ambiguous` and is frozen.
     DeliveryRevisionFrozen,
+    /// An earlier revision for the obligation has not reached a terminal state.
+    DeliveryRevisionStillLive,
+    /// A newer revision exists; the presented one may never act again.
+    DeliveryRevisionSuperseded,
     /// The event is not legal from the delivery attempt's current state.
     IllegalDeliveryTransition,
     /// The referenced attempt does not exist on this delivery.
@@ -144,6 +148,8 @@ impl ConflictKind {
             Self::IllegalObligationTransition => "illegal_obligation_transition",
             Self::ObligationClosed => "obligation_closed",
             Self::DeliveryRevisionFrozen => "delivery_revision_frozen",
+            Self::DeliveryRevisionStillLive => "delivery_revision_still_live",
+            Self::DeliveryRevisionSuperseded => "delivery_revision_superseded",
             Self::IllegalDeliveryTransition => "illegal_delivery_transition",
             Self::UnknownAttempt => "unknown_attempt",
             Self::RetryBudgetExhausted => "retry_budget_exhausted",
@@ -297,6 +303,31 @@ pub enum Conflict {
     DeliveryRevisionFrozen {
         /// Terminal projection state that froze the revision.
         state: DeliveryState,
+    },
+
+    /// Another revision for this obligation and generation is still live.
+    ///
+    /// At most one delivery revision may be able to produce an external
+    /// effect at a time; a new revision may only be created once every
+    /// earlier one has reached a terminal projection.
+    #[error("delivery revision {live} for this obligation is still live")]
+    DeliveryRevisionStillLive {
+        /// The revision that has not reached a terminal projection.
+        live: DeliveryRevision,
+    },
+
+    /// A newer revision exists, so this one may never act again.
+    ///
+    /// A failed revision with attempt budget left is normally retryable, but
+    /// once a successor revision has been created the older one is
+    /// superseded — resurrecting it would put two revisions in a position to
+    /// produce the same external effect.
+    #[error("delivery revision {presented} is superseded by revision {newest}")]
+    DeliveryRevisionSuperseded {
+        /// The revision the caller tried to act on.
+        presented: DeliveryRevision,
+        /// The newest revision recorded for the obligation and generation.
+        newest: DeliveryRevision,
     },
 
     /// The event is not a legal delivery attempt transition.
@@ -541,6 +572,8 @@ impl Conflict {
             Self::IllegalObligationTransition { .. } => ConflictKind::IllegalObligationTransition,
             Self::ObligationClosed { .. } => ConflictKind::ObligationClosed,
             Self::DeliveryRevisionFrozen { .. } => ConflictKind::DeliveryRevisionFrozen,
+            Self::DeliveryRevisionStillLive { .. } => ConflictKind::DeliveryRevisionStillLive,
+            Self::DeliveryRevisionSuperseded { .. } => ConflictKind::DeliveryRevisionSuperseded,
             Self::IllegalDeliveryTransition { .. } => ConflictKind::IllegalDeliveryTransition,
             Self::UnknownAttempt { .. } => ConflictKind::UnknownAttempt,
             Self::RetryBudgetExhausted { .. } => ConflictKind::RetryBudgetExhausted,

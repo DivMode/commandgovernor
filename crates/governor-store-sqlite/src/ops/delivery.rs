@@ -38,7 +38,7 @@ use governor_core::outbound::{
     AmbiguityReason, AttemptState, DeliveryEvent, DeliveryState, FailureClass,
 };
 use governor_core::time::Timestamp;
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use sha2::{Digest as _, Sha256};
 
 use crate::codec::{
@@ -135,8 +135,28 @@ impl WriteOp for CreateOrClaimDelivery {
         let key_hex = key.to_hex();
 
         let (wake, created) = match load::wake_by_key(tx, &key_hex)? {
-            Some(existing) => (existing.wake, false),
+            Some(existing) => {
+                // A revision found by key is a bounded retry or a duplicate
+                // claim. It may act only while it is still the newest
+                // revision: once a successor exists, resurrecting this one —
+                // a failed revision keeps its attempt budget — would put two
+                // revisions in a position to produce the same external
+                // effect.
+                require_newest_revision(
+                    tx,
+                    self.request.obligation,
+                    self.request.binding_generation,
+                    self.request.revision,
+                )?;
+                (existing.wake, false)
+            }
             None => {
+                // At most one revision per obligation may be able to act at a
+                // time. The schema makes `(obligation, generation, revision)`
+                // unique; this makes revisions exclusive *in time* — a new
+                // one is refused while any earlier one could still produce an
+                // external effect.
+                require_no_live_revision(tx, self.request.obligation)?;
                 let wake = BrowserWake::create_at_revision_for_store(
                     self.candidate_delivery_id.clone(),
                     WakeTarget::snapshot(obligation),
@@ -737,6 +757,80 @@ impl WriteOp for ReconcileAmbiguousDelivery {
     fn finish(self, committed: Self::Committed) -> Self::Output {
         committed
     }
+}
+
+/// Refuses to create a new revision while an earlier one could still act.
+///
+/// "Live" is `pending` or `claimed` — a revision whose current attempt has
+/// not been settled. `accepted` and `ambiguous` are frozen, and `failed` is
+/// settled for this purpose too: its retry goes through the existing-row
+/// branch on the *same* revision, where [`require_newest_revision`] governs
+/// it. Scoped to the obligation across binding generations, because two live
+/// wakes about one obligation are two chances at the same external effect no
+/// matter which generation scheduled them.
+fn require_no_live_revision(tx: &Tx<'_>, obligation: ObligationId) -> StoreResult<()> {
+    let live: Option<i64> = tx
+        .conn()
+        .query_row(
+            "SELECT delivery_revision FROM browser_deliveries
+              WHERE obligation_id = ?1 AND state IN (?2, ?3)
+              LIMIT 1",
+            params![
+                id_text(obligation),
+                encode_delivery_state(DeliveryState::Pending),
+                encode_delivery_state(DeliveryState::Claimed),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(revision) = live else {
+        return Ok(());
+    };
+    Err(Conflict::DeliveryRevisionStillLive {
+        live: parse_revision(revision)?,
+    }
+    .into())
+}
+
+/// Refuses an attempt claim on a revision that has a successor.
+fn require_newest_revision(
+    tx: &Tx<'_>,
+    obligation: ObligationId,
+    generation: BindingGeneration,
+    revision: DeliveryRevision,
+) -> StoreResult<()> {
+    let newest: i64 = tx.conn().query_row(
+        "SELECT MAX(delivery_revision) FROM browser_deliveries
+          WHERE obligation_id = ?1 AND binding_generation = ?2",
+        params![
+            id_text(obligation),
+            store_u64(generation.get(), "browser_deliveries", "binding_generation")?,
+        ],
+        |row| row.get(0),
+    )?;
+    let newest = parse_revision(newest)?;
+    if newest.get() > revision.get() {
+        return Err(Conflict::DeliveryRevisionSuperseded {
+            presented: revision,
+            newest,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Decodes a stored `delivery_revision` column value.
+fn parse_revision(value: i64) -> StoreResult<DeliveryRevision> {
+    u32::try_from(value)
+        .map(DeliveryRevision::new)
+        .map_err(|_| {
+            CorruptValue::new(
+                "browser_deliveries",
+                "delivery_revision",
+                CorruptReason::MalformedIdentity,
+            )
+            .into()
+        })
 }
 
 fn binding_conversation(

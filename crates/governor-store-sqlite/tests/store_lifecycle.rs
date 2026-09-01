@@ -14,6 +14,8 @@
 //! | [`the_claim_path_requires_the_random_correlation_id`] | invariant 17 |
 //! | [`duplicate_scheduling_converges_on_one_delivery_identity`] | data model |
 //! | [`a_bounded_retry_keeps_the_revision_and_its_correlation_id`] | data model |
+//! | [`a_second_revision_is_refused_while_the_first_is_live`] | one live revision |
+//! | [`a_superseded_revision_cannot_claim_another_attempt`] | one live revision |
 //! | [`an_ack_records_when_the_released_bytes_may_go`] | ACK layer 3, retention |
 //! | [`claim_expiry_returns_the_attention_it_came_from`] | OBL-002, ART-002 |
 //! | [`an_expired_claim_can_be_replaced_by_a_new_one`] | OBL-008 reclaim |
@@ -543,6 +545,156 @@ fn a_bounded_retry_keeps_the_revision_and_its_correlation_id() {
         "never a second physical revision identity"
     );
     assert_eq!(count(&conn, "delivery_attempts"), 2);
+    assert!(store.verify_projections().is_ok());
+}
+
+/// Builds the request for one further wake revision of the same obligation.
+fn revision_request(
+    obligation: ObligationId,
+    generation: BindingGeneration,
+    version: ObligationVersion,
+    fenced_source: governor_core::fence::SourceRef,
+    revision: u32,
+) -> CreateOrClaimDeliveryRequest {
+    CreateOrClaimDeliveryRequest {
+        obligation,
+        binding_generation: generation,
+        expected_version: version,
+        expected_source: fenced_source,
+        revision: DeliveryRevision::new(revision),
+        attempt_budget: 3,
+        wake_protocol: token("composer.v1"),
+    }
+}
+
+#[test]
+fn a_second_revision_is_refused_while_the_first_is_live() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let turn = open_turn(&store);
+    let generation = bind(&store, "conv-A");
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let snapshot = store.read_obligation(turn.obligation).expect("snapshot");
+
+    let first = schedule_wake(
+        &store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("scheduling revision one");
+
+    let conn = harness.inspect();
+    let deliveries = count(&conn, "browser_deliveries");
+    let events = count(&conn, "events");
+
+    // Revision one holds a claimed attempt, so it could still act. A second
+    // revision now would be a second chance at the same external effect.
+    let error = store
+        .create_or_claim_delivery(revision_request(
+            turn.obligation,
+            generation,
+            snapshot.version,
+            snapshot.source.clone(),
+            2,
+        ))
+        .expect_err("revision one could still act");
+    assert_eq!(error.conflict_code(), Some("delivery_revision_still_live"));
+    assert_eq!(
+        count(&conn, "browser_deliveries"),
+        deliveries,
+        "zero rows changed"
+    );
+    assert_eq!(count(&conn, "events"), events);
+
+    // Once revision one is settled — a proven pre-submit failure is terminal
+    // for the aggregate — the successor may be created.
+    store
+        .record_delivery_outcome(RecordDeliveryOutcomeRequest {
+            delivery_id: first.delivery_id.clone(),
+            attempt: first.attempt,
+            outcome: DeliveryOutcome::Failed {
+                failure: FailureClass::ComposerNotReady,
+            },
+        })
+        .expect("settling revision one");
+    let second = store
+        .create_or_claim_delivery(revision_request(
+            turn.obligation,
+            generation,
+            snapshot.version,
+            snapshot.source.clone(),
+            2,
+        ))
+        .expect("revision two after the first settled");
+    assert!(second.created);
+    assert_ne!(second.delivery_id, first.delivery_id);
+    assert!(store.verify_projections().is_ok());
+}
+
+#[test]
+fn a_superseded_revision_cannot_claim_another_attempt() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let turn = open_turn(&store);
+    let generation = bind(&store, "conv-A");
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let snapshot = store.read_obligation(turn.obligation).expect("snapshot");
+
+    // Revision one fails with attempt budget to spare, and revision two takes
+    // over.
+    let first = schedule_wake(
+        &store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("scheduling revision one");
+    store
+        .record_delivery_outcome(RecordDeliveryOutcomeRequest {
+            delivery_id: first.delivery_id.clone(),
+            attempt: first.attempt,
+            outcome: DeliveryOutcome::Failed {
+                failure: FailureClass::ComposerNotReady,
+            },
+        })
+        .expect("settling revision one");
+    store
+        .create_or_claim_delivery(revision_request(
+            turn.obligation,
+            generation,
+            snapshot.version,
+            snapshot.source.clone(),
+            2,
+        ))
+        .expect("revision two");
+
+    let conn = harness.inspect();
+    let attempts = count(&conn, "delivery_attempts");
+    let events = count(&conn, "events");
+
+    // A bounded retry of revision one would normally be legal — the budget is
+    // not spent — but the successor makes it a resurrection.
+    let error = store
+        .create_or_claim_delivery(revision_request(
+            turn.obligation,
+            generation,
+            snapshot.version,
+            snapshot.source.clone(),
+            1,
+        ))
+        .expect_err("a superseded revision may never act again");
+    assert_eq!(error.conflict_code(), Some("delivery_revision_superseded"));
+    assert_eq!(
+        count(&conn, "delivery_attempts"),
+        attempts,
+        "zero rows changed"
+    );
+    assert_eq!(count(&conn, "events"), events);
     assert!(store.verify_projections().is_ok());
 }
 

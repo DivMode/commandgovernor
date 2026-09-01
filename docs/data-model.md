@@ -1016,6 +1016,22 @@ The found path also re-verifies the wake's own snapshot against the obligation, 
 a revision scheduled against a state the obligation has since left is refused as
 a stale target rather than claimed.
 
+**At most one revision per obligation may be able to act at a time.** The unique
+`(obligation, generation, revision)` key makes revisions distinct; this rule
+makes them exclusive *in time*, in two halves enforced inside the same
+transaction:
+
+- **Creation requires every earlier revision to be terminal.** A new revision is
+  refused with `delivery_revision_still_live` while any revision for the
+  obligation — across binding generations — is still `pending` or `claimed`,
+  because two live wakes about one obligation are two chances at the same
+  external effect.
+- **A superseded revision may never act again.** A failed revision keeps its
+  attempt budget, so a bounded retry on it is normally legal — but once a
+  successor revision exists, claiming an attempt on the older one is refused
+  with `delivery_revision_superseded`. Resurrection is how revision N and
+  revision N+1 would otherwise both become live.
+
 ### Arm browser Send
 
 Immediately before exact Send action, one DB transaction re-verifies binding and
