@@ -10,6 +10,31 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The three crates under test. This is a `[dependencies]` list rather than a
+# `[dev-dependencies]` one because the acceptance suites in `tests/` consume
+# this crate as a library, and a dev-dependency would not be linked into it.
+#
+# Nothing here is shipped: the package is `publish = false` and no production
+# crate depends on it, so its dependency graph is dev tooling by construction.
+governor-core.workspace = true
+governor-store-sqlite.workspace = true
+governor-artifacts.workspace = true
+
+# Read-only inspection connections. A fake that asserts "the store already
+# shows `claimed`" has to look at the committed bytes through its own
+# connection; asking the store would prove nothing about durability.
+rusqlite.workspace = true
+# Throwaway state roots. Real files are the only honest substrate for WAL,
+# `synchronous=FULL`, `fsync` ordering and reopening the same bytes.
+tempfile.workspace = true
+# Deterministic opaque identities for the injected `IdSource`.
+uuid.workspace = true
+
+# Deliberately absent: any PRNG crate, and any property-testing framework.
+# Seeded `SplitMix64` in `rng.rs` is ten lines, needs no dependency, and gives
+# the suites an exactly reproducible stream across machines and toolchains;
+# `proptest`/`quickcheck` would add shrinking machinery the seeded loops in
+# SEC-003 and DEL-018 have no use for.
 
 [lints]
 workspace = true
