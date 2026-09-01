@@ -1,18 +1,54 @@
 # Command Governor
 
-Command Governor is a local-first durable control plane for reliable AI/software-engineering workers.
+Command Governor is a custom Pi-native harness for durable, foreman-led AI/software-engineering work.
 
 [commandgovernor.com](https://commandgovernor.com)
 
-> **Status:** reviewed architecture and safety contracts, plus the Phase 1
-> pure-Rust kernel/store/testkit scaffold landed on this branch: the pure kernel
-> (`governor-core`), the single-writer SQLite store (`governor-store-sqlite`),
-> the private immutable result-artifact store (`governor-artifacts`), the
-> deterministic testkit and its acceptance suites (`governor-testkit`), and a
-> daemon skeleton with a CLI (`command-governor daemon` / `status` /
-> `obligations` / `doctor`). No live service adapter is wired yet: ChatGPT
-> browser transport, the foreman MCP surface, GitHub, and the Claude/Herdr
-> worker adapters remain gated.
+> **Architecture pivot — 2026-09-01:** ADR 0008 accepts Pi as the Command Governor
+> runtime/harness substrate. The product name and canonical repository remain
+> Command Governor / `DivMode/commandgovernor`; the existing Rust Phase-1
+> kernel/store/testkit scaffold is frozen for feature expansion while the Pi-native
+> conformance spike runs. Command Governor will compose reviewed Pi packages,
+> extensions, skills, agents, memory, supervision, analytics, and ChatGPT Web
+> transport, adding Command-Governor-specific plugins only where a real gap remains.
+>
+> Read [ADR 0008](docs/adr/0008-adopt-pi-native-command-governor-harness.md) and
+> the [Pi-native research review](docs/research/2026-09-01-pi-native-command-governor-harness-review.md)
+> before treating older topology documents as current implementation direction.
+
+## Current direction
+
+The reliability goals remain: delegated work must survive restarts, required
+foreman review must be correlated to the exact work revision, ambiguous external
+delivery must not be blindly replayed, independent review must remain independent,
+and lossy memory/compaction must never become authority for exact control or
+user-owned decisions.
+
+The implementation strategy changed. Pi now supplies the general agent/session
+runtime. Command Governor becomes the opinionated distribution and integration
+layer around it rather than a parallel general-purpose Rust agent framework.
+
+The preferred closed loop is:
+
+```text
+Pi worker/subagent finishes
+  -> Command Governor Pi extension creates durable foreman event
+  -> Pi sends it to the exact ChatGPT Web foreman conversation
+  -> ChatGPT reviews/reasons and replies
+  -> Pi reads + validates the correlated disposition
+  -> ACK | REVISE | DELEGATE | ASK_USER
+```
+
+MCP remains an optional interoperability mechanism rather than a mandatory
+architecture spine. Direct and browser-backed ChatGPT Web transports are
+capability-gated adapters; the conformance tests define the behavior.
+
+## Historical pre-ADR-0008 design
+
+The sections below describe the architecture that produced the reviewed Rust
+Phase-1 scaffold. They remain useful provenance and test/invariant material, but
+ADRs 0001–0007 are superseded to the extent described by ADR 0008 and should not
+be read as the current implementation topology.
 
 ## What it solves
 
@@ -200,7 +236,9 @@ or sandbox/broker feature, not a V1 claim.
 
 Start here:
 
-- [V1 architecture](docs/architecture.md)
+- [Pi-native Command Governor research review (2026-09-01)](docs/research/2026-09-01-pi-native-command-governor-harness-review.md)
+- [Session/memory/analytics research review (2026-08-31)](docs/research/2026-08-31-session-memory-and-analytics-review.md)
+- [V1 architecture — historical topology](docs/architecture.md)
 - [Independent architecture review](docs/reviews/2026-08-31-architecture-review.md)
 - [Technology research snapshot (2026-08-31)](docs/research/2026-08-31-technology-review.md)
 - [Durable-orchestration implementation pattern review](docs/research/2026-08-31-durable-orchestration-pattern-review.md)
@@ -221,20 +259,24 @@ ADRs:
 - [0004 — foreman MCP + exact binding/ACK](docs/adr/0004-foreman-mcp-and-binding.md)
 - [0005 — structured Claude lifecycle + result durability](docs/adr/0005-worker-lifecycle-and-result-durability.md)
 - [0006 — empirical ChatGPT MCP capability gate](docs/adr/0006-empirical-chatgpt-mcp-capability-gate.md)
+- [0007 — session lineage, memory, compaction, and analytics](docs/adr/0007-session-lineage-memory-and-analytics.md)
+- [0008 — adopt Pi as the Command Governor harness substrate](docs/adr/0008-adopt-pi-native-command-governor-harness.md)
 
 ## Security and unofficial ChatGPT Web support
 
-The ChatGPT Web adapter is unofficial and may break as the service changes.
-Command Governor uses normal user authentication in a dedicated local browser,
-does not claim OpenAI endorsement, and deliberately avoids challenge/auth/
-entitlement/rate-limit circumvention.
+Any ChatGPT Web adapter is unofficial and may break as the service changes. Under
+ADR 0008, transport is capability-gated and replaceable; direct and browser-backed
+Pi-native adapters are evaluated by the same reliability tests. Command Governor
+does not define bypassing provider security controls as a product requirement.
 
 See [SECURITY.md](SECURITY.md) and the [threat model](docs/threat-model.md).
 
 ## Open-source provenance
 
-Command Governor is an independent implementation. Architecture research includes:
+Command Governor is an independent product that may compose reviewed third-party
+Pi packages under their licenses. Architecture research includes:
 
+- Pi and Pi ecosystem packages
 - Tandem — MIT
 - codex-chatgpt-web — MIT
 - CCCC — Apache-2.0
@@ -242,17 +284,17 @@ Command Governor is an independent implementation. Architecture research include
 - Prime Agent — MIT
 - Agent Orchestrator — MIT
 
-Exact reviewed revisions, the ADOPT/ADAPT/REJECT pattern review, and attribution
-policy are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
-[the durable-orchestration pattern review](docs/research/2026-08-31-durable-orchestration-pattern-review.md).
-No third-party implementation source is currently vendored/copied into this
-repository.
+Exact reviewed revisions, adoption decisions, and attribution policy are recorded
+in the research notes and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No new
+third-party implementation source is copied into this repository by the ADR 0008
+documentation change itself.
 
 ## Contributing
 
-The project is design-first and test-first: proposals should state lifecycle
-invariants, external-I/O ambiguity behavior, security/data boundaries, and the
-failure-injection tests that prove the change.
+The project remains design-first and test-first. Pi-native proposals should state
+which upstream capability/package is being reused, why any new extension is
+necessary, the lifecycle/security boundary, and the failure-injection tests that
+prove the integration.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
