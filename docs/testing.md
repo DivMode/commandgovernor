@@ -819,11 +819,14 @@ every ID keeps its definition here.
   to lose, and no product confirmation to refuse to bypass. The one half
   representable today — a lost write capability never relaxing the ACK
   requirement — is proven in the pure binding machine.
-- **DB-005 is half-implemented on purpose.** The daemon epoch fence — a
-  previous-lifetime holder cannot mutate current ownership — is proven. Electing
-  a single daemon instance against one state root is a daemon-lifecycle feature,
-  and this plan already refuses to accept SQLite writer serialization as that
-  election, so the process half lives with the daemon.
+- **DB-005 is fully implemented.** The daemon epoch fence — a
+  previous-lifetime holder cannot mutate current ownership — is proven in the
+  store suites, and the process half is proven in
+  `crates/command-governor/tests/daemon_acceptance.rs` against real spawned
+  binaries: a kernel-held advisory lock on the state root elects exactly one
+  authority before the database is opened, the second process fails closed, and
+  reclaim requires proof the holder is gone — never age. SQLite writer
+  serialization is not the election mechanism, exactly as this plan requires.
 
 [pattern-review]: research/2026-08-31-durable-orchestration-pattern-review.md
 

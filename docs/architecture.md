@@ -427,7 +427,10 @@ Before new orchestration work:
 3. open SQLite and verify schema/integrity/migrations;
 4. quarantine orphaned browser/worker external deliveries according to ambiguity
    rules before new I/O;
-5. replay/validate projections;
+5. replay/validate projections (implementation note: the Phase 1 store runs
+   replay validation before quarantine inside one uninterleavable open — the
+   binding requirement, quarantine before any *new external I/O*, is preserved
+   either way);
 6. ingest/dedupe sanitized hook inbox;
 7. reconcile managed-run final-result candidates/run+exit receipts and publish
    only proven results;

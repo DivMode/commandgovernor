@@ -16,10 +16,11 @@
 //! | [`sec_010_the_supply_chain_policy_is_in_force`] | SEC-010 | policy files and the CI gate asserted here; the *rejection* of a known-malicious version is `cargo deny`'s own behaviour, run in CI |
 //!
 //! SEC-001's scan list names logs, diagnostics, hook inbox, managed-run staging
-//! and CLI output. Phase 1 writes none of those — there is no daemon logger, no
-//! worker-host and no CLI beyond a skeleton — so the sweep covers the surfaces
-//! that exist and the state root's `logs/` directory, which is created empty so
-//! the sweep already covers it the day something starts writing there.
+//! and CLI output. The daemon logger and the CLI now exist; their surfaces
+//! (every CLI stdout/stderr plus every file under the state root, `logs/`
+//! included) are swept by `crates/command-governor/tests/daemon_acceptance.rs`.
+//! The hook inbox and managed-run staging are Phase 2 (no surface exists yet),
+//! so this suite sweeps the store/artifact surfaces that exist today.
 
 use std::path::Path;
 
