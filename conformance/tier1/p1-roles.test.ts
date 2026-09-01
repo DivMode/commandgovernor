@@ -27,7 +27,7 @@ import {
 
 import { parseFrontmatter, validate, type SchemaNode } from "../lib/frontmatter.ts";
 import { pinnedModelCatalog } from "../lib/pi-runtime.ts";
-import { AGENTS_DIR, readJson } from "../lib/repo.ts";
+import { AGENTS_DIR, readJson, REPO_ROOT } from "../lib/repo.ts";
 
 const MODELS = await pinnedModelCatalog();
 
@@ -48,14 +48,28 @@ const ROLES: Role[] = ROLE_FILES.map((file) => {
 	return { file, frontmatter: parsed.frontmatter, body: parsed.body };
 });
 
-/** Built-in tool names, taken from the pinned runtime rather than remembered. */
+/**
+ * Built-in tool names, taken from the pinned runtime rather than remembered.
+ *
+ * Both factories take the working directory the tools will operate against; the
+ * repository root is the right answer here because that is where a Command
+ * Governor session runs. Only the names are read, but passing a real path keeps
+ * this honest rather than constructing tools against a directory that does not
+ * exist.
+ *
+ * The union of the coding and read-only bundles is the complete set reachable
+ * from the package's public exports: read, bash, edit, write, grep, find, ls.
+ * `powershell` is a built-in too but is only exported through its own factory
+ * and is Windows-only, so a role naming it would be rejected here. That is the
+ * behaviour we want on this platform, and it is stated rather than accidental.
+ */
 function builtinToolNames(): Set<string> {
 	const names = new Set<string>();
-	for (const bundle of [createCodingTools(), createReadOnlyTools()]) {
-		const tools = Array.isArray(bundle) ? bundle : Object.values(bundle);
-		for (const tool of tools as { name?: string }[]) {
-			if (typeof tool?.name === "string") names.add(tool.name);
-		}
+	for (const tool of [
+		...createCodingTools(REPO_ROOT),
+		...createReadOnlyTools(REPO_ROOT),
+	]) {
+		names.add(tool.name);
 	}
 	return names;
 }

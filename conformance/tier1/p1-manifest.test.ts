@@ -109,6 +109,36 @@ describe("P1-MANIFEST: the pi package manifest", () => {
 		}
 	});
 
+	it("marks the Pi-provided peers optional, so npm does not fetch a second Pi", () => {
+		// Measured, not assumed: with these peers mandatory, `npm install` at the
+		// repository root resolves them from the registry and installs a second,
+		// unpinned copy of the entire Pi tree beside the pinned one. Optional is
+		// also the honest declaration -- the host provides them.
+		const meta = (manifest as { peerDependenciesMeta?: Record<string, { optional?: boolean }> })
+			.peerDependenciesMeta;
+		for (const name of PI_PROVIDED_PACKAGES) {
+			assert.equal(
+				meta?.[name]?.optional,
+				true,
+				`${name} must be marked optional in peerDependenciesMeta`,
+			);
+		}
+	});
+
+	it("keeps tooling in devDependencies, where a consumer install skips it", () => {
+		// `pi install` runs `npm install --omit=dev`, so a devDependency never
+		// reaches a consumer. Anything needed at runtime would have to move.
+		const dev = (manifest as { devDependencies?: Record<string, string> }).devDependencies;
+		assert.ok(dev, "expected devDependencies for the typecheck tooling");
+		for (const [name, range] of Object.entries(dev)) {
+			assert.match(
+				range,
+				/^\d+\.\d+\.\d+$/,
+				`${name} is pinned as "${range}"; tooling must be an exact version`,
+			);
+		}
+	});
+
 	it("declares the same node floor the pinned runtime requires", () => {
 		const pins = readJson(join(REPO_ROOT, "pins", "pins.json")) as {
 			pi: { engines: { node: string } };

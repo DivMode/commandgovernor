@@ -39,6 +39,18 @@ install_root=$(node -e '
 
 cd "$repo_root"
 
+# Typecheck first. Node's type stripping erases types without checking them, so
+# without this step every type in the harness and the suite is decoration. The
+# tsconfig sets `erasableSyntaxOnly`, so tsc also rejects syntax that Node's
+# stripper cannot run -- enums, parameter properties, namespaces -- which tsc
+# would otherwise accept and Node would refuse at load.
+[ -x "$repo_root/node_modules/.bin/tsc" ] ||
+	fail 'typescript is not installed. Run scripts/bootstrap.sh first.'
+
+printf 'conformance: typecheck (tsc --noEmit)\n'
+./node_modules/.bin/tsc --noEmit || fail 'typecheck failed'
+printf 'conformance: typecheck clean\n\n'
+
 printf 'conformance: tier 1 (credential-free)\n'
 # A glob, not a directory: `node --test <dir>` tries to load the directory
 # itself as a module on Node 24.

@@ -137,20 +137,54 @@ done || exit 1
 printf 'bootstrap: npm ci --ignore-scripts in %s\n' "$install_root_rel"
 ( cd "$install_root" && npm ci --ignore-scripts ) || fail 'npm ci failed'
 
+# --- step 3b: the repository's own tooling ---------------------------------
+
+# TypeScript and the Node type definitions, for `tsc --noEmit`. They are
+# devDependencies of the distribution package, so `pi install` -- which runs
+# `npm install --omit=dev` -- never fetches them for a consumer.
+#
+# This has to run BEFORE the symlinks below: `npm ci` deletes node_modules
+# wholesale before installing, so links created first would be silently
+# destroyed and every bare-specifier import would break.
+#
+# The Pi-provided packages are declared optional in `peerDependenciesMeta`.
+# Without that, npm resolves them from the registry and installs a second,
+# unpinned copy of the entire Pi tree next to the pinned one -- measured, not
+# assumed. Optional is also the honest declaration: the host provides them.
+printf 'bootstrap: npm ci --ignore-scripts at the repository root\n'
+( cd "$repo_root" && npm ci --ignore-scripts ) || fail 'root npm ci failed'
+
 # Make the pinned Pi packages resolvable as bare specifiers from anywhere in the
 # repository, so `import { VERSION } from "@earendil-works/pi-coding-agent"` in
 # harness/extensions/ means the pinned copy and nothing else. Pi's own loader
 # resolves those imports from its module root; this is the same tree, reached
-# the same way. A scope symlink rather than a whole node_modules copy, so only
-# the five contractually available packages become visible -- and inside a real
-# directory, so the repository's existing `node_modules/` ignore rule covers it.
-mkdir -p "$repo_root/node_modules"
-rm -rf "$repo_root/node_modules/@earendil-works"
-ln -s "../$install_root_rel/node_modules/@earendil-works" \
-	"$repo_root/node_modules/@earendil-works" ||
-	fail 'cannot link the pinned pi packages into node_modules/'
-printf 'bootstrap: linked node_modules/@earendil-works -> %s\n' \
-	"$install_root_rel/node_modules/@earendil-works"
+# the same way.
+#
+# Exactly the five packages Pi contractually provides to an extension, linked
+# one by one. Symlinking the whole @earendil-works scope would be shorter and
+# wrong in both directions: it exposes pi-client, pi-protocol and pi-telemetry,
+# which an extension is NOT entitled to import and which would typecheck here
+# and fail inside Pi -- and it misses typebox, which is entitled but is not
+# under that scope. Getting this wrong turns the repository into a more
+# permissive environment than the runtime, which is the failure mode where an
+# extension passes every local check and breaks on load.
+#
+# The links live inside a real directory so the repository's existing
+# `node_modules/` ignore rule covers them.
+mkdir -p "$repo_root/node_modules/@earendil-works"
+for pkg in pi-coding-agent pi-agent-core pi-ai pi-tui; do
+	target="$install_root/node_modules/@earendil-works/$pkg"
+	[ -d "$target" ] || fail "pinned package missing: @earendil-works/$pkg"
+	rm -rf "$repo_root/node_modules/@earendil-works/$pkg"
+	ln -s "../../$install_root_rel/node_modules/@earendil-works/$pkg" \
+		"$repo_root/node_modules/@earendil-works/$pkg" ||
+		fail "cannot link @earendil-works/$pkg"
+done
+[ -d "$install_root/node_modules/typebox" ] || fail 'pinned package missing: typebox'
+rm -rf "$repo_root/node_modules/typebox"
+ln -s "../$install_root_rel/node_modules/typebox" "$repo_root/node_modules/typebox" ||
+	fail 'cannot link typebox'
+printf 'bootstrap: linked the 5 pi-provided packages into node_modules/\n'
 
 # --- step 4: the binary that came out is the version we pinned -------------
 
