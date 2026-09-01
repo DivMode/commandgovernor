@@ -24,9 +24,11 @@
 //! | [`attention_is_refused_for_closed_work`] | health conditions are attention |
 //! | [`attention_must_name_the_artifact_the_obligation_pins`] | health condition scope |
 //! | [`a_health_condition_replays_from_its_events`] | DB-001 over `health_conditions` |
+//! | [`a_delivery_mismatch_names_the_key_and_never_the_correlation_id`] | invariant 17, SEC-001 |
 
 mod support;
 
+use governor_core::delivery::DeliveryKey;
 use governor_core::fence::{AttemptNo, BindingGeneration, DeliveryRevision, ObligationVersion};
 use governor_core::id::{ClaimId, ObligationId};
 use governor_core::obligation::{Disposition, ObligationState};
@@ -646,6 +648,76 @@ fn a_tampered_projection_row_fails_closed_on_replay() {
     assert!(
         matches!(harness.open(), Err(StoreError::RepairNeeded(_))),
         "and it keeps failing closed rather than repairing itself"
+    );
+}
+
+#[test]
+fn a_delivery_mismatch_names_the_key_and_never_the_correlation_id() {
+    // A `RepairNeeded` message is printed to stderr by the daemon and written
+    // to its log, so whatever names the disagreeing row is published. For a
+    // browser delivery that must be the deterministic, non-secret
+    // `delivery_key` — never `delivery_id`, which `foreman_resume` accepts as
+    // proof of possession.
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let turn = open_turn(&store);
+    let generation = bind(&store, "conv-A");
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let snapshot = store.read_obligation(turn.obligation).expect("snapshot");
+    let wake = schedule_wake(
+        &store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("scheduling");
+    accept_wake(&store, &wake, generation, "msg-1");
+
+    let correlation_hex = wake.delivery_id.expose_hex();
+    let key_hex =
+        DeliveryKey::derive(turn.obligation, generation, DeliveryRevision::FIRST).to_hex();
+    drop(store);
+
+    // Disagree with the ledger on both halves of the delivery projection.
+    let conn = rusqlite::Connection::open(harness.database_path()).expect("writable connection");
+    conn.execute("UPDATE browser_deliveries SET state = 'failed'", [])
+        .expect("tampering with the delivery projection");
+    conn.execute("UPDATE delivery_attempts SET state = 'failed'", [])
+        .expect("tampering with the attempt projection");
+    drop(conn);
+
+    let error = harness.open().expect_err("the disagreement fails closed");
+    let StoreError::RepairNeeded(repair) = error else {
+        panic!("expected a repair-needed failure");
+    };
+    assert_eq!(
+        repair.mismatches.len(),
+        2,
+        "both halves disagree: {:?}",
+        repair.mismatches
+    );
+
+    // The rendered message is the surface that leaks, so assert on it and not
+    // only on the struct.
+    let rendered = format!("{repair}");
+    for mismatch in &repair.mismatches {
+        assert!(
+            mismatch.row.starts_with(&key_hex),
+            "{} named the row {:?}, which is not the delivery key",
+            mismatch.table,
+            mismatch.row
+        );
+        assert!(!mismatch.row.contains(&correlation_hex));
+    }
+    assert!(
+        !rendered.contains(&correlation_hex),
+        "the correlation ID reached a printable error: {rendered}"
+    );
+    assert!(
+        rendered.contains(&key_hex),
+        "the operator still gets a way to address the row: {rendered}"
     );
 }
 

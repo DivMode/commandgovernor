@@ -234,13 +234,27 @@ impl std::error::Error for RepairNeeded {}
 
 /// One stored projection field that does not match its replayed value.
 ///
-/// Values are rendered with `Debug` from closed domain types, so nothing
-/// free-form can reach this struct.
+/// # What may go in here
+///
+/// This struct is an *output* surface, not a diagnostic scratchpad: its
+/// [`Display`](fmt::Display) reaches [`RepairNeeded`], which the daemon prints
+/// to stderr and writes to its log. `table` and `column` are `&'static str`
+/// chosen by the comparison, and `stored` and `replayed` are rendered from
+/// closed domain labels — no free-form value reaches either.
+///
+/// `row` is a `String`, so it is the one field a caller could get wrong. It
+/// must be a **non-secret** identity of the disagreeing row: an opaque domain
+/// identity, or a deterministic key such as
+/// [`governor_core::delivery::DeliveryKey`]. It must never be a possession
+/// fence — in particular never a
+/// [`DeliveryId`](governor_core::delivery::DeliveryId), whose hex a
+/// `foreman_resume` caller can present as proof of possession, and which for
+/// that reason has no `Display` of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionMismatch {
     /// Projection table that disagrees.
     pub table: &'static str,
-    /// Opaque identity of the disagreeing row.
+    /// Non-secret identity of the disagreeing row. See the type docs.
     pub row: String,
     /// Column that disagrees.
     pub column: &'static str,

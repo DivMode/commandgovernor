@@ -9,7 +9,8 @@
 //! | [`a_stale_lock_is_reclaimed_after_the_holder_is_killed`] | DB-005 | the kernel-held lock is released by process death, and the next start says it reclaimed |
 //! | [`a_clean_stop_releases_the_lock_and_removes_the_socket`] | — | `SIGTERM` shuts down cleanly |
 //! | [`startup_refuses_when_a_pinned_artifact_is_missing`] | DB-008 | a failing step in the startup order refuses readiness and leaves the durable condition behind |
-//! | [`sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes`] | SEC-001 | the sweep, extended to the two surfaces Phase 1 has just created |
+//! | [`sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes`] | SEC-001 | the sweep, extended to the two surfaces Phase 1 has just created, and to the correlation ID the run itself generates |
+//! | [`a_projection_mismatch_is_reported_without_the_correlation_id`] | SEC-001, invariant 17 | the refusal names the delivery *key*, never the possession fence |
 //! | [`sec_007_doctor_states_the_trust_model_without_overclaiming`] | SEC-007 | the trust model is reported as data, and claims no same-user containment |
 //! | [`the_control_socket_and_its_directory_are_owner_only`] | local IPC abuse | the enforced half of the IPC boundary |
 //! | [`doctor_works_offline_and_fails_legibly_on_a_broken_root`] | — | no daemon, no authority taken, legible exit codes |
@@ -36,8 +37,8 @@ use governor_testkit::scenario::{
     FINAL_RESULT, accepted_work, open_turn, record_failure, start_worker,
 };
 use governor_testkit::sentinels::{
-    FINAL_RESULT_SENTINEL, FORBIDDEN, assert_no_forbidden_bytes, assert_result_sentinel_confined,
-    contains, sweep,
+    FINAL_RESULT_SENTINEL, FORBIDDEN, assert_absent, assert_no_forbidden_bytes,
+    assert_result_sentinel_confined, contains, sweep,
 };
 
 /// The binary under test.
@@ -699,7 +700,7 @@ fn sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes() {
 
     let harness = Harness::new();
     let root = harness.state_root();
-    {
+    let correlation_hex = {
         let store = harness.open().expect("opening the seeded store");
         let mut artifacts = harness.open_artifacts();
         // The one place a sentinel is allowed to become durable: the bounded
@@ -709,8 +710,8 @@ fn sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes() {
         let failed = open_turn(&store);
         start_worker(&store, failed.obligation, "run-2");
         record_failure(&store, failed.obligation, "run-2").expect("a worker failure");
-        let _ = work;
-    }
+        work.wake.delivery_id.expose_hex()
+    };
 
     let daemon = DaemonProcess::start(root);
     let mut surfaces: Vec<(String, Vec<u8>)> = Vec::new();
@@ -762,5 +763,93 @@ fn sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes() {
         &files,
         "artifacts/objects/",
         "the state root after a daemon lifecycle",
+    );
+
+    // The wake correlation ID is a secret the *run* generated, so no static
+    // sentinel can stand for it. The store must hold it — it is the row's
+    // primary key — and nothing the daemon prints or logs may repeat it.
+    assert_absent(
+        &output_surfaces(&surfaces, &files),
+        "wake correlation ID",
+        &correlation_hex,
+        "a daemon lifecycle",
+    );
+}
+
+/// The output half of a sweep corpus: command-line bytes and `logs/`.
+///
+/// Deliberately not the database or its sidecars. `browser_deliveries` holds
+/// the correlation ID by design, and a sweep that failed on it would be
+/// measuring the wrong thing.
+fn output_surfaces(
+    cli: &[(String, Vec<u8>)],
+    files: &[(String, Vec<u8>)],
+) -> Vec<(String, Vec<u8>)> {
+    let mut out = cli.to_vec();
+    out.extend(
+        files
+            .iter()
+            .filter(|(name, _)| name.starts_with("logs/"))
+            .cloned(),
+    );
+    out
+}
+
+#[test]
+fn a_projection_mismatch_is_reported_without_the_correlation_id() {
+    // The refusal path SEC-001's static corpus cannot reach: a delivery row
+    // that disagrees with its ledger becomes a `RepairNeeded` message on
+    // stderr and in the log. Whatever names the row is therefore published,
+    // and for a browser delivery that must be the non-secret `delivery_key`.
+    let harness = Harness::new();
+    let root = harness.state_root();
+    let correlation_hex = {
+        let store = harness.open().expect("opening the seeded store");
+        let mut artifacts = harness.open_artifacts();
+        accepted_work(&store, &mut artifacts, "conv-A")
+            .wake
+            .delivery_id
+            .expose_hex()
+    };
+
+    // No store API can write a projection that disagrees with its ledger, so
+    // the disagreement is written directly.
+    let conn = rusqlite::Connection::open(harness.database_path()).expect("write connection");
+    let changed = conn
+        .execute("UPDATE browser_deliveries SET state = 'failed'", [])
+        .expect("tampering with the delivery projection");
+    assert_eq!(changed, 1, "the seed must have published exactly one wake");
+    drop(conn);
+
+    let refused = DaemonProcess::start_expecting_refusal(root);
+    assert_eq!(
+        code_of(&refused),
+        EXIT_REFUSED,
+        "a projection mismatch is structural corruption and still fails closed: {}",
+        combined(&refused)
+    );
+    let text = combined(&refused);
+    assert!(
+        has_line(&text, "error class=store_refused"),
+        "the refusal must be classified: {text}"
+    );
+    assert!(
+        text.contains("browser_deliveries"),
+        "the operator must be told which projection disagrees: {text}"
+    );
+
+    let mut surfaces = vec![
+        ("cli:daemon:stdout".to_owned(), refused.stdout.clone()),
+        ("cli:daemon:stderr".to_owned(), refused.stderr.clone()),
+    ];
+    let doctor = run(root, &["doctor"]);
+    surfaces.push(("cli:doctor:stdout".to_owned(), doctor.stdout.clone()));
+    surfaces.push(("cli:doctor:stderr".to_owned(), doctor.stderr));
+    let files = harness.all_files();
+    assert_absent(
+        &output_surfaces(&surfaces, &files),
+        "wake correlation ID",
+        &correlation_hex,
+        "a refused start on a mismatched projection",
     );
 }

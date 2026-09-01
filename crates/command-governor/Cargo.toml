@@ -36,5 +36,10 @@ governor-store-sqlite.workspace = true
 governor-artifacts.workspace = true
 tempfile.workspace = true
 
+# A projection mismatch cannot be produced through any store API — that is the
+# property being tested — so the suite that proves the daemon's refusal is
+# legible writes the disagreeing row itself.
+rusqlite.workspace = true
+
 [lints]
 workspace = true

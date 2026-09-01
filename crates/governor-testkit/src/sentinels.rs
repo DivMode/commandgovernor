@@ -194,6 +194,38 @@ pub fn assert_result_sentinel_confined(
     );
 }
 
+/// Asserts a value minted at run time reached none of the supplied surfaces.
+///
+/// The static corpus cannot cover a secret the run itself generates. The wake
+/// correlation ID is the case that matters: `DeliveryId` is a possession fence
+/// `foreman_resume` accepts, the store must persist its hex in
+/// `browser_deliveries`, and it must appear on no *output* surface — no CLI
+/// stdout or stderr, no log line, no rendered error. Pass only those surfaces;
+/// scanning the database file would fail for the one reason that is correct.
+///
+/// # Panics
+///
+/// Panics naming every surface that carried the value.
+pub fn assert_absent(surfaces: &[(String, Vec<u8>)], label: &str, value: &str, context: &str) {
+    assert!(
+        !surfaces.is_empty(),
+        "{context}: the sweep must have something to scan"
+    );
+    assert!(
+        !value.is_empty(),
+        "{context}: an empty needle would prove nothing about {label}"
+    );
+    let leaked: Vec<&String> = surfaces
+        .iter()
+        .filter(|(_, bytes)| contains(bytes, value.as_bytes()))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "{context}: the {label} reached an output surface: {leaked:#?}"
+    );
+}
+
 /// Reports whether `haystack` contains `needle`.
 #[must_use]
 pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {

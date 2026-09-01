@@ -459,6 +459,13 @@ fn compare_deliveries(tx: &Tx<'_>, mismatches: &mut Vec<ProjectionMismatch>) -> 
         let delivery_id = parse_delivery_id(&delivery_hex, "browser_deliveries", "delivery_id")?;
         let loaded = load::wake_by_delivery_id(tx, &delivery_id)?;
         count += 1;
+        // The row is named by its *key*, never by its correlation ID: a
+        // mismatch becomes a `RepairNeeded` message that the daemon prints to
+        // stderr and writes to its log. `DeliveryKey` is the deterministic,
+        // non-secret idempotency key (`governor_core::delivery`) and naming a
+        // row by it grants nothing; `DeliveryId` is a possession fence that
+        // `foreman_resume` accepts, and it has no `Display` for this reason.
+        let row = loaded.wake.delivery_key().to_hex();
         let replayed = encode_delivery_state(loaded.wake.state());
         // Decoded, not string-compared, so an unknown stored label is a
         // corrupt row rather than a silent mismatch.
@@ -467,20 +474,25 @@ fn compare_deliveries(tx: &Tx<'_>, mismatches: &mut Vec<ProjectionMismatch>) -> 
         if stored != replayed {
             mismatches.push(ProjectionMismatch {
                 table: "browser_deliveries",
-                row: delivery_hex.clone(),
+                row: row.clone(),
                 column: "state",
                 stored: stored.to_owned(),
                 replayed: replayed.to_owned(),
             });
         }
-        compare_attempts(tx, &delivery_hex, &loaded, mismatches)?;
+        compare_attempts(tx, &delivery_hex, &row, &loaded, mismatches)?;
     }
     Ok(count)
 }
 
+/// Compares one revision's attempt rows with the attempts the fold produces.
+///
+/// `delivery_hex` addresses the rows and never leaves this function;
+/// `row` is the non-secret delivery key a reported mismatch is named by.
 fn compare_attempts(
     tx: &Tx<'_>,
     delivery_hex: &str,
+    row: &str,
     loaded: &load::LoadedWake,
     mismatches: &mut Vec<ProjectionMismatch>,
 ) -> StoreResult<()> {
@@ -508,7 +520,7 @@ fn compare_attempts(
         if found != expected {
             mismatches.push(ProjectionMismatch {
                 table: "delivery_attempts",
-                row: format!("{delivery_hex}#{}", attempt.number()),
+                row: format!("{row}#{}", attempt.number()),
                 column: "state",
                 stored: found.to_owned(),
                 replayed: expected.to_owned(),
