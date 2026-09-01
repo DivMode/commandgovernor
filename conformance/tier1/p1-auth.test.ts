@@ -14,6 +14,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { join } from "node:path";
+
+import { checkAuthorities, checkPackageSet } from "../lib/policy.ts";
 import {
 	AUTHORITIES_JSON,
 	exists,
@@ -22,7 +25,6 @@ import {
 	readPins,
 	REPO_ROOT,
 } from "../lib/repo.ts";
-import { join } from "node:path";
 
 interface Concern {
 	concern: string;
@@ -45,6 +47,11 @@ interface ProjectSettings {
 const authorities = readJson(AUTHORITIES_JSON) as Authorities;
 const pins = readPins();
 
+/** Owner paths are repository-relative. */
+function ownerExists(owner: string): boolean {
+	return exists(join(REPO_ROOT, owner));
+}
+
 function packageSource(entry: string | { source?: string }): string {
 	return typeof entry === "string" ? entry : (entry.source ?? "");
 }
@@ -58,36 +65,68 @@ describe("P1-AUTH: the authorities manifest", () => {
 		assert.ok(authorities.concerns.length > 0);
 	});
 
-	it("gives no concern two owners", () => {
-		const seen = new Map<string, number>();
-		for (const entry of authorities.concerns) {
-			seen.set(entry.concern, (seen.get(entry.concern) ?? 0) + 1);
-		}
-		const duplicates = [...seen].filter(([, count]) => count > 1).map(([name]) => name);
-		assert.deepEqual(duplicates, [], `concerns with more than one owner: ${duplicates}`);
+	it("satisfies the whole authority policy", () => {
+		const violations = checkAuthorities(authorities, ownerExists);
+		assert.deepEqual(violations, [], violations.join("; "));
 	});
 
-	it("gives every concern a resolved status and a real owner or a named gap", () => {
-		for (const entry of authorities.concerns) {
-			assert.ok(entry.concern.length > 0);
-			assert.ok(
-				entry.status === "assigned" || entry.status === "unassigned",
-				`${entry.concern}: status must be assigned or unassigned`,
-			);
-			if (entry.status === "assigned") {
-				assert.ok(entry.owner, `${entry.concern}: assigned with no owner`);
-				assert.ok(
-					exists(join(REPO_ROOT, entry.owner)),
-					`${entry.concern}: owner ${entry.owner} does not exist in the repository`,
-				);
-			} else {
-				assert.ok(
-					entry.plannedOwner && entry.phase,
-					`${entry.concern}: an unassigned concern must name a planned owner and a phase, so it cannot be adopted by accident`,
-				);
-			}
-			assert.ok(entry.note && entry.note.length > 0, `${entry.concern}: needs a note`);
-		}
+	it("would reject a duplicate owner, a missing owner, and an unowned gap", () => {
+		// The real document passes, which proves nothing about whether the rule
+		// can fail. These fabricated documents are what establish that.
+		const base = {
+			concern: "compaction-summary",
+			status: "assigned",
+			owner: "conformance",
+			note: "the real one",
+		};
+
+		const duplicate = { concerns: [base, { ...base, note: "a second owner" }] };
+		assert.ok(
+			checkAuthorities(duplicate, ownerExists).some((m) => m.includes("has 2 owners")),
+			"two entries for one concern must be rejected",
+		);
+
+		const missingOwner = { concerns: [{ ...base, owner: undefined }] };
+		assert.ok(
+			checkAuthorities(missingOwner, ownerExists).some((m) =>
+				m.includes("assigned with no owner"),
+			),
+		);
+
+		const phantomOwner = { concerns: [{ ...base, owner: "harness/does-not-exist.ts" }] };
+		assert.ok(
+			checkAuthorities(phantomOwner, ownerExists).some((m) =>
+				m.includes("does not exist in the repository"),
+			),
+			"an owner path that does not exist must be rejected",
+		);
+
+		const vagueGap = {
+			concerns: [{ concern: "memory", status: "unassigned", note: "someday" }],
+		};
+		assert.ok(
+			checkAuthorities(vagueGap, ownerExists).some((m) =>
+				m.includes("must name a planned owner and a phase"),
+			),
+			"an unassigned concern with no plan must be rejected",
+		);
+
+		const noNote = { concerns: [{ ...base, note: undefined }] };
+		assert.ok(checkAuthorities(noNote, ownerExists).some((m) => m.includes("needs a note")));
+
+		const badStatus = { concerns: [{ ...base, status: "maybe" }] };
+		assert.ok(
+			checkAuthorities(badStatus, ownerExists).some((m) => m.includes("must be assigned")),
+		);
+	});
+
+	it("would reject a concerns map that cannot express a duplicate", () => {
+		// If `concerns` were an object keyed by concern, a second owner would be
+		// unrepresentable and the duplicate rule above would be decoration.
+		const asObject = { concerns: { "compaction-summary": { status: "assigned" } } };
+		assert.ok(
+			checkAuthorities(asObject, ownerExists).some((m) => m.includes("must be an array")),
+		);
 	});
 
 	it("names the concerns this revision actually implements", () => {
@@ -136,34 +175,26 @@ describe("P1-AUTH: settings and pins agree", () => {
 		}
 	});
 
-	it("makes every pinned package name the authority it owns", () => {
-		for (const pkg of pins.packages) {
-			assert.ok(
-				pkg.authority,
-				`${pkg.source}: must name the concern it owns, so a second owner is visible`,
-			);
-			const known = authorities.concerns.some((c) => c.concern === pkg.authority);
-			assert.ok(
-				known,
-				`${pkg.source}: claims authority '${pkg.authority}', which is not a concern in harness/authorities.json`,
-			);
-		}
+	it("makes every pinned package name a known authority, uniquely", () => {
+		const concerns = new Set(authorities.concerns.map((c) => c.concern));
+		const violations = checkPackageSet(pins.packages, concerns);
+		assert.deepEqual(violations, [], violations.join("; "));
 	});
 
-	it("lets exactly one package own a concern", () => {
-		const owners = new Map<string, string[]>();
-		for (const pkg of pins.packages) {
-			const list = owners.get(pkg.authority ?? "") ?? [];
-			list.push(pkg.source);
-			owners.set(pkg.authority ?? "", list);
-		}
-		for (const [concern, sources] of owners) {
-			assert.equal(
-				sources.length,
-				1,
-				`${concern} is claimed by ${sources.join(" and ")}; Pi would resolve that silently by load order`,
-			);
-		}
+	it("would reject a package claiming an authority nobody declared", () => {
+		const concerns = new Set(authorities.concerns.map((c) => c.concern));
+		const rogue = [
+			{
+				source: "npm:x@1.0.0",
+				exactVersion: "1.0.0",
+				license: "MIT",
+				reviewedAt: "2026-09-01",
+				authority: "a-concern-nobody-declared",
+			},
+		];
+		assert.ok(
+			checkPackageSet(rogue, concerns).some((m) => m.includes("which is not a concern")),
+		);
 	});
 
 	it("keeps the dogfooding settings honest about trust", () => {

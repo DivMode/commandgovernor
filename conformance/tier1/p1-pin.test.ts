@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { pinnedPiAvailable, runPinnedPi } from "../lib/pi-runtime.ts";
+import { checkPackagePin, checkPackageSet } from "../lib/policy.ts";
 import { exists, readPins, REPO_ROOT, SHA256SUMS } from "../lib/repo.ts";
 
 const pins = readPins();
@@ -97,23 +98,85 @@ describe("P1-PIN: pinned runtime provenance", () => {
 		// Pi keeps no lockfile for the packages it installs and treats any git
 		// ref as `pinned`, mutable tags included. So the policy has to be checked
 		// here or it is not enforced anywhere.
-		for (const pkg of pins.packages) {
-			assert.ok(
-				typeof pkg.source === "string" && pkg.source.length > 0,
-				"a pinned package has no source",
-			);
-			const immutable =
-				(pkg.exactVersion !== undefined && /^\d+\.\d+\.\d+/.test(pkg.exactVersion)) ||
-				(pkg.resolvedSha !== undefined && /^[0-9a-f]{40}$/.test(pkg.resolvedSha));
-			assert.ok(
-				immutable,
-				`${pkg.source}: needs an exact npm version or a 40-character commit sha; a bare name, branch or tag is not a pin`,
-			);
-			assert.ok(
-				typeof pkg.authority === "string" && pkg.authority.length > 0,
-				`${pkg.source}: must name the authority it owns (see harness/authorities.json)`,
-			);
-		}
+		const violations = pins.packages.flatMap((pkg) => checkPackagePin(pkg));
+		assert.deepEqual(violations, [], violations.join("; "));
+	});
+
+	it("would reject the pin shapes Pi accepts but we do not", () => {
+		// `packages[]` is empty today, so the loop above evaluates nothing. That
+		// is a check which cannot come back negative -- unless the rule is also
+		// run against records that break it. These are those records.
+		const good = {
+			source: "npm:pi-subagents@0.62.0",
+			exactVersion: "0.62.0",
+			license: "MIT",
+			reviewedAt: "2026-09-01",
+			authority: "subagent-process-lifecycle",
+		};
+		assert.deepEqual(checkPackagePin(good), [], "a well-formed pin must pass");
+
+		// A git tag satisfies Pi's own `pinned` flag and is still mutable
+		// upstream. This is the exact shape the policy exists to reject.
+		const tagged = { ...good, exactVersion: undefined, source: "git:github.com/o/r@v1.2.3" };
+		assert.ok(
+			checkPackagePin(tagged).some((m) => m.includes("not a pin")),
+			"a tag ref must be rejected",
+		);
+
+		const branch = { ...good, exactVersion: undefined, source: "git:github.com/o/r@main" };
+		assert.ok(checkPackagePin(branch).some((m) => m.includes("not a pin")));
+
+		const bare = { ...good, exactVersion: undefined, source: "npm:pi-subagents" };
+		assert.ok(checkPackagePin(bare).some((m) => m.includes("not a pin")));
+
+		const shortSha = { ...good, exactVersion: undefined, resolvedSha: "59d920f" };
+		assert.ok(
+			checkPackagePin(shortSha).some((m) => m.includes("not a pin")),
+			"an abbreviated sha is not a 40-character pin",
+		);
+
+		const fullSha = {
+			...good,
+			exactVersion: undefined,
+			resolvedSha: "59d920f935239fc8952709d0891202f16d40c821",
+		};
+		assert.deepEqual(checkPackagePin(fullSha), [], "a full commit sha is a pin");
+
+		const unowned = { ...good, authority: undefined };
+		assert.ok(
+			checkPackagePin(unowned).some((m) => m.includes("must name the authority")),
+			"a package that names no authority must be rejected",
+		);
+
+		const unreviewed = { ...good, license: undefined, reviewedAt: undefined };
+		const messages = checkPackagePin(unreviewed).join("; ");
+		assert.match(messages, /license/);
+		assert.match(messages, /reviewed/);
+	});
+
+	it("would reject two packages claiming one concern", () => {
+		const concerns = new Set(["subagent-process-lifecycle"]);
+		const both = [
+			{
+				source: "npm:a@1.0.0",
+				exactVersion: "1.0.0",
+				license: "MIT",
+				reviewedAt: "2026-09-01",
+				authority: "subagent-process-lifecycle",
+			},
+			{
+				source: "npm:b@2.0.0",
+				exactVersion: "2.0.0",
+				license: "MIT",
+				reviewedAt: "2026-09-01",
+				authority: "subagent-process-lifecycle",
+			},
+		];
+		assert.ok(
+			checkPackageSet(both, concerns).some((m) => m.includes("is claimed by")),
+			"two owners for one concern must be rejected",
+		);
+		assert.deepEqual(checkPackageSet([both[0]], concerns), []);
 	});
 
 	it("the installed binary reports the pinned version", { skip: skipReason() }, async () => {
