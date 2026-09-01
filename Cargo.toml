@@ -1,0 +1,100 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/governor-core",
+    "crates/governor-store-sqlite",
+    "crates/governor-artifacts",
+    "crates/governor-testkit",
+    "crates/governor-daemon",
+    "crates/command-governor",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/DivMode/commandgovernor"
+authors = ["Command Governor contributors"]
+
+[workspace.dependencies]
+# Domain and storage crates expose typed errors with `thiserror`; `anyhow` is
+# reserved for binary/composition boundaries and is not added until a boundary
+# genuinely needs it (docs/adr/0002-rust-daemon-and-sqlite.md, "Error policy").
+#
+# Everything else (rusqlite, tokio, clap, ...) is added by the crate that first
+# needs it, so this central list stays honest about what Phase 1 actually uses.
+thiserror = "2.0"
+
+# `governor-core` computes the deterministic, domain-separated browser
+# `delivery_key` (docs/adr/0003-chatgpt-browser-hybrid.md, "Delivery identity").
+# `sha2` is a pure computation crate: no clock, no entropy, no I/O, so it does
+# not breach the core crate's dependency boundary. `default-features = false`
+# keeps it `no_std`-shaped and drops the parts we do not use.
+sha2 = { version = "0.10.9", default-features = false }
+
+# Opaque generated public IDs are UUIDs (docs/data-model.md, "IDs and
+# ordering"). `governor-core` depends on the *type* only: UUIDv7 minting needs a
+# clock and entropy, so it happens behind the injectable `IdSource` port in an
+# outer crate, which enables the `v7` feature there.
+uuid = { version = "1.26.0", default-features = false, features = ["std"] }
+
+# The single durable authority is SQLite through `rusqlite`
+# (docs/adr/0002-rust-daemon-and-sqlite.md, "Decision"). `bundled` compiles a
+# known SQLite version into the binary instead of inheriting whatever the host
+# happens to ship, which is what makes the WAL/`synchronous`/foreign-key policy
+# and the crash matrix reproducible. No pool and no async runtime: writes are
+# serialised by one daemon-owned actor thread inside `governor-store-sqlite`.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+# Real SQLite files in throwaway directories are the only honest way to test WAL,
+# `synchronous=FULL`, and reopen behaviour; `:memory:` cannot express any of them.
+tempfile = "3.24.0"
+
+# The OS entropy source, for the production `SecureRandom` port in
+# `governor-daemon`. `getrandom` is the rust-random project's thin wrapper over
+# `getentropy(2)`/`getrandom(2)` — no userspace generator, so there is no seed
+# to get wrong and no state to fork-share. `uuid`'s `v7` feature already pulls
+# it in, so naming it here adds a call site rather than a dependency.
+getrandom = "0.4.3"
+
+# `SIGINT`/`SIGTERM` handling for the daemon's clean shutdown. The workspace
+# denies `unsafe_code`, and installing a signal handler is unavoidably unsafe;
+# `signal-hook` is the ecosystem's small, audited encapsulation of exactly that.
+# Only `flag::register` is used, so the `channel`/`iterator` defaults are off.
+signal-hook = { version = "0.4.4", default-features = false }
+
+# `anyhow` at the binary/composition boundary only, per
+# docs/adr/0002-rust-daemon-and-sqlite.md "Error policy": `command-governor`'s
+# `main` adds operational context to a refusal that is already typed and
+# machine-classifiable by the time it gets there.
+anyhow = "1.0.104"
+
+# Internal crates are addressed through the workspace so paths and versions have
+# a single source of truth. Member crates opt in with `foo.workspace = true`.
+governor-core = { path = "crates/governor-core" }
+governor-store-sqlite = { path = "crates/governor-store-sqlite" }
+governor-artifacts = { path = "crates/governor-artifacts" }
+governor-testkit = { path = "crates/governor-testkit" }
+governor-daemon = { path = "crates/governor-daemon" }
+
+# Repository-wide lint policy, inherited by every member via `[lints] workspace = true`.
+# CI escalates warnings to errors (`cargo clippy ... -- -D warnings`), so this is
+# deliberately modest and durable: it encodes the invariants this project cares
+# about rather than a maximal pedantic ruleset that later work would fight.
+[workspace.lints.rust]
+# Phase 1 needs no unsafe anywhere.
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+mem_forget = "warn"
+# SQLite stores signed 64-bit integers while sequences, generations, and versions
+# are naturally unsigned. A silent truncation or wrap there breaks a durability
+# fence, so numeric conversions must be deliberate rather than implicit.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"

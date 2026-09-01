@@ -43,34 +43,67 @@ created
 running
   ├── confirmed durable input/defer boundary ─► needs_input
   │                                                │
-  │             answer + fenced worker resume +   │
-  │             verified resumed-turn evidence    │
+  │             answer + fenced worker resume +    │
+  │             verified resumed-turn evidence     │
   │◄───────────────────────────────────────────────┘
   │
   ├── verified terminal failure ──────────────► failed
   │
-  └── confirmed final result + durable artifact
-                                         ─────► completed_unprocessed
-                                                   │
-needs_input / failed / completed_unprocessed       │
-  │ foreman_resume(current version/generation)     │
-  ▼                                                │
-claimed_by_foreman                                 │
-  │ result/input handed to current foreman         │
-  ▼                                                │
-processing                                         │
-  │ explicit fenced foreman_ack                    │
-  ▼                                                │
-acknowledged ◄─────────────────────────────────────┘
+  └── confirmed final result + durable artifact ─► completed_unprocessed
+
+the three attention states — needs_input / failed / completed_unprocessed
+  │ foreman_resume(current version/generation/accepted delivery_id)
+  ▼
+claimed_by_foreman ──── artifact/input could not be handed over
+  │                       └─► no handoff event; stays here; ACK is refused
+  │ result/input handed to the current foreman
+  ▼
+processing
+  │ explicit fenced foreman_ack(disposition valid for the prior attention)
+  ▼
+acknowledged
 ```
 
 Worker failure is unprocessed work until the foreman explicitly dispositions it.
+
+**ACK enters from `processing` only.** The earlier drawing let the
+`completed_unprocessed` branch appear to reach `acknowledged` directly; it never
+could, and the diagram now says so. The prose below and
+[`adr/0004-foreman-mcp-and-binding.md`](adr/0004-foreman-mcp-and-binding.md)
+already required the handoff first, and the implementation refuses an ACK from
+any other state with an illegal-transition conflict and zero mutation. The
+consequence worth stating: if `foreman_resume` mints the claim but the result
+artifact or input detail cannot then be handed over — the read happens *after*
+the claim transaction and can fail — the obligation stays `claimed_by_foreman`,
+no `handoff_delivered` event exists, and ACK is refused. Work owed but
+undeliverable stays owed. No invariant is weakened; the ambiguity was in the
+picture, not in the rule.
 
 ### Claim/ACK fencing
 
 `foreman_resume` creates a bounded claim under the current binding generation.
 Claim expiry is internal coordination and may return the obligation to its prior
 attention state; it never closes work or releases a required result artifact.
+
+**Expiry, as implemented.** Expiry is itself an appended event, so it advances
+the obligation version exactly like the claim that preceded it. That would leave
+the accepted wake pointing at a snapshot two versions old and unable to hand the
+work over again, so the same transaction re-points that one wake at the restored
+obligation — fenced on the wake's recorded *source* fact still being the
+obligation's current one. The source fact moves only on accepted worker events,
+so the re-point survives a claim/expiry round trip that changed nothing else and
+refuses across a genuine worker event, which correctly leaves that wake stale.
+This is what keeps OBL-008's reclaim path alive. Restoring the prior attention
+state is not a stored field: it is folded from the obligation's own ledger slice.
+Nothing here closes work or releases an artifact — an obligation back in
+`completed_unprocessed` is open, so its artifact stays pinned.
+
+**Claim order inside ACK.** ACK checks the *obligation's* current claim before it
+rehydrates the presented claim row. An obligation that expired and was reclaimed
+is held by a different claim, and the honest answer for the displaced holder is
+`stale_claim`, not the `expired_claim` its own row also happens to say. Decided
+during Phase 1 implementation; it changes which typed conflict a caller sees, not
+whether the ACK is refused.
 
 Normal ACK requires:
 
@@ -83,7 +116,10 @@ claim_id
 terminal disposition
 ```
 
-A stale value causes a typed conflict and zero state mutation.
+A stale value causes a typed conflict and zero state mutation. The disposition
+set and which attention state each member may close are named in
+[`adr/0004-foreman-mcp-and-binding.md`](adr/0004-foreman-mcp-and-binding.md),
+"ACK semantics".
 
 ## 2. Managed Claude worker lifecycle
 
@@ -248,20 +284,49 @@ pending
   │ transaction before any browser I/O
   ▼
 claimed
-  ├── definite pre-submit error ─────────► failed
+  ├── definite pre-fence error ─────────► failed  (retryable)
   │                                          │
-  │            bounded safe retry may       │ create next attempt
+  │            bounded safe retry may        │ create next attempt
   │◄─────────────────────────────────────────┘
   │
   │ revalidate target/binding/app/composer
   ▼
 activation_armed
   ├── exact semantic submit evidence ───► accepted
-  ├── definite proof no submit ─────────► failed
-  └── uncertain/lost evidence ──────────► ambiguous
+  ├── synchronous refusal of the exact
+  │   activation, proving no submit ────► failed  (terminal, NOT retryable)
+  └── any other outcome, including
+      silence and lost evidence ────────► ambiguous
 ```
 
 `activation_armed` is committed immediately before exact Send activation.
+
+### Retry classification
+
+Which side of the Send ambiguity fence a failure is proven on decides whether the
+revision may attempt again — the fence, not the failure's severity.
+
+- **Before the fence**, a definite pre-submit error is `failed` and a bounded
+  retry may create the next attempt on the same revision, within the revision's
+  durable attempt budget. Target-not-found, stale target, wrong conversation,
+  app-not-selected, composer-not-ready and navigation-blocked all live here.
+- **After the fence**, only a synchronous refusal of the activation itself still
+  proves no submission: activation refused, or the transport rejecting the call
+  before it sent. These are terminal `failed` — a truthful outcome, not an
+  ambiguity — but they are **not retryable on that revision**. A composer or
+  target report arriving after arming no longer proves a submit did not race
+  ahead of it, so it is not admissible as proof of failure at all.
+- **Anything else after arming is `ambiguous`**: lost observation, an activation
+  that neither confirmed nor refused within its bound, evidence too weak to
+  identify the exact message, or a restart that orphaned the attempt.
+
+A claim attempted on a revision whose last attempt crossed the fence is a typed
+`retry_after_ambiguity_fence` conflict, whatever that attempt's terminal state.
+Progress past a post-fence failure is therefore a *new* delivery revision under
+§7, with its own `delivery_key` and random `delivery_id` — never a second attempt
+on the old one. This tightens the fence rather than relaxing it: the previous
+text distinguished only "definite proof no submit" from "uncertain", and left the
+retry consequence of the post-fence case to inference.
 
 ### Restart
 

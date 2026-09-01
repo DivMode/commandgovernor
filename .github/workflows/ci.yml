@@ -1,0 +1,86 @@
+name: CI
+
+# The five quality gates required from the first implementation commit
+# (docs/adr/0002-rust-daemon-and-sqlite.md and docs/testing.md):
+#   cargo fmt --check
+#   cargo clippy --workspace --all-targets --all-features -- -D warnings
+#   cargo test --workspace
+#   cargo audit
+#   cargo deny check
+#
+# The Rust toolchain is never named here: every job picks it up from
+# rust-toolchain.toml via rustup, so the pin has exactly one source of truth.
+# Third-party actions are pinned by full commit SHA per docs/threat-model.md,
+# installed tools by exact version, and every Cargo invocation that resolves
+# dependencies runs --locked so CI builds exactly what Cargo.lock records.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Show pinned toolchain
+        run: rustup show active-toolchain && cargo --version && rustfmt --version
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  build:
+    # macOS is the first-class target for Command Governor; Linux is kept green
+    # alongside it. Windows is deferred until the implementation supports it
+    # (docs/testing.md, "Rust quality and CI gates").
+    name: clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Show pinned toolchain
+        run: rustup show active-toolchain && cargo --version && cargo clippy --version
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.os }}
+      - name: cargo clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: cargo test
+        run: cargo test --locked --workspace --all-features
+
+  supply-chain:
+    # Vulnerability, licence, source, and banned-crate policy. Kept in its own
+    # job so a crates.io advisory failure is never confused with a code failure.
+    name: audit + deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+      - name: cargo audit
+        run: cargo audit --deny warnings
+      - name: cargo deny check
+        run: cargo deny --all-features --locked check

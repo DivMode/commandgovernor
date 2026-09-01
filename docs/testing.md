@@ -570,6 +570,33 @@ keep obligation open; never invent an answer.
 After every generated state-machine sequence, rebuild materialized projections
 from events. Semantic state must match.
 
+Coverage, and where it stops. Obligations, their per-transition version ledger,
+turn lifecycle, artifact retention, health conditions, the foreman binding
+ladder and the foreman claims are each rebuilt from the events and compared
+with their rows. Three comparisons are narrower than a full rebuild, and the
+residue is stated rather than left implicit:
+
+- **Browser deliveries** — the delivery's state and each attempt's state are
+  ledger-derived; the revision, attempt budget, binding generation, target
+  version and accepted message ref are read from the row being verified and
+  seed the fold, so they are inputs rather than compared outputs. The row's
+  `delivery_key` is re-derived from `(obligation, generation, revision)` on
+  every read, which is what protects them.
+- **Foreman bindings** — the generation ladder, each generation's capability
+  epoch and write capability, and which generation is active all rebuild.
+  The binding's target identity (canonical conversation, browser profile,
+  connector ABI, `foreman_binding_id`) is not carried in allowlisted safe
+  metadata, so nothing in the ledger can be compared with it.
+- **Foreman claims** — the lifecycle, the obligation, the binding generation
+  and the version the mint was fenced on all rebuild. `wake_delivery_id` does
+  not, deliberately: the correlation ID is a possession fence and is never
+  written into safe metadata. `expires_at_ms` does not either; it is a clock
+  reading, not a ledger fact.
+
+The mutation journal, external attempts and resource leases are outside DB-001
+by design: their own row is the durable record, and each loader re-folds that
+row's recorded history through the domain machine on every read.
+
 ### DB-002 — transition crash matrix
 
 Inject SQLite errors/crashes around each multi-row transition. Reopen yields prior
@@ -607,6 +634,17 @@ projection transition or obligation.
 Restore DB without artifact required by open obligation. Governor enters explicit
 health/repair state and does not pretend obligation processable/closed.
 
+The health state is scoped to the obligation, not to the process. Startup step 8
+raises a durable `result_artifact_missing` condition for each obligation whose
+pinned artifact will not verify, reports it in `status` and `doctor`, and the
+daemon goes on to serve the obligations that are unaffected. What stops the
+affected one being processed is not a flag but the artifact store: `read`
+verifies digest and length and returns no bytes on a mismatch, so the result
+cannot reach review either way. A hard startup refusal is reserved for damage
+to the state root itself — the instance lock, the schema epoch, a drifted
+migration, a projection that disagrees with its ledger, an unusable artifact
+root, filesystem ownership, and the control socket.
+
 ---
 
 ## Security / privacy tests
@@ -629,6 +667,38 @@ After lifecycle/browser/MCP/crash/restart scenarios, byte-scan:
 
 Expected zero matches. Only the explicit final-result candidate/result artifact may
 contain a sentinel deliberately placed in the **final assistant result**.
+
+How the corpus splits, and what each half actually proves:
+
+- **Ten of the fourteen are structurally unrepresentable.** They carry a space,
+  a quote, a newline, a brace or a `/`, so `SafeToken` refuses them and no
+  caller can present one to any store or daemon API. That is proven by
+  `governor-core` `fence::refuses_shapes_that_could_carry_forbidden_content`,
+  by `governor-testkit` `sentinels::the_charset_claim_matches_reality` (which
+  checks the corpus against the charset instead of trusting its own label, and
+  is re-asserted at the top of each SEC-001 acceptance test), and by
+  `governor-store-sqlite` `store_privacy`'s
+  `the_schema_has_no_column_for_forbidden_content` and
+  `safe_metadata_never_holds_a_provider_shaped_document`. The byte scan for
+  them is therefore a check that nothing else wrote them.
+- **Four are token-shaped and are injected.** A session cookie, an `sk-proj`
+  key, a `ghp_` token and an environment secret are, as strings, legitimate
+  opaque identities; no charset separates them. Each is pushed through the real
+  public request field that would accept it — `display_name`,
+  `worker_turn_ref`, `source_issue_ref`, and a wake's accepted message ref —
+  and run through a full lifecycle. The assertion is confinement, not absence:
+  each reached exactly its own column and nothing else, including nothing in
+  `safe_metadata_json` except the acceptance evidence's one allowlisted field,
+  and nothing at all outside the database. The mapping is
+  `governor-testkit` `sentinels::INJECTED`; the lifecycles are
+  `sec_acceptance::sec_001_injected_token_shaped_sentinels_reach_one_column_each`
+  and the daemon suite's SEC-001 test.
+
+A value the *run* generates cannot be in a static corpus, so the wake
+correlation ID is swept separately: the store must persist its hex in
+`browser_deliveries`, and it must appear on no output surface. The daemon suite
+asserts that over CLI stdout/stderr and `logs/`, including on the refusal path
+where a projection mismatch is reported.
 
 ### SEC-002 — bootstrap metadata minimization
 
@@ -686,31 +756,33 @@ unapproved licenses/sources according to project policy.
 Do not run browser wake support against a surface that cannot truthfully mutate
 Governor state.
 
-Research baseline on 2026-08-31:
+Evidence baseline on 2026-08-31:
 
-- consumer ChatGPT Pro custom MCP: documented read/fetch-only -> **not eligible**;
-- Business/Enterprise/Edu: full MCP actions currently documented as beta ->
-  candidate only;
-- Business currently offers GPT-5.6 Sol Pro, satisfying the desired Pro-model role
-  without consumer-Pro MCP limitations.
+- published plan documentation was initially interpreted as a categorical
+  read/fetch-only restriction for consumer Pro;
+- a live test on the exact target ChatGPT Pro account/app/surface successfully
+  performed state-changing Tandem MCP actions and verified a host-filesystem
+  mutation by read-back;
+- ADR 0006 therefore makes eligibility capability-based, not plan-name-based.
 
-For each candidate workspace/account:
+For each candidate bound account/app/surface:
 
-1. record plan/workspace/model/date;
-2. install/refresh exact V1 connector ABI;
-3. call read-only bootstrap;
-4. execute a harmless synthetic claim mutation;
-5. execute a harmless synthetic ACK-like close mutation;
-6. characterize confirmation behavior and whether the legitimate ChatGPT model can
-   complete it unattended under product policy;
-7. verify stale generation mutation rejected;
-8. remove synthetic record.
+1. record plan/workspace/model/date as diagnostic metadata;
+2. install/refresh the exact V1 connector ABI;
+3. prove the app/tools are mounted for the turn;
+4. execute a harmless synthetic state-changing mutation;
+5. read back and correlate the exact committed synthetic record;
+6. prove a stale binding-generation mutation is rejected;
+7. characterize confirmation/permission behavior without bypass;
+8. record `capability_epoch` and re-run after relevant app/account/product/ABI
+   changes or repeated action rejection;
+9. classify mount, write availability/rejection, confirmation, reachability, and
+   ABI failures separately.
 
-Pass: truthful writes function through supported product behavior and no required
-confirmation/boundary forces an invariant-weakening bypass. Fail: surface remains
-unsupported; no fallback to browser-inferred ACK.
-
----
+Pass: the exact surface can execute the required truthful mutation class under the
+current capability epoch and stale-generation fencing works. Fail: the surface is
+unsupported for that epoch, no browser-inferred/read-mislabeled fallback exists,
+and all real obligations remain open.
 
 ## Live Gate B — headed Chrome/CDP
 
@@ -783,6 +855,50 @@ Also require:
 - dependency/license policy;
 - no blind auto-merge for security-sensitive dependencies;
 - deterministic fake suites do not require live credentials.
+
+### Phase 1 implementation mapping
+
+Where the plan above currently lands in code. A mapping note, not a second plan:
+every ID keeps its definition here.
+
+- **Implemented in the deterministic suites** (`governor-testkit` acceptance
+  tests, plus the `governor-store-sqlite` and `governor-artifacts` crate suites,
+  which carry the single-layer halves): OBL-001 through OBL-010, ART-001 through
+  ART-005, DEL-001 through DEL-018, GPT-001 through GPT-009, DB-001 through
+  DB-008 within the limit noted below, and SEC-001 through SEC-010. Each suite
+  states its own per-ID coverage split.
+- **The pattern review's acceptance tests 1 through 12** — the "Acceptance tests
+  to add before adapters" section of the [durable orchestration pattern
+  review][pattern-review] — are implemented as a deterministic suite of their
+  own, covering intent-before-I/O, both crash windows, the four
+  mutation-identity cases, the two lease cases, receipt-versus-semantic ACK
+  separation, replay equivalence, and the journal's forbidden-data scan.
+- **Durable health conditions now have store operations**, so the attention half
+  of OBL-006 (conflicting terminal evidence), GPT-006 (`foreman_unreachable` on
+  budget exhaustion, and its resolution when a later wake lands) and DB-008
+  (`result_artifact_missing`, and its resolution on a successful verify) is
+  proven durably rather than in memory. DEL-015's `ambiguous -> accepted`
+  promotion likewise has a real store operation, fenced on the exact
+  provider-native message identity and performing no Send.
+- **ART-006 through ART-011, and every `WRK-` and `INP-` test**, need the
+  worker-host, managed-run staging, the hook inbox, or a live Claude session.
+  They stay Phase 2 and Live Gate C. Windows ACL policy under ART-005 remains a
+  separate platform suite.
+- **GPT-010 through GPT-012** are behind Live Gate A: Phase 1 builds no MCP
+  client and no connector, so there is no ABI to mismatch, no write capability
+  to lose, and no product confirmation to refuse to bypass. The one half
+  representable today — a lost write capability never relaxing the ACK
+  requirement — is proven in the pure binding machine.
+- **DB-005 is fully implemented.** The daemon epoch fence — a
+  previous-lifetime holder cannot mutate current ownership — is proven in the
+  store suites, and the process half is proven in
+  `crates/command-governor/tests/daemon_acceptance.rs` against real spawned
+  binaries: a kernel-held advisory lock on the state root elects exactly one
+  authority before the database is opened, the second process fails closed, and
+  reclaim requires proof the holder is gone — never age. SQLite writer
+  serialization is not the election mechanism, exactly as this plan requires.
+
+[pattern-review]: research/2026-08-31-durable-orchestration-pattern-review.md
 
 ## Architecture-to-implementation exit criteria
 

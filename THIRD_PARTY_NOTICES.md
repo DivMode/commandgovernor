@@ -1,11 +1,11 @@
 # Third-Party Notices and Provenance
 
 Command Governor is licensed under MIT. This notice records architecture
-inspiration/research separately from future compiled dependencies.
+inspiration/research separately from the compiled dependency graph.
 
-At the 2026-08-31 architecture phase, the repository contains no vendored or
-copied third-party implementation source code. The project is independently
-implementing the documented semantics described below in Rust.
+The repository contains no vendored or copied third-party implementation source
+code. The project is independently implementing the documented semantics
+described below in Rust.
 
 ## Architecture / protocol references
 
@@ -62,6 +62,50 @@ revisions, and changes here before distribution.
 
 No CCCC author or maintainer is implied to endorse Command Governor.
 
+
+## Durable-orchestration implementation references — no code copied
+
+### Salvor
+
+- Project: `joseym/salvor`
+- License: Apache-2.0
+- Revision reviewed: `dd9eb49f6bf854dc1c96b1b1ad7accbc509807b0`
+- URL: <https://github.com/joseym/salvor>
+
+Concepts studied include pure event replay, explicit external-effect classes,
+write-ahead tool intent, dangling-write reconciliation, idempotency-key handling,
+and deterministic kill/failpoint tests. Command Governor will independently
+implement the needed semantics and will not inherit Salvor's broader durable
+provider/tool payload model.
+
+### Prime Agent
+
+- Project: `PrimeIntellect-ai/prime-agent`
+- License: MIT
+- Revision reviewed: `9f5edc192cfe3d4737205a2f551d2b6b6e34fe09`
+- URL: <https://github.com/PrimeIntellect-ai/prime-agent>
+
+Concepts studied include mutating-command identity, write-ahead command journaling,
+completed-result replay, uncertain-result no-replay, generation-aware cursors,
+supervisor/worker recovery, and process-safe session leases fenced against PID
+reuse.
+
+### Agent Orchestrator
+
+- Project: `ralphkrauss/agent-orchestrator`
+- License: MIT
+- Revision reviewed: `8b2f3b967e90877c3abac07061dbb2b1e67d2035`
+- URL: <https://github.com/ralphkrauss/agent-orchestrator>
+
+Concepts studied include daemon-owned orchestration truth, short-lived structured
+orchestrator/reviewer turns, durable notification reconciliation, explicit
+notification ACK, request-ID idempotency, and thin MCP/IPC/CLI transports.
+
+No author or maintainer of these projects is implied to endorse Command Governor.
+No implementation source from them is currently vendored/copied. Any future source
+incorporation requires file-level provenance and the applicable license/NOTICE
+obligations before distribution.
+
 ## Additional research references — no code copied
 
 These projects were studied to understand current ChatGPT Web browser/private-API
@@ -88,16 +132,35 @@ Rust browser alternatives examined but not copied/depended on yet:
 See [`docs/research/2026-08-31-technology-review.md`](docs/research/2026-08-31-technology-review.md)
 for the architecture evidence derived from these sources.
 
-## Planned external dependencies
+## External dependencies
 
-No Rust dependency has been added yet. The current proposal includes crates such
-as Tokio, serde, thiserror, tracing, clap, `rmcp`, `rusqlite`, uuid, and a deliberate
-time crate, plus a Rust CDP library. The official Rust MCP SDK was re-verified at
-main `ad9832ec212baf526e1a69d73ee04cd8305ae331`, workspace version `3.1.4`;
-that is research context, not a commitment to depend on an unreleased main SHA.
+Rust dependencies now exist. The exact resolved set and its versions are
+recorded in `Cargo.lock`, which is committed, and every one of them is a
+published crates.io release: none is vendored or copied into this repository.
 
-Exact dependency versions/licenses will be re-verified and recorded by
-`Cargo.lock`/license policy at the first scaffold commit.
+They are vetted by this repository's `cargo-deny` policy in `deny.toml`, which
+CI runs as `cargo deny --all-features check`:
+
+- **Licenses** must appear on an explicit permissive allowlist (MIT, MIT-0,
+  Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC,
+  Zlib, CC0-1.0, Unicode-3.0, Unlicense). Anything unlisted fails, and no
+  per-crate exception is recorded.
+- **Sources** are restricted to crates.io. Unknown registries and unknown git
+  sources are denied and the git allowlist is empty, so a dependency cannot
+  arrive by a path that bypasses the license and advisory checks.
+- **Known-malicious versions** from the August 2026 crates.io compromise are
+  banned by exact version — `arrayref@0.3.10`, `internment@0.8.7`, and
+  `append-only-vec@0.1.9` — while the legitimate crate names remain usable.
+- **Advisories** are enforced against the RUSTSEC database with an empty
+  `ignore` list, so silencing one is a reviewed change to `deny.toml`. Yanked
+  crates are denied, and unmaintained advisories are considered for every crate
+  in the graph rather than direct dependencies only. Wildcard version
+  requirements are denied except for path dependencies.
+
+The official Rust MCP SDK was re-verified at main
+`ad9832ec212baf526e1a69d73ee04cd8305ae331`, workspace version `3.1.4`; that is
+research context, not a commitment to depend on an unreleased main SHA, and it
+is not currently a dependency.
 
 A dependency manifest and generated license report do not replace this provenance
 record when source/patterns are materially copied or adapted.

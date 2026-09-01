@@ -4,10 +4,15 @@ Command Governor is a local-first durable control plane for reliable AI/software
 
 [commandgovernor.com](https://commandgovernor.com)
 
-> **Status:** reviewed architecture and safety contracts. There is no executable
-> implementation yet. The next allowed step is a small pure-Rust kernel/store/
-> testkit scaffold after the architecture PR is accepted; live service adapters
-> remain gated.
+> **Status:** reviewed architecture and safety contracts, plus the Phase 1
+> pure-Rust kernel/store/testkit scaffold landed on this branch: the pure kernel
+> (`governor-core`), the single-writer SQLite store (`governor-store-sqlite`),
+> the private immutable result-artifact store (`governor-artifacts`), the
+> deterministic testkit and its acceptance suites (`governor-testkit`), and a
+> daemon skeleton with a CLI (`command-governor daemon` / `status` /
+> `obligations` / `doctor`). No live service adapter is wired yet: ChatGPT
+> browser transport, the foreman MCP surface, GitHub, and the Claude/Herdr
+> worker adapters remain gated.
 
 ## What it solves
 
@@ -40,17 +45,28 @@ V1 is **Rust daemon + CLI**. There is no application GUI and no phone/email/Slac
 Telegram/ntfy completion-notification subsystem. The system wakes the bound
 ChatGPT foreman itself.
 
-### Current ChatGPT plan constraint
+### Current ChatGPT capability gate
 
-As of the 2026-08-31 architecture review, OpenAI documents full custom MCP
-modify/write support for **ChatGPT Business, Enterprise, and Edu** beta surfaces;
-consumer **ChatGPT Pro custom MCP is read/fetch-only**. Because Command Governor's
-`foreman_resume`, `foreman_ack`, and `foreman_answer_input` are real mutations,
-consumer Pro is not currently an end-to-end V1 foreman target.
+Command Governor requires real state-changing MCP operations for claim, ACK, and
+input answers. Published OpenAI plan documentation remains useful compatibility
+evidence, but ADR 0006 records stronger evidence from the exact target surface: on
+2026-08-31 the target ChatGPT Pro account/app/surface successfully performed
+state-changing Tandem MCP actions, including opening a worker session, sending a
+mutation that changed a host filesystem file, and reading the result back as
+`MCP WRITE VERIFIED`.
 
-Business currently offers the **Pro model option powered by GPT-5.6 Sol Pro**, so
-the intended high-capability Pro-model foreman can still be tested on a
-write-capable workspace surface without weakening the ACK invariant.
+Support is therefore **capability-based, not plan-name-based**.
+`command-governor chatgpt bind` must run a harmless synthetic mutation/read-back
+probe on the exact bound account/app/surface, characterize confirmation behavior,
+and record a fenced `capability_epoch`. A plan label such as Pro, Business,
+Enterprise, or Edu is diagnostic metadata only. Capability is revalidated after
+connector/app refresh, account/workspace changes, relevant ChatGPT product changes,
+MCP ABI changes, or repeated action rejection.
+
+The invariant is unchanged: `foreman_resume`, `foreman_ack`, and
+`foreman_answer_input` are truthful mutations. Browser delivery or assistant-turn
+settlement never substitutes for ACK, and a failed capability probe leaves
+obligations open rather than silently downgrading semantics.
 
 ## Intended V1 architecture
 
@@ -149,10 +165,13 @@ closure operation; browser/assistant state cannot substitute for it.
 Three live gates remain deliberately unresolved before end-to-end support can be
 claimed:
 
-1. **Gate A — ChatGPT MCP mutation capability.** A candidate Business/
-   Enterprise/Edu workspace must prove state-changing Command Governor actions and
-   confirmation behavior on the actual account/surface. Consumer Pro is currently
-   excluded by published product capability.
+1. **Gate A — ChatGPT MCP mutation capability.** The exact bound
+   account/app/surface must pass the ADR-0006 harmless state-changing
+   mutation/read-back probe, stale-generation rejection, tool-mount
+   characterization, and confirmation behavior. Plan name alone neither accepts
+   nor excludes a surface. The target Pro surface demonstrated state-changing
+   Tandem MCP on 2026-08-31, but that proof is capability-epoch evidence rather
+   than a permanent entitlement guarantee.
 2. **Gate B — authenticated headed Chrome/CDP.** Exact binding, per-message app
    selection, 10/10 unique wakes, strong accepted evidence, crash-at-Send
    ambiguity/no replay, restart, random-correlation fencing, and generation
@@ -164,8 +183,9 @@ claimed:
    non-interactive `PermissionRequest`, daemon-offline final-result recovery,
    stale-Herdr reconciliation, and forbidden-data non-persistence.
 
-If a platform gate fails, the adapter/surface is marked unsupported. The durable
-obligation, at-most-once, and explicit-ACK invariants are not weakened.
+If a platform gate fails, the adapter/surface is marked unsupported for that
+capability epoch. The durable obligation, at-most-once, and explicit-ACK invariants
+are not weakened.
 
 ## Local security boundary
 
@@ -183,6 +203,7 @@ Start here:
 - [V1 architecture](docs/architecture.md)
 - [Independent architecture review](docs/reviews/2026-08-31-architecture-review.md)
 - [Technology research snapshot (2026-08-31)](docs/research/2026-08-31-technology-review.md)
+- [Durable-orchestration implementation pattern review](docs/research/2026-08-31-durable-orchestration-pattern-review.md)
 - [Data model](docs/data-model.md)
 - [State machines](docs/state-machines.md)
 - [ChatGPT browser transport/live spike](docs/browser-transport.md)
@@ -199,6 +220,7 @@ ADRs:
 - [0003 — ChatGPT browser-backed hybrid](docs/adr/0003-chatgpt-browser-hybrid.md)
 - [0004 — foreman MCP + exact binding/ACK](docs/adr/0004-foreman-mcp-and-binding.md)
 - [0005 — structured Claude lifecycle + result durability](docs/adr/0005-worker-lifecycle-and-result-durability.md)
+- [0006 — empirical ChatGPT MCP capability gate](docs/adr/0006-empirical-chatgpt-mcp-capability-gate.md)
 
 ## Security and unofficial ChatGPT Web support
 
@@ -216,10 +238,15 @@ Command Governor is an independent implementation. Architecture research include
 - Tandem — MIT
 - codex-chatgpt-web — MIT
 - CCCC — Apache-2.0
+- Salvor — Apache-2.0
+- Prime Agent — MIT
+- Agent Orchestrator — MIT
 
-Exact reviewed revisions and attribution policy are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No third-party implementation
-source is currently vendored/copied into this repository.
+Exact reviewed revisions, the ADOPT/ADAPT/REJECT pattern review, and attribution
+policy are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
+[the durable-orchestration pattern review](docs/research/2026-08-31-durable-orchestration-pattern-review.md).
+No third-party implementation source is currently vendored/copied into this
+repository.
 
 ## Contributing
 

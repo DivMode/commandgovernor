@@ -26,28 +26,32 @@ implementation was introduced.
 
 ## Findings
 
-### R1 — BLOCKER — consumer ChatGPT Pro cannot perform the proposed MCP ACK loop
+### R1 — SUPERSEDED EMPIRICAL ASSUMPTION — plan-name gating was too strong
 
-**Original defect:** architecture language treated write-capable MCP as a generic
-preflight without stating that the intended consumer ChatGPT Pro surface is
-currently documented as read/fetch-only.
+**Original finding:** the review treated published OpenAI plan documentation as a
+categorical support boundary and therefore excluded consumer Pro from the
+state-changing ACK loop.
 
-**Evidence:** current OpenAI developer-mode documentation says full MCP support,
-including modify/write actions, is rolling out to Business, Enterprise, and Edu;
-consumer Pro custom MCP is read/fetch-only. Current Business model documentation
-shows the Pro model option is powered by GPT-5.6 Sol Pro.
+**Later evidence on the same date:** ADR 0006 records a live test on the exact
+target ChatGPT Pro account/app/surface. ChatGPT successfully used Tandem to open a
+disposable worker session, send a state-changing instruction that created/overwrote
+a host filesystem file, read the file back, and receive `MCP WRITE VERIFIED`.
+There was no read-only, plan, confirmation, or permission rejection on the
+state-changing operations.
 
-**Risk:** shipping consumer Pro would force one of three invalid behaviors: browser
-settlement as fake ACK, a mutation mislabeled read-only, or an obligation that can
-never correctly close.
+**Corrected decision:** plan labels are diagnostic compatibility metadata only.
+Gate A is capability-based: the exact bound surface must pass a harmless synthetic
+mutation/read-back, stale-generation rejection, and confirmation-behavior test for
+a fenced `capability_epoch`. Published documentation remains dated evidence but
+does not override stronger direct evidence from the surface Command Governor will
+actually use.
 
-**Fix:** consumer Pro is now explicitly unsupported for end-to-end V1 at this
-snapshot. Business/Enterprise/Edu are candidates subject to Gate A mutation and
-confirmation behavior. Business can still use the Pro model. The explicit ACK
-invariant is unchanged.
+**Invariant preserved:** this correction does not turn reads into writes or weaken
+ACK. If a current capability probe fails, obligations remain open and the surface
+is unsupported for that epoch.
 
-**Disposition:** fixed in architecture, ADR 0004, MCP contract, browser transport,
-threat model, testing, roadmap, README, SECURITY.
+**Disposition:** superseded by accepted ADR 0006 and mechanically reconciled across
+the architecture documentation before implementation.
 
 ### R2 — BLOCKER — Claude `PermissionRequest` semantics were stale
 
@@ -207,7 +211,7 @@ The reviewed documents now agree on these invariants:
 13. Browser accepted != ChatGPT physical settlement != explicit foreman ACK.
 14. Old binding generation/claim/source/obligation version cannot close current
     work.
-15. Consumer Pro's current MCP limitation does not weaken ACK semantics.
+15. ChatGPT support is capability-based; plan labels and capability drift never weaken ACK semantics.
 16. Same-user owner-only files are not described as hostile-worker containment.
 17. No GUI or human completion notification is required for correctness.
 
@@ -237,9 +241,12 @@ correctness does not require credentials.
 
 ### Gate A — write-capable ChatGPT MCP surface
 
-A candidate Business/Enterprise/Edu workspace must prove state-changing MCP actions
-and confirmation behavior on the actual account. Consumer Pro is currently
-excluded by published capability.
+The exact bound ChatGPT account/app/surface must prove state-changing MCP actions,
+read-back correlation, stale-generation rejection, and usable confirmation
+behavior. The target Pro surface demonstrated the required mutation class through
+Tandem on 2026-08-31, but Command Governor still requires its own synthetic
+preflight and current `capability_epoch` before declaring that binding supported.
+Plan name alone neither accepts nor excludes a surface.
 
 ### Gate B — authenticated headed Chrome/CDP
 
@@ -288,6 +295,6 @@ A/B/C, but failure must change the support matrix—not the central invariant.
 **Architecture approved for a small Rust kernel/store/testkit implementation once
 the architecture PR is accepted.**
 
-The review does not approve an end-to-end consumer ChatGPT Pro V1, does not approve
-headless ChatGPT automation, and does not approve Claude lifecycle assumptions
-without Gate C. Those are explicit empirical gates, not hidden follow-up debt.
+The review does not approve any ChatGPT surface without a current Gate A
+capability epoch, does not approve headless ChatGPT automation, and does not
+approve Claude lifecycle assumptions without Gate C. Those are explicit empirical gates, not hidden follow-up debt.

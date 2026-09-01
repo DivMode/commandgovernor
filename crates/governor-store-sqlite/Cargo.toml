@@ -1,0 +1,25 @@
+[package]
+name = "governor-store-sqlite"
+version = "0.0.0"
+description = "SQLite persistence authority for Command Governor."
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+governor-core.workspace = true
+rusqlite.workspace = true
+# Migration checksums and the deterministic wake-payload digest. Pure
+# computation, same crate `governor-core` already uses for the delivery key.
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
