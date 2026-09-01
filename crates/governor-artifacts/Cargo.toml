@@ -1,0 +1,42 @@
+[package]
+name = "governor-artifacts"
+version = "0.0.0"
+description = "Private immutable result-artifact store and crash-safe publication for Command Governor."
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+governor-core.workspace = true
+# The publication proof this crate mints is the store's `DurableArtifact`, and
+# minting it here — after the directory sync — is what makes "file before
+# database" a property of the types rather than of a caller's discipline. Only
+# that one plain data type is used; no store operation is called from here.
+governor-store-sqlite.workspace = true
+# Constants only: `O_NOFOLLOW` and `O_DIRECTORY` for `OpenOptionsExt`. No
+# `libc` *function* is called, so the crate stays inside the workspace-wide
+# `unsafe_code = "deny"` policy. `libc` is already a non-dev transitive
+# dependency through `libsqlite3-sys`, so this adds nothing to the shipped
+# dependency graph.
+libc = "0.2.189"
+# Digest computed while the bytes are written and re-computed on every read.
+# Pure computation, same crate the domain and store crates already use.
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Real directories on a real filesystem: modes, symlinks, `fsync` and atomic
+# name publication cannot be expressed against an in-memory fake.
+tempfile.workspace = true
+# The artifact suites drive the *real* SQLite publication transaction, and read
+# `result_artifacts` / `obligations` back through a second read-only connection
+# to prove what did and did not commit.
+rusqlite.workspace = true
+# Deterministic identities for the store ports the suites install.
+uuid.workspace = true
+
+[lints]
+workspace = true

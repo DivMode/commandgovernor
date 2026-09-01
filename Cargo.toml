@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/governor-core",
     "crates/governor-store-sqlite",
+    "crates/governor-artifacts",
     "crates/governor-testkit",
     "crates/governor-daemon",
     "crates/command-governor",
@@ -53,6 +54,7 @@ tempfile = "3.24.0"
 # a single source of truth. Member crates opt in with `foo.workspace = true`.
 governor-core = { path = "crates/governor-core" }
 governor-store-sqlite = { path = "crates/governor-store-sqlite" }
+governor-artifacts = { path = "crates/governor-artifacts" }
 governor-testkit = { path = "crates/governor-testkit" }
 governor-daemon = { path = "crates/governor-daemon" }
 

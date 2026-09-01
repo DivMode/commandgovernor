@@ -158,6 +158,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "governor-artifacts"
+version = "0.0.0"
+dependencies = [
+ "governor-core",
+ "governor-store-sqlite",
+ "libc",
+ "rusqlite",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "governor-core"
 version = "0.0.0"
 dependencies = [
