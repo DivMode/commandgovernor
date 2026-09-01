@@ -634,6 +634,17 @@ projection transition or obligation.
 Restore DB without artifact required by open obligation. Governor enters explicit
 health/repair state and does not pretend obligation processable/closed.
 
+The health state is scoped to the obligation, not to the process. Startup step 8
+raises a durable `result_artifact_missing` condition for each obligation whose
+pinned artifact will not verify, reports it in `status` and `doctor`, and the
+daemon goes on to serve the obligations that are unaffected. What stops the
+affected one being processed is not a flag but the artifact store: `read`
+verifies digest and length and returns no bytes on a mismatch, so the result
+cannot reach review either way. A hard startup refusal is reserved for damage
+to the state root itself — the instance lock, the schema epoch, a drifted
+migration, a projection that disagrees with its ledger, an unusable artifact
+root, filesystem ownership, and the control socket.
+
 ---
 
 ## Security / privacy tests

@@ -63,17 +63,6 @@ pub enum DaemonError {
     #[error("the result-artifact root refused: {0}")]
     Artifacts(#[from] governor_artifacts::ArtifactError),
 
-    /// Artifacts that open obligations depend on could not be verified.
-    ///
-    /// `docs/testing.md` DB-008 and `docs/architecture.md` startup step 8. The
-    /// `result_artifact_missing` conditions are already durable when this is
-    /// returned, so `doctor` can explain the refusal after the process exits.
-    #[error("{count} open obligation(s) pin an artifact that could not be verified")]
-    ArtifactsUnverified {
-        /// How many open obligations failed verification.
-        count: usize,
-    },
-
     /// The owner-local socket could not be prepared.
     #[error("the owner-local control socket could not be prepared: {0}")]
     Ipc(#[from] crate::ipc::IpcError),
@@ -159,7 +148,6 @@ impl DaemonError {
             Self::Filesystem { .. } => "state_root_invalid",
             Self::Store(_) => "store_refused",
             Self::Artifacts(_) => "artifact_root_refused",
-            Self::ArtifactsUnverified { .. } => "result_artifact_missing",
             Self::Ipc(_) => "ipc_unavailable",
             Self::Logging => "logging_unavailable",
             Self::SignalHandler => "signal_handler_unavailable",

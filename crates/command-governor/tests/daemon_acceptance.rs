@@ -8,7 +8,7 @@
 //! | [`db_005_the_refusal_is_not_sqlite_serialization`] | DB-005 | the second process refuses *before* it has opened the database at all |
 //! | [`a_stale_lock_is_reclaimed_after_the_holder_is_killed`] | DB-005 | the kernel-held lock is released by process death, and the next start says it reclaimed |
 //! | [`a_clean_stop_releases_the_lock_and_removes_the_socket`] | — | `SIGTERM` shuts down cleanly |
-//! | [`startup_refuses_when_a_pinned_artifact_is_missing`] | DB-008 | a failing step in the startup order refuses readiness and leaves the durable condition behind |
+//! | [`an_unverifiable_artifact_scopes_its_obligation_and_not_the_daemon`] | DB-008 | one unprovable result raises a durable condition and takes *that* obligation out of service, not the daemon |
 //! | [`sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes`] | SEC-001 | the sweep, extended to the two surfaces Phase 1 has just created, and to the correlation ID the run itself generates |
 //! | [`a_projection_mismatch_is_reported_without_the_correlation_id`] | SEC-001, invariant 17 | the refusal names the delivery *key*, never the possession fence |
 //! | [`sec_007_doctor_states_the_trust_model_without_overclaiming`] | SEC-007 | the trust model is reported as data, and claims no same-user containment |
@@ -349,55 +349,85 @@ fn a_clean_stop_releases_the_lock_and_removes_the_socket() {
 // --- Startup order -----------------------------------------------------------
 
 #[test]
-fn startup_refuses_when_a_pinned_artifact_is_missing() {
+fn an_unverifiable_artifact_scopes_its_obligation_and_not_the_daemon() {
     let harness = seeded_root();
     let root = harness.state_root();
 
-    // Remove the bytes an open obligation pins. Everything else about the state
-    // root is intact, so the only thing that can refuse is step 8.
+    // Remove the bytes one open obligation pins. Everything else about the
+    // state root is intact — two other obligations pin nothing at all, and
+    // refusing to serve them would be a self-inflicted outage over damage that
+    // belongs to a third.
     let objects = harness.artifact_root().join("objects");
     let published: Vec<PathBuf> = std::fs::read_dir(&objects)
         .expect("the objects directory")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect();
-    assert!(!published.is_empty(), "the seed must have published one");
-    for path in &published {
-        std::fs::remove_file(path).expect("removing the pinned artifact");
-    }
+    assert_eq!(published.len(), 1, "the seed publishes exactly one");
+    std::fs::remove_file(&published[0]).expect("removing the pinned artifact");
 
-    let refused = DaemonProcess::start_expecting_refusal(root);
-    assert_eq!(
-        code_of(&refused),
-        EXIT_REFUSED,
-        "readiness must be refused: {}",
-        combined(&refused)
-    );
-    let text = combined(&refused);
+    let daemon = DaemonProcess::start(root);
+
+    // The daemon serves, and says exactly what it could not prove.
+    let status = stdout_of(&run(root, &["status"]));
+    assert!(has_line(&status, "daemon.state=running"), "{status}");
+    assert!(has_line(&status, "artifacts.verified=0"), "{status}");
+    assert!(has_line(&status, "artifacts.unverified=1"), "{status}");
     assert!(
-        has_line(&text, "error class=result_artifact_missing"),
-        "the refusal must be classified: {text}"
-    );
-    assert!(
-        !text.contains("ipc.socket=bound"),
-        "a refused daemon must never have bound its socket: {text}"
+        has_line(&status, "health.kind.result_artifact_missing=1"),
+        "the condition must be visible in status: {status}"
     );
 
-    // The health condition is durable: it survives the refusal, which is what
-    // makes the reason discoverable after the process is gone.
+    // The two unrelated obligations are reachable, and so is the affected one:
+    // it stays open, which is what keeps it in view rather than out of service.
+    assert!(has_line(&status, "obligations.open=3"), "{status}");
+    let obligations = stdout_of(&run(root, &["obligations"]));
+    assert_eq!(obligations.lines().count(), 3, "{obligations}");
+    assert!(has_field(&obligations, "state=failed"), "{obligations}");
+    assert!(has_field(&obligations, "state=created"), "{obligations}");
+    assert!(
+        has_field(&obligations, "state=completed_unprocessed"),
+        "{obligations}"
+    );
+
+    // And `doctor` reports it too, against the *running* authority.
     let doctor = run(root, &["doctor"]);
-    assert_eq!(code_of(&doctor), EXIT_UNHEALTHY);
+    assert_eq!(code_of(&doctor), EXIT_UNHEALTHY, "{}", combined(&doctor));
+    let text = stdout_of(&doctor);
+    assert!(has_line(&text, "doctor.daemon_running=true"), "{text}");
     assert!(
         has_field(
-            &stdout_of(&doctor),
+            &text,
             "check name=pinned_artifacts result=result_artifact_missing"
         ),
-        "{}",
-        stdout_of(&doctor)
+        "{text}"
     );
-    assert!(has_field(
-        &stdout_of(&doctor),
-        "health.kind.result_artifact_missing="
-    ));
+    assert!(has_field(&text, "live.artifacts.unverified=1"), "{text}");
+    assert!(
+        has_field(&text, "live.health.kind.result_artifact_missing=1"),
+        "the running daemon must report the condition it raised: {text}"
+    );
+
+    daemon.stop();
+
+    // The condition is durable, so the reason survives the process.
+    let offline = stdout_of(&run(root, &["doctor"]));
+    assert!(has_field(&offline, "health.kind.result_artifact_missing="));
+
+    // What actually keeps the affected obligation unprocessable is not a flag:
+    // the artifact store verifies on read and hands back no bytes.
+    let store = harness.open().expect("reopening the state root");
+    let artifacts = harness.open_artifacts();
+    let committed = store
+        .list_committed_artifacts()
+        .expect("the committed artifact rows");
+    assert_eq!(committed.len(), 1);
+    let error = artifacts
+        .read(&committed[0])
+        .expect_err("a result that cannot be proven must never reach review");
+    assert!(
+        matches!(error, governor_artifacts::ArtifactError::Missing { .. }),
+        "{error:?}"
+    );
 }
 
 // --- CLI smoke ---------------------------------------------------------------

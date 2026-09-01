@@ -33,12 +33,28 @@
 //!
 //! # Missing evidence never becomes success
 //!
-//! Every step returns a typed refusal rather than a warning. An artifact an
-//! open obligation pins that cannot be verified raises the durable
-//! `result_artifact_missing` condition **and then** refuses readiness: the
-//! condition outlives the process so `doctor` can explain the refusal, and the
-//! daemon does not serve while it cannot prove the results it would hand a
-//! foreman for review (`docs/testing.md` DB-008).
+//! Every step returns a typed refusal rather than a warning, and a refusal
+//! means the daemon did not become ready and scheduled nothing.
+//!
+//! # What is scoped, and what is fatal
+//!
+//! A hard startup refusal is reserved for damage the *state root* has, where
+//! nothing the daemon could serve would be trustworthy: the instance lock, the
+//! schema epoch, a drifted migration, a projection that disagrees with its
+//! ledger, an unusable artifact root, filesystem ownership, and the control
+//! socket.
+//!
+//! An artifact an open obligation pins that cannot be verified is not that. It
+//! is damage to *one obligation*, and refusing the whole daemon over it takes
+//! every unrelated obligation down with it. So step 8 scopes the failure to
+//! where it happened: [`verify_pinned_artifacts`] raises the durable
+//! `result_artifact_missing` condition for that obligation, records a safe
+//! diagnostic, and the daemon goes on to serve. `status` and `doctor` both
+//! report the condition, and the affected obligation stays open and
+//! unprocessable — not by a flag anyone has to remember to check, but because
+//! `ArtifactStore::read` verifies the digest and length on every read and hands
+//! back **no bytes at all** on a mismatch (`docs/testing.md` ART-003, DB-008).
+//! Nothing can hand that result to a foreman for review.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -106,6 +122,13 @@ pub struct ReadyReport {
     pub recovery: StartupRecovery,
     /// Artifacts pinned by an open obligation that verified.
     pub artifacts_verified: usize,
+    /// Artifacts pinned by an open obligation that did **not** verify.
+    ///
+    /// Each one left an open `result_artifact_missing` condition naming its
+    /// obligation. The daemon still serves: the damage is scoped to those
+    /// obligations, which cannot deliver a result because the artifact store
+    /// refuses to return bytes that fail their digest.
+    pub artifacts_unverified: usize,
     /// Unreferenced artifact files moved aside by the orphan sweep.
     pub artifacts_quarantined: usize,
 }
@@ -212,8 +235,19 @@ impl Daemon {
         .start()?;
 
         // Step 8. Every artifact an open obligation pins must actually be
-        // there, and be the bytes the ledger recorded.
-        let verified = verify_pinned_artifacts(&store, &artifacts, clock.now(), &log)?;
+        // there, and be the bytes the ledger recorded. One that is not scopes
+        // its own obligation out of service; it does not stop the daemon.
+        let pinned = verify_pinned_artifacts(&store, &artifacts, clock.now(), &log)?;
+        if pinned.unverified > 0 {
+            log.record(
+                clock.now(),
+                Level::Warn,
+                "artifacts.serving_with_unverified_pins",
+                &Fields::new()
+                    .count("unverified", pinned.unverified)
+                    .count("verified", pinned.verified),
+            );
+        }
 
         // Unreferenced files are set aside, never deleted: a publication that
         // crashed and one that is merely slow look identical.
@@ -259,7 +293,8 @@ impl Daemon {
             migrations_applied: startup.migrations.applied.len(),
             projections: startup.projections,
             recovery: startup.recovery,
-            artifacts_verified: verified,
+            artifacts_verified: pinned.verified,
+            artifacts_unverified: pinned.unverified,
             artifacts_quarantined: scan.quarantined.len(),
         };
 
@@ -269,6 +304,7 @@ impl Daemon {
             "daemon.ready",
             &Fields::new()
                 .count("artifacts_verified", ready.artifacts_verified)
+                .count("artifacts_unverified", ready.artifacts_unverified)
                 .count("artifacts_quarantined", ready.artifacts_quarantined),
         );
 
@@ -387,6 +423,7 @@ impl Daemon {
                 self.ready.recovery.ambiguous_attempts
             ),
             format!("artifacts.verified={}", self.ready.artifacts_verified),
+            format!("artifacts.unverified={}", self.ready.artifacts_unverified),
             format!("artifacts.quarantined={}", self.ready.artifacts_quarantined),
         ];
 
@@ -402,7 +439,7 @@ impl Daemon {
     }
 
     fn daemon_doctor_lines(&self) -> Vec<String> {
-        vec![
+        let mut lines = vec![
             format!("daemon.slot={}", self.ready.incarnation.slot()),
             format!("daemon.epoch={}", self.ready.daemon_epoch.get()),
             format!(
@@ -419,7 +456,16 @@ impl Daemon {
                     .map_or(0, |seq| seq.get())
             ),
             format!("artifacts.verified={}", self.ready.artifacts_verified),
-        ]
+            format!("artifacts.unverified={}", self.ready.artifacts_unverified),
+        ];
+        // Attention the *running* authority holds, next to the offline
+        // diagnosis the same command already renders from the database. An
+        // obligation whose pinned artifact did not verify is visible in both.
+        match self.store.open_health_conditions() {
+            Ok(conditions) => lines.extend(report::health_lines(&conditions)),
+            Err(error) => lines.push(format!("error class={}", store_error_class(&error))),
+        }
+        lines
     }
 }
 
@@ -464,21 +510,34 @@ fn harden_database_files(root: &StateRoot, owner_uid: u32) -> Result<(), DaemonE
     Ok(())
 }
 
+/// What step 8 could and could not prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PinnedArtifacts {
+    verified: usize,
+    unverified: usize,
+}
+
 /// Step 8: prove the bytes behind every artifact an open obligation pins.
 ///
 /// A verified artifact resolves any open `result_artifact_missing` condition
-/// for its obligation; an unverifiable one raises it. Both are durable, and
-/// both happen before the refusal, so the reason survives the process.
+/// for its obligation; an unverifiable one raises it. Both are durable, so the
+/// finding survives the process whether or not anyone is watching.
+///
+/// A failure here is **scoped to its obligation** and does not stop the daemon:
+/// see the module docs. The obligation it names cannot deliver its result
+/// regardless, because the artifact store refuses to return bytes that fail
+/// their recorded digest and length.
 ///
 /// # Errors
 ///
-/// [`DaemonError::ArtifactsUnverified`] when any pinned artifact failed.
+/// A [`DaemonError::Store`] when the durable condition cannot be recorded —
+/// that *is* structural, because an unrecorded finding is an invisible one.
 fn verify_pinned_artifacts(
     store: &Store,
     artifacts: &ArtifactStore,
     now: Timestamp,
     log: &SafeLog,
-) -> Result<usize, DaemonError> {
+) -> Result<PinnedArtifacts, DaemonError> {
     let open = store.list_open_obligations()?;
     let mut verified = 0_usize;
     let mut missing = 0_usize;
@@ -514,10 +573,10 @@ fn verify_pinned_artifacts(
         }
     }
 
-    if missing > 0 {
-        return Err(DaemonError::ArtifactsUnverified { count: missing });
-    }
-    Ok(verified)
+    Ok(PinnedArtifacts {
+        verified,
+        unverified: missing,
+    })
 }
 
 /// A stable class for an artifact-layer failure, for logs and status lines.
