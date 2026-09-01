@@ -310,7 +310,8 @@ mod tests {
     #[test]
     fn each_ambiguous_attempt_gets_its_own_reconciliation_condition() {
         let first = HealthScope::external_attempt(ExternalAttemptId::from_uuid(Uuid::from_u128(1)));
-        let second = HealthScope::external_attempt(ExternalAttemptId::from_uuid(Uuid::from_u128(2)));
+        let second =
+            HealthScope::external_attempt(ExternalAttemptId::from_uuid(Uuid::from_u128(2)));
         assert_ne!(first, second);
 
         let ledger = HealthLedger::new()
