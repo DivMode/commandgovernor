@@ -40,6 +40,7 @@ use governor_store_sqlite::{
     RecordExternalOutcomeRequest, ResourceRef, ResultArtifactMissingRequest, Store, StoreError,
 };
 use governor_testkit::browser::{BrowserWorld, FakeBrowser};
+use governor_testkit::clock::DEFAULT_CLOCK_START_MS;
 use governor_testkit::dump::{assert_unchanged, count, dump_domain};
 use governor_testkit::effect::FakeExternalDestination;
 use governor_testkit::failpoints::{MIGRATION_FAILPOINTS, StoreCrash, TRANSACTION_FAILPOINTS};
@@ -49,8 +50,8 @@ use governor_testkit::rng::SplitMix64;
 use governor_testkit::scenario::{
     ALREADY_LAPSED, FINAL_RESULT, LIVE_CLAIM, accept_wake, accepted_work, acknowledge, arm_send,
     artifact_rows, bind, bind_request, completion_receipts, expire_claim, handed_over, handoff, id,
-    mint_claim, open_turn, publish_bytes, publish_result, record_failure, record_outcome,
-    schedule_wake, snapshot, source, start_worker, token, worker_turn_request,
+    lapse_claim, mint_claim, open_turn, publish_bytes, publish_result, record_failure,
+    record_outcome, schedule_wake, snapshot, source, start_worker, token, worker_turn_request,
 };
 
 // --- DB-001: replay equivalence ----------------------------------------------
@@ -62,7 +63,10 @@ fn db_001_projection_replay_equivalence() {
     // *every* step rather than only at the end.
     for seed in 0..24u64 {
         let harness = Harness::with_seed(seed + 1);
-        let store = harness.open().expect("opening");
+        let opened = harness
+            .open_full(DEFAULT_CLOCK_START_MS, None)
+            .expect("opening");
+        let (store, clock) = (opened.store, opened.clock);
         let mut artifacts = harness.open_artifacts();
         let mut rng = SplitMix64::new(seed);
 
@@ -166,7 +170,7 @@ fn db_001_projection_replay_equivalence() {
         // Branch: claim, expire, reclaim, close — or leave it owed. A failed
         // obligation is claimable too, so this is a coin toss rather than a
         // filter on the outcome above.
-        let claimed = mint_claim(&store, turn.obligation, &wake, generation, ALREADY_LAPSED);
+        let claimed = mint_claim(&store, turn.obligation, &wake, generation, LIVE_CLAIM);
         if rng.next_below(2) == 0
             && let Ok(minted) = claimed
         {
@@ -176,6 +180,7 @@ fn db_001_projection_replay_equivalence() {
                 .verify_projections()
                 .expect("replay after the handoff");
             if rng.next_below(2) == 0 {
+                lapse_claim(&clock);
                 expire_claim(&store, turn.obligation, minted.claim).expect("expiry");
                 store.verify_projections().expect("replay after the expiry");
             } else {
@@ -184,8 +189,8 @@ fn db_001_projection_replay_equivalence() {
                 } else {
                     Disposition::FailureAcknowledged
                 };
-                // The claim lapsed the moment it was minted, so closing it is
-                // legitimately refused; either answer must still replay.
+                // A live claim closes the work; an ACK that raced another
+                // branch may be refused. Either answer must still replay.
                 let _ = acknowledge(
                     &store,
                     turn.obligation,
@@ -533,8 +538,21 @@ fn run_cell(window: KillWindow) -> bool {
             &harness,
             window,
             |store| {
+                // Minted lapsed and never handed over: a lapsed claim
+                // authorises no mutation, and expiry is legal straight from
+                // `claimed_by_foreman`.
                 let mut artifacts = harness.open_artifacts();
-                handed_over(store, &mut artifacts, "conv-A", ALREADY_LAPSED)
+                let work = accepted_work(store, &mut artifacts, "conv-A");
+                let claim = mint_claim(
+                    store,
+                    work.obligation,
+                    &work.wake,
+                    work.generation,
+                    ALREADY_LAPSED,
+                )
+                .expect("minting a lapsed claim")
+                .claim;
+                (work, claim)
             },
             |store, (work, claim)| expire_claim(store, work.obligation, claim).map(drop),
         ),

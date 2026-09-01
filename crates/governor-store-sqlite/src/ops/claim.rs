@@ -241,6 +241,16 @@ impl WriteOp for DeliverHandoff {
 
     fn commit(&self, tx: &Tx<'_>) -> StoreResult<Self::Committed> {
         let loaded = load::obligation(tx, self.request.obligation)?;
+
+        // A claim stops authorising mutations the instant its lifetime
+        // elapses, and moving an obligation to `processing` is a mutation.
+        // The expiry sweep is internal coordination that may simply not have
+        // run yet, so the claim's own lifetime is checked here rather than
+        // trusted to have been enforced elsewhere — the same rule
+        // `governor_core::claim::acknowledge` applies before a closure.
+        let claim = rehydrate_claim(tx, self.request.obligation, self.request.claim)?;
+        claim.require_live(self.now)?;
+
         let before = loaded.projection;
         let transition = before.apply(&ObligationEvent::HandoffDelivered {
             claim: self.request.claim,

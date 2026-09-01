@@ -50,10 +50,20 @@ pub const RETENTION_GRACE: DurationMs = DurationMs::from_millis(86_400_000);
 
 /// A claim minted with no lifetime is past its expiry the moment the next
 /// operation reads the clock, which is what makes expiry deterministic here.
+///
+/// A lapsed claim authorises no mutation at all — the store refuses a handoff
+/// under one just as it refuses an ACK — so a scenario that needs an
+/// obligation *in `processing`* under a lapsed claim mints with
+/// [`LIVE_CLAIM`], delivers the handoff, and then calls [`lapse_claim`].
 pub const ALREADY_LAPSED: DurationMs = DurationMs::ZERO;
 
 /// A claim lifetime long enough to stay live for a whole scenario.
 pub const LIVE_CLAIM: DurationMs = DurationMs::from_millis(60_000);
+
+/// Moves a shared clock far enough that a [`LIVE_CLAIM`] claim has lapsed.
+pub fn lapse_claim(clock: &crate::clock::FakeClock) {
+    clock.advance(DurationMs::from_millis(LIVE_CLAIM.as_millis() + 1_000));
+}
 
 /// Builds a redaction-safe token.
 ///

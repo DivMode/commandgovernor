@@ -34,12 +34,21 @@ use uuid::Uuid;
 /// A clock that advances one millisecond per reading.
 ///
 /// Monotonic and reproducible: a scenario's timestamps are a function of how
-/// many instants it asked for, not of how fast the machine ran.
-pub struct StepClock(AtomicI64);
+/// many instants it asked for, not of how fast the machine ran. Shared: a
+/// clone handed to the store and a clone kept by the test move the same
+/// instant, which is what lets a test lapse a claim *after* delivering a
+/// handoff under it.
+#[derive(Clone)]
+pub struct StepClock(std::sync::Arc<AtomicI64>);
 
 impl StepClock {
     pub fn new(start: i64) -> Self {
-        Self(AtomicI64::new(start))
+        Self(std::sync::Arc::new(AtomicI64::new(start)))
+    }
+
+    /// Moves the clock forward by `millis`.
+    pub fn advance(&self, millis: i64) {
+        self.0.fetch_add(millis, Ordering::Relaxed);
     }
 }
 
@@ -173,18 +182,36 @@ impl Harness {
         start_ms: i64,
         hook: Option<Box<dyn FailpointHook>>,
     ) -> StoreResult<Store> {
+        self.open_clocked_at(start_ms, hook)
+            .map(|(store, _clock)| store)
+    }
+
+    /// Opens the store and hands back the clock it reads, for a test that
+    /// needs to move time between operations.
+    pub fn open_clocked(&self) -> StoreResult<(Store, StepClock)> {
+        self.open_clocked_at(DEFAULT_CLOCK_START, None)
+    }
+
+    /// As [`Harness::open_at`], keeping a shared handle to the clock.
+    pub fn open_clocked_at(
+        &self,
+        start_ms: i64,
+        hook: Option<Box<dyn FailpointHook>>,
+    ) -> StoreResult<(Store, StepClock)> {
         let generation = self.opens.fetch_add(1, Ordering::Relaxed);
-        OpenStore {
+        let clock = StepClock::new(start_ms);
+        let store = OpenStore {
             config: StoreConfig::new(self.database_path()),
             ports: StorePorts::new(
-                Box::new(StepClock::new(start_ms)),
+                Box::new(clock.clone()),
                 Box::new(StreamRng::new(1 + generation * 1_000)),
                 Box::new(CountingIds::new(1 + generation * 10_000)),
             ),
             failpoints: hook,
             instance_id: Uuid::from_u128(0xC0FFEE),
         }
-        .start()
+        .start()?;
+        Ok((store, clock))
     }
 
     /// A second, read-only connection for assertions about raw rows.

@@ -34,14 +34,15 @@ use governor_core::obligation::{Disposition, ObligationState};
 use governor_core::time::DurationMs;
 use governor_store_sqlite::{AcknowledgeRequest, MintClaimRequest};
 use governor_testkit::browser::{BrowserWorld, FakeBrowser, WakePayload, deliver_wake};
+use governor_testkit::clock::DEFAULT_CLOCK_START_MS;
 use governor_testkit::dump::{assert_unchanged, columns_containing, count, dump_domain};
 use governor_testkit::foreman::bootstrap;
 use governor_testkit::harness::Harness;
 use governor_testkit::rng::SplitMix64;
 use governor_testkit::scenario::{
-    ALREADY_LAPSED, FINAL_RESULT, LIVE_CLAIM, RETENTION_GRACE, accept_wake, accepted_work,
-    arm_send, bind, expire_claim, handoff, id, mint_claim, open_turn, publish_result,
-    schedule_wake, sentinel_message_ref, sentinel_turn_request, snapshot, source, start_worker,
+    FINAL_RESULT, LIVE_CLAIM, RETENTION_GRACE, accept_wake, accepted_work, arm_send, bind,
+    expire_claim, handoff, id, lapse_claim, mint_claim, open_turn, publish_result, schedule_wake,
+    sentinel_message_ref, sentinel_turn_request, snapshot, source, start_worker,
 };
 use governor_testkit::sentinels::{
     FINAL_RESULT_SENTINEL, FORBIDDEN, assert_injected_confined, assert_no_forbidden_bytes,
@@ -93,19 +94,25 @@ fn sec_001_forbidden_data_sentinel_sweep() {
     browser.navigate(&orphan.delivery_id, orphan.attempt);
     arm_send(&store, &orphan, work.generation).expect("arming");
     drop(store);
-    let store = harness.open().expect("reopen quarantines the orphan");
+    let opened = harness
+        .open_full(DEFAULT_CLOCK_START_MS, None)
+        .expect("reopen quarantines the orphan");
+    let store = opened.store;
     assert_eq!(store.startup().recovery.quarantined_deliveries, 1);
 
-    // The MCP path, all the way to a closing disposition.
+    // The MCP path, all the way to a closing disposition. The first claim
+    // hands over while live and lapses afterwards, because a lapsed claim
+    // authorises no mutation at all.
     let minted = mint_claim(
         &store,
         work.obligation,
         &work.wake,
         work.generation,
-        ALREADY_LAPSED,
+        LIVE_CLAIM,
     )
     .expect("a claim");
     handoff(&store, work.obligation, minted.claim).expect("a handoff");
+    lapse_claim(&opened.clock);
     expire_claim(&store, work.obligation, minted.claim).expect("an expiry");
     let reclaim = mint_claim(
         &store,

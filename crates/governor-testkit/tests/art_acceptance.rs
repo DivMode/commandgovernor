@@ -30,14 +30,14 @@ use governor_core::artifact::RetentionState;
 use governor_core::obligation::{Disposition, ObligationState};
 use governor_core::time::{DurationMs, Timestamp};
 use governor_store_sqlite::Failpoint;
+use governor_testkit::clock::DEFAULT_CLOCK_START_MS;
 use governor_testkit::failpoints::{ArtifactCrash, StoreCrash};
 use governor_testkit::harness::Harness;
 use governor_testkit::keys::SeededKeys;
 use governor_testkit::scenario::{
-    ALREADY_LAPSED, ArtifactRow, FINAL_RESULT, LIVE_CLAIM, accepted_work, acknowledge,
-    artifact_rows, assert_no_completion_without_durable_bytes, committed_keys, expire_claim,
-    handed_over, handoff, mint_claim, open_turn, publish_bytes, publish_result, snapshot,
-    start_worker,
+    ArtifactRow, FINAL_RESULT, LIVE_CLAIM, accepted_work, acknowledge, artifact_rows,
+    assert_no_completion_without_durable_bytes, committed_keys, expire_claim, handed_over, handoff,
+    lapse_claim, mint_claim, open_turn, publish_bytes, publish_result, snapshot, start_worker,
 };
 
 /// The store failpoints the publication transaction actually passes through.
@@ -128,7 +128,10 @@ fn art_002_open_obligation_pins_retention() {
     // A sweep with no grace at all, so "the artifact survived" is a statement
     // about the pin and not about a timer that had not expired yet.
     let harness = Harness::new();
-    let store = harness.open().expect("opening");
+    let opened = harness
+        .open_full(DEFAULT_CLOCK_START_MS, None)
+        .expect("opening");
+    let store = opened.store;
     let mut artifacts = harness.open_artifacts_with(
         ArtifactConfig {
             orphan_grace: DurationMs::ZERO,
@@ -177,7 +180,7 @@ fn art_002_open_obligation_pins_retention() {
         work.obligation,
         &work.wake,
         work.generation,
-        ALREADY_LAPSED,
+        LIVE_CLAIM,
     )
     .expect("minting a claim");
     sweep(&harness, &artifacts, "during a claim");
@@ -189,6 +192,7 @@ fn art_002_open_obligation_pins_retention() {
     );
 
     // 3. After claim expiry.
+    lapse_claim(&opened.clock);
     expire_claim(&store, work.obligation, minted.claim).expect("a lapsed claim expires");
     sweep(&harness, &artifacts, "after claim expiry");
 

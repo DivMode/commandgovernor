@@ -28,11 +28,12 @@ use governor_store_sqlite::{
     AcknowledgeRequest, CompletionReceipts, OpenCondition, PublishWorkerResultRequest, Store,
     StoreResult, TerminalEvidenceConflictRequest,
 };
+use governor_testkit::clock::DEFAULT_CLOCK_START_MS;
 use governor_testkit::dump::{assert_unchanged, count, dump_domain, scalar};
 use governor_testkit::harness::Harness;
 use governor_testkit::scenario::{
-    ALREADY_LAPSED, AcceptedWork, FINAL_RESULT, LIVE_CLAIM, RETENTION_GRACE, accept_wake,
-    accepted_work, acknowledge, bind, completion_receipts, expire_claim, handed_over, handoff, id,
+    AcceptedWork, FINAL_RESULT, LIVE_CLAIM, RETENTION_GRACE, accept_wake, accepted_work,
+    acknowledge, bind, completion_receipts, expire_claim, handed_over, handoff, id, lapse_claim,
     mint_claim, open_named_turn, open_turn, publish_result, record_failure, schedule_wake,
     snapshot, source, start_worker,
 };
@@ -87,7 +88,10 @@ fn obl_001_completion_cannot_disappear_before_ack() {
         store.verify_projections().expect("replay equivalence");
     }
 
-    let store = harness.open().expect("reopen");
+    let opened = harness
+        .open_full(DEFAULT_CLOCK_START_MS, None)
+        .expect("reopen");
+    let store = opened.store;
     let before = dump_domain(&harness.inspect());
 
     // 2. Close and delete the fake runtime session. A transport observation is
@@ -119,16 +123,19 @@ fn obl_001_completion_cannot_disappear_before_ack() {
         "neither a runtime observation nor a physical settlement is durable",
     );
 
-    // 4. Expire a foreman claim. Internal coordination, never a decision.
+    // 4. Expire a foreman claim. Internal coordination, never a decision. The
+    //    handoff happens while the claim is live — a lapsed claim authorises
+    //    nothing — and the claim lapses afterwards by moving the clock.
     let minted = mint_claim(
         &store,
         work.obligation,
         &work.wake,
         work.generation,
-        ALREADY_LAPSED,
+        LIVE_CLAIM,
     )
     .expect("minting a claim from the accepted wake");
     handoff(&store, work.obligation, minted.claim).expect("handing the result over");
+    lapse_claim(&opened.clock);
     let expired = expire_claim(&store, work.obligation, minted.claim).expect("a lapsed claim");
     assert!(expired.obligation.state.is_open());
     assert_still_owed(&harness, &store, &work, "after claim expiry");
@@ -359,9 +366,13 @@ fn obl_004_stale_claim_cannot_ack() {
     // case is the one with no second claim at all: an expired claim that is
     // still the last one anybody minted must not be able to close the work.
     let harness = Harness::new();
-    let store = harness.open().expect("opening");
+    let opened = harness
+        .open_full(DEFAULT_CLOCK_START_MS, None)
+        .expect("opening");
+    let store = opened.store;
     let mut artifacts = harness.open_artifacts();
-    let (work, claim) = handed_over(&store, &mut artifacts, "conv-A", ALREADY_LAPSED);
+    let (work, claim) = handed_over(&store, &mut artifacts, "conv-A", LIVE_CLAIM);
+    lapse_claim(&opened.clock);
 
     let processing = snapshot(&store, work.obligation);
     let before = dump_domain(&harness.inspect());
@@ -630,9 +641,12 @@ fn obl_007_physical_settlement_is_not_ack() {
 #[test]
 fn obl_008_mcp_result_handoff_is_not_ack() {
     let harness = Harness::new();
-    let store = harness.open().expect("opening");
+    let opened = harness
+        .open_full(DEFAULT_CLOCK_START_MS, None)
+        .expect("opening");
+    let store = opened.store;
     let mut artifacts = harness.open_artifacts();
-    let (work, claim) = handed_over(&store, &mut artifacts, "conv-A", ALREADY_LAPSED);
+    let (work, claim) = handed_over(&store, &mut artifacts, "conv-A", LIVE_CLAIM);
     assert_eq!(
         snapshot(&store, work.obligation).state,
         ObligationState::Processing
@@ -656,6 +670,7 @@ fn obl_008_mcp_result_handoff_is_not_ack() {
     assert_eq!(retention(&harness).as_deref(), Some("pinned"));
 
     // And after the claim's bounded lifetime lapses it may be reclaimed.
+    lapse_claim(&opened.clock);
     expire_claim(&store, work.obligation, claim).expect("a lapsed claim expires");
     let reclaim = mint_claim(
         &store,

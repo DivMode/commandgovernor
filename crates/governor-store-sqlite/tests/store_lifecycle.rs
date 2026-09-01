@@ -19,6 +19,7 @@
 //! | [`an_expired_claim_can_be_replaced_by_a_new_one`] | OBL-008 reclaim |
 //! | [`the_displaced_claim_cannot_ack_after_a_reclaim`] | OBL-004 |
 //! | [`a_live_claim_cannot_be_expired`] | claim/ACK fencing |
+//! | [`an_expired_claim_cannot_deliver_a_handoff`] | claim/ACK fencing |
 //! | [`projection_replay_equals_committed_state`] | DB-001, research test 11 |
 //! | [`replay_still_matches_across_a_claim_expiry`] | DB-001 with expiry |
 //! | [`attention_is_refused_for_closed_work`] | health conditions are attention |
@@ -45,7 +46,7 @@ use governor_store_sqlite::{
     ResultArtifactMissingRequest, Store, StoreError,
 };
 use support::{
-    Harness, accept_wake, bind, count, open_turn, publish_result, schedule_wake, source,
+    Harness, StepClock, accept_wake, bind, count, open_turn, publish_result, schedule_wake, source,
     start_worker, token,
 };
 
@@ -977,10 +978,15 @@ fn handed_over(
     (turn.obligation, generation, claimed, minted.claim)
 }
 
-/// A claim minted with no lifetime at all is past its expiry the moment the
-/// next operation reads the stepping clock. That is what makes expiry
-/// deterministic here rather than a race against the test's own runtime.
-const ALREADY_LAPSED: DurationMs = DurationMs::ZERO;
+/// The bounded lifetime these tests mint claims with.
+///
+/// Long enough that the handoff a scenario delivers immediately afterwards
+/// happens under a live claim — the store refuses a handoff on a lapsed one —
+/// and lapsed deterministically by advancing the shared clock past it.
+const CLAIM_LIFETIME: DurationMs = DurationMs::from_millis(60_000);
+
+/// Advancing the shared clock by this much lapses a `CLAIM_LIFETIME` claim.
+const PAST_CLAIM_LIFETIME: i64 = 61_000;
 
 #[test]
 fn an_ack_records_when_the_released_bytes_may_go() {
@@ -1055,11 +1061,12 @@ fn claim_expiry_returns_the_attention_it_came_from() {
         ObligationState::Failed,
     ] {
         let harness = Harness::new();
-        let store = harness.open().expect("opening");
+        let (store, clock) = harness.open_clocked().expect("opening");
         let (obligation, _generation, _wake, claim) =
-            handed_over(&store, attention, ALREADY_LAPSED);
+            handed_over(&store, attention, CLAIM_LIFETIME);
         let processing = store.read_obligation(obligation).expect("snapshot");
         assert_eq!(processing.state, ObligationState::Processing);
+        clock.advance(PAST_CLAIM_LIFETIME);
 
         let expired = store
             .expire_foreman_claim(ExpireClaimRequest { obligation, claim })
@@ -1139,10 +1146,73 @@ fn a_live_claim_cannot_be_expired() {
     );
 }
 
+#[test]
+fn an_expired_claim_cannot_deliver_a_handoff() {
+    let harness = Harness::new();
+    let (store, clock) = harness.open_clocked().expect("opening");
+
+    let turn = open_turn(&store);
+    let generation = bind(&store, "conv-A");
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let snapshot = store.read_obligation(turn.obligation).expect("snapshot");
+    let claimed = schedule_wake(
+        &store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("scheduling a wake");
+    accept_wake(&store, &claimed, generation, "msg-1");
+    let minted = store
+        .mint_foreman_claim(MintClaimRequest {
+            obligation: turn.obligation,
+            presented_delivery_id: claimed.delivery_id.clone(),
+            binding_generation: generation,
+            expected_version: snapshot.version,
+            expected_source: snapshot.source.clone(),
+            lifetime: CLAIM_LIFETIME,
+        })
+        .expect("minting a claim from the accepted wake");
+
+    // The claim's lease runs out before the handoff arrives — the expiry
+    // sweep has not run, so the obligation is still `claimed_by_foreman` and
+    // the claim row still says `live`. Its lifetime, not its row state, is
+    // what stops authorising the mutation.
+    clock.advance(PAST_CLAIM_LIFETIME);
+
+    let conn = harness.inspect();
+    let events = count(&conn, "events");
+    let transitions = count(&conn, "obligation_events");
+
+    let error = store
+        .deliver_handoff(DeliverHandoffRequest {
+            obligation: turn.obligation,
+            claim: minted.claim,
+        })
+        .expect_err("a lapsed claim no longer authorises the handoff");
+    assert_eq!(error.conflict_code(), Some("expired_claim"));
+
+    assert_eq!(count(&conn, "events"), events, "zero rows changed");
+    assert_eq!(count(&conn, "obligation_events"), transitions);
+    let after = store.read_obligation(turn.obligation).expect("snapshot");
+    assert_eq!(
+        after.state,
+        ObligationState::ClaimedByForeman,
+        "the refused handoff moved nothing"
+    );
+    assert!(after.open, "the work is still owed");
+}
+
 /// Expires a lapsed claim and mints a new one from the same accepted wake.
-fn reclaimed(store: &Store) -> (ObligationId, BindingGeneration, ClaimId, ClaimId) {
+fn reclaimed(
+    store: &Store,
+    clock: &StepClock,
+) -> (ObligationId, BindingGeneration, ClaimId, ClaimId) {
     let (obligation, generation, wake, first) =
-        handed_over(store, ObligationState::CompletedUnprocessed, ALREADY_LAPSED);
+        handed_over(store, ObligationState::CompletedUnprocessed, CLAIM_LIFETIME);
+    clock.advance(PAST_CLAIM_LIFETIME);
     let expired = store
         .expire_foreman_claim(ExpireClaimRequest {
             obligation,
@@ -1173,8 +1243,8 @@ fn reclaimed(store: &Store) -> (ObligationId, BindingGeneration, ClaimId, ClaimI
 #[test]
 fn an_expired_claim_can_be_replaced_by_a_new_one() {
     let harness = Harness::new();
-    let store = harness.open().expect("opening");
-    let (obligation, _generation, first, second) = reclaimed(&store);
+    let (store, clock) = harness.open_clocked().expect("opening");
+    let (obligation, _generation, first, second) = reclaimed(&store, &clock);
 
     let snapshot = store.read_obligation(obligation).expect("snapshot");
     assert_eq!(snapshot.state, ObligationState::ClaimedByForeman);
@@ -1206,8 +1276,8 @@ fn an_expired_claim_can_be_replaced_by_a_new_one() {
 #[test]
 fn the_displaced_claim_cannot_ack_after_a_reclaim() {
     let harness = Harness::new();
-    let store = harness.open().expect("opening");
-    let (obligation, generation, first, second) = reclaimed(&store);
+    let (store, clock) = harness.open_clocked().expect("opening");
+    let (obligation, generation, first, second) = reclaimed(&store, &clock);
     store
         .deliver_handoff(DeliverHandoffRequest {
             obligation,
@@ -1250,8 +1320,8 @@ fn the_displaced_claim_cannot_ack_after_a_reclaim() {
 #[test]
 fn replay_still_matches_across_a_claim_expiry() {
     let harness = Harness::new();
-    let store = harness.open().expect("opening");
-    let (obligation, generation, _first, second) = reclaimed(&store);
+    let (store, clock) = harness.open_clocked().expect("opening");
+    let (obligation, generation, _first, second) = reclaimed(&store, &clock);
     store
         .deliver_handoff(DeliverHandoffRequest {
             obligation,
