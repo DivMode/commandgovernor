@@ -24,6 +24,9 @@
 //! | [`attention_is_refused_for_closed_work`] | health conditions are attention |
 //! | [`attention_must_name_the_artifact_the_obligation_pins`] | health condition scope |
 //! | [`a_health_condition_replays_from_its_events`] | DB-001 over `health_conditions` |
+//! | [`a_tampered_binding_ladder_is_caught_by_replay`] | DB-001 over `foreman_bindings`, invariant 9 |
+//! | [`a_tampered_binding_activity_flag_is_caught_by_replay`] | DB-001 over `foreman_bindings`, invariant 9 |
+//! | [`a_tampered_claim_row_is_caught_by_replay`] | DB-001 over `foreman_claims` |
 //! | [`a_delivery_mismatch_names_the_key_and_never_the_correlation_id`] | invariant 17, SEC-001 |
 
 mod support;
@@ -648,6 +651,130 @@ fn a_tampered_projection_row_fails_closed_on_replay() {
     assert!(
         matches!(harness.open(), Err(StoreError::RepairNeeded(_))),
         "and it keeps failing closed rather than repairing itself"
+    );
+}
+
+#[test]
+fn a_tampered_binding_ladder_is_caught_by_replay() {
+    // Invariant 9 fences every wake and every claim on `binding_generation`,
+    // so the generation ladder is load-bearing and replay must derive it from
+    // the events rather than trust the rows.
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    bind(&store, "conv-A");
+    let second = bind(&store, "conv-B");
+    assert_eq!(second.get(), 2, "the ledger assigns highest + 1");
+    store.verify_projections().expect("replay before tampering");
+    drop(store);
+
+    // Renumber the displaced generation. Nothing in the rows contradicts
+    // itself; only the ledger knows the first `bound` event took generation 1.
+    let conn = rusqlite::Connection::open(harness.database_path()).expect("writable connection");
+    conn.execute(
+        "UPDATE foreman_bindings SET binding_generation = 7 WHERE binding_generation = 1",
+        [],
+    )
+    .expect("tampering with the ladder");
+    drop(conn);
+
+    let error = harness.open().expect_err("the renumbering fails closed");
+    let StoreError::RepairNeeded(repair) = error else {
+        panic!("expected a repair-needed failure");
+    };
+    assert!(
+        repair
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.table == "foreman_bindings"),
+        "the binding ladder must be named: {:?}",
+        repair.mismatches
+    );
+}
+
+#[test]
+fn a_tampered_binding_activity_flag_is_caught_by_replay() {
+    // Which generation is active is the other half of invariant 9's fence.
+    // The partial unique index stops a *second* row claiming to be active, so
+    // the reachable corruption is the opposite one: no row active at all,
+    // while the ledger's last `bound` event says generation 2 is.
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    bind(&store, "conv-A");
+    bind(&store, "conv-B");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(harness.database_path()).expect("writable connection");
+    conn.execute(
+        "UPDATE foreman_bindings SET is_active = 0 WHERE binding_generation = 2",
+        [],
+    )
+    .expect("retiring the active binding behind the ledger's back");
+    drop(conn);
+
+    let error = harness
+        .open()
+        .expect_err("a silently retired binding fails closed");
+    let StoreError::RepairNeeded(repair) = error else {
+        panic!("expected a repair-needed failure");
+    };
+    assert!(
+        repair.mismatches.iter().any(|mismatch| {
+            mismatch.table == "foreman_bindings" && mismatch.column == "is_active"
+        }),
+        "{:?}",
+        repair.mismatches
+    );
+}
+
+#[test]
+fn a_tampered_claim_row_is_caught_by_replay() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let turn = open_turn(&store);
+    let generation = bind(&store, "conv-A");
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let snapshot = store.read_obligation(turn.obligation).expect("snapshot");
+    let claimed = schedule_wake(
+        &store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("scheduling");
+    accept_wake(&store, &claimed, generation, "msg-1");
+    store
+        .mint_foreman_claim(MintClaimRequest {
+            obligation: turn.obligation,
+            presented_delivery_id: claimed.delivery_id.clone(),
+            binding_generation: generation,
+            expected_version: snapshot.version,
+            expected_source: snapshot.source.clone(),
+            lifetime: DurationMs::from_millis(60_000),
+        })
+        .expect("minting a claim");
+    store.verify_projections().expect("replay before tampering");
+    drop(store);
+
+    // A claim row that says the obligation was already dealt with, without any
+    // event saying so.
+    let conn = rusqlite::Connection::open(harness.database_path()).expect("writable connection");
+    conn.execute("UPDATE foreman_claims SET state = 'closed'", [])
+        .expect("tampering with the claim lifecycle");
+    drop(conn);
+
+    let error = harness.open().expect_err("the claim row fails closed");
+    let StoreError::RepairNeeded(repair) = error else {
+        panic!("expected a repair-needed failure");
+    };
+    assert!(
+        repair
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.table == "foreman_claims" && mismatch.column == "state"),
+        "{:?}",
+        repair.mismatches
     );
 }
 

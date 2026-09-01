@@ -8,9 +8,10 @@
 //! # What is compared
 //!
 //! Every obligation is rebuilt by folding its ledger slice through
-//! [`governor_core::obligation::Obligation`], and every wake revision by folding
-//! its attempt events through [`governor_core::outbound::Delivery`]. The result
-//! is compared field by field with the stored projection row. Disagreements are
+//! [`governor_core::obligation::Obligation`] and compared field by field with
+//! the stored projection row. Turn lifecycle, artifact retention, the health
+//! ledger, the foreman binding ladder and the foreman claims are each derived
+//! from the events too, and compared with their rows. Disagreements are
 //! collected — all of them, not just the first — into [`RepairNeeded`], so an
 //! operator sees the shape of the damage rather than one symptom.
 //!
@@ -28,22 +29,51 @@
 //! recorded history through the domain machine and refuses a row no legal
 //! sequence of transitions can reach. That is the same property, enforced at a
 //! different boundary.
+//!
+//! Three comparisons here are narrower than a full rebuild, and the residue is
+//! named rather than left implicit:
+//!
+//! - **Browser deliveries.** Only the delivery's state and each attempt's
+//!   state are ledger-derived. The fold is seeded from the row being verified:
+//!   `load::wake_by_delivery_id` takes the revision, the attempt budget, the
+//!   binding generation, the target version and the accepted message ref from
+//!   `browser_deliveries` before folding the attempt events. Those scheduling
+//!   fields are therefore *inputs* to the replay, not outputs compared against
+//!   it. What protects them instead is the row's own re-derivation on read: the
+//!   loader recomputes `delivery_key` from `(obligation, generation, revision)`
+//!   and refuses a row whose stored key does not match.
+//! - **Foreman bindings.** The generation ladder, each generation's capability
+//!   epoch and write capability, and which generation is active all rebuild
+//!   from `foreman_binding_bound` and its successors — which is what invariant
+//!   9's fence rests on. The binding's *target identity* does not: the
+//!   canonical conversation, the browser profile, the connector ABI and the
+//!   `foreman_binding_id` are not carried in allowlisted safe metadata, so
+//!   there is nothing in the ledger to compare them with. `load::bindings`
+//!   re-folds those rows through [`governor_core::binding::BindingLedger`] on
+//!   every read that needs them.
+//! - **Foreman claims.** The lifecycle, the obligation, the binding generation
+//!   and the version the mint was fenced on all rebuild. `wake_delivery_id`
+//!   does not, deliberately: the correlation ID is a possession fence and is
+//!   never written into safe metadata. Neither does `expires_at_ms`, which is a
+//!   clock reading rather than a ledger fact.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use governor_core::artifact::{ArtifactDigest, ResultArtifact, RetentionState};
+use governor_core::binding::WriteCapabilityState;
 use governor_core::fence::EventSeq;
 use governor_core::health::{HealthConditionKind, HealthConditionState, HealthScope};
-use governor_core::id::ObligationId;
+use governor_core::id::{ClaimId, ObligationId};
 use governor_core::time::Timestamp;
 use rusqlite::params;
 
 use crate::codec::{
-    RetentionLabel, TurnLifecycle, decode_attempt_state, decode_delivery_state, decode_health_kind,
-    decode_health_state, decode_obligation_state, decode_retention, decode_turn_lifecycle,
-    encode_attempt_state, encode_delivery_state, encode_health_kind, encode_health_state,
-    encode_obligation_state, encode_retention, encode_turn_lifecycle, id_text, parse_delivery_id,
-    parse_hex32, parse_id, parse_token, parse_u32, parse_u64,
+    ClaimLifecycle, RetentionLabel, TurnLifecycle, decode_attempt_state, decode_claim_state,
+    decode_delivery_state, decode_health_kind, decode_health_state, decode_obligation_state,
+    decode_retention, decode_turn_lifecycle, decode_write_capability, encode_attempt_state,
+    encode_claim_state, encode_delivery_state, encode_health_kind, encode_health_state,
+    encode_obligation_state, encode_retention, encode_turn_lifecycle, encode_write_capability,
+    id_text, parse_delivery_id, parse_hex32, parse_id, parse_token, parse_u32, parse_u64,
 };
 use crate::error::{ProjectionMismatch, RepairNeeded, StoreResult};
 use crate::event::{self, EventKind, LedgerEvent};
@@ -92,6 +122,8 @@ pub(crate) fn verify(tx: &Tx<'_>) -> StoreResult<VerifiedProjections> {
     compare_turns(tx, &by_obligation, &mut mismatches)?;
     compare_retention(tx, &by_obligation, &mut mismatches)?;
     compare_health(tx, &events, &mut mismatches)?;
+    compare_bindings(tx, &events, &mut mismatches)?;
+    compare_claims(tx, &events, &mut mismatches)?;
     let deliveries = compare_deliveries(tx, &mut mismatches)?;
 
     if !mismatches.is_empty() {
@@ -440,6 +472,317 @@ fn condition_key(
         part(scope.external_attempt.map(id_text)),
         encode_health_state(state),
     )
+}
+
+/// One binding generation, as the ledger determines it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplayedBinding {
+    capability_epoch: u64,
+    write_capability: WriteCapabilityState,
+    active: bool,
+}
+
+/// Checks the binding ladder against the generations the ledger assigns.
+///
+/// Invariant 9 fences every wake and every claim on `binding_generation`, so
+/// the ladder those rows record is load-bearing and must be derivable from the
+/// events rather than trusted. It is: `BindingEvent::Bound` always takes
+/// `highest + 1`, so the *n*-th `foreman_binding_bound` event owns generation
+/// *n*, the last one is active, and each event's own recorded generation must
+/// agree with the position replay puts it in.
+///
+/// What the events cannot supply is the binding's *target identity* — the
+/// canonical conversation, the browser profile, the connector ABI, and the
+/// `foreman_binding_id` itself. None is carried in allowlisted safe metadata,
+/// so none is rebuildable here; see the module's "What is not compared, and
+/// why".
+fn compare_bindings(
+    tx: &Tx<'_>,
+    events: &[LedgerEvent],
+    mismatches: &mut Vec<ProjectionMismatch>,
+) -> StoreResult<()> {
+    const TABLE: &str = "foreman_bindings";
+    let mut replayed: BTreeMap<u64, ReplayedBinding> = BTreeMap::new();
+    let mut newest: Option<u64> = None;
+
+    for event in events {
+        match event.kind {
+            EventKind::ForemanBindingBound => {
+                let generation = u64::try_from(replayed.len())
+                    .map_err(|_| corrupt(TABLE, "binding_generation"))?
+                    .saturating_add(1);
+                let recorded = event.metadata.u64("generation")?;
+                if recorded != generation {
+                    // The ledger contradicts itself: the event says it bound a
+                    // generation other than the one its position assigns.
+                    mismatches.push(ProjectionMismatch {
+                        table: "events",
+                        row: format!("foreman_binding_bound@{}", event.seq),
+                        column: "generation",
+                        stored: recorded.to_string(),
+                        replayed: generation.to_string(),
+                    });
+                }
+                if let Some(previous) = newest.and_then(|latest| replayed.get_mut(&latest)) {
+                    previous.active = false;
+                }
+                replayed.insert(
+                    generation,
+                    ReplayedBinding {
+                        capability_epoch: event.metadata.u64("capability_epoch")?,
+                        write_capability: decode_write_capability(
+                            event.metadata.label("write_capability")?,
+                            "events",
+                        )?,
+                        active: true,
+                    },
+                );
+                newest = Some(generation);
+            }
+            EventKind::ForemanBindingCapabilityObserved => {
+                // A later observation restates the capability of the
+                // generation it names, and changes nothing else.
+                let generation = event.metadata.u64("generation")?;
+                if let Some(binding) = replayed.get_mut(&generation) {
+                    binding.capability_epoch = event.metadata.u64("capability_epoch")?;
+                    binding.write_capability = decode_write_capability(
+                        event.metadata.label("write_capability")?,
+                        "events",
+                    )?;
+                }
+            }
+            EventKind::ForemanBindingDisplaced => {
+                let generation = event.metadata.u64("generation")?;
+                if let Some(binding) = replayed.get_mut(&generation) {
+                    binding.active = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut statement = tx.conn().prepare(
+        "SELECT binding_generation, capability_epoch, write_capability_state, is_active
+           FROM foreman_bindings ORDER BY binding_generation",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    let mut stored: BTreeMap<u64, ReplayedBinding> = BTreeMap::new();
+    for row in rows {
+        let (generation, epoch, capability, active) = row?;
+        stored.insert(
+            parse_u64(generation, TABLE, "binding_generation")?,
+            ReplayedBinding {
+                capability_epoch: parse_u64(epoch, TABLE, "capability_epoch")?,
+                write_capability: decode_write_capability(&capability, TABLE)?,
+                active: active != 0,
+            },
+        );
+    }
+
+    for generation in stored
+        .keys()
+        .chain(replayed.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+    {
+        let row = format!("generation {generation}");
+        match (stored.get(&generation), replayed.get(&generation)) {
+            (Some(left), Some(right)) => {
+                let mut record = |column, stored: String, expected: String| {
+                    if stored != expected {
+                        mismatches.push(ProjectionMismatch {
+                            table: TABLE,
+                            row: row.clone(),
+                            column,
+                            stored,
+                            replayed: expected,
+                        });
+                    }
+                };
+                record(
+                    "capability_epoch",
+                    left.capability_epoch.to_string(),
+                    right.capability_epoch.to_string(),
+                );
+                record(
+                    "write_capability_state",
+                    encode_write_capability(left.write_capability, TABLE)?.to_owned(),
+                    encode_write_capability(right.write_capability, TABLE)?.to_owned(),
+                );
+                record(
+                    "is_active",
+                    left.active.to_string(),
+                    right.active.to_string(),
+                );
+            }
+            (left, right) => mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row,
+                column: "binding_generation",
+                stored: presence(left.is_some()).to_owned(),
+                replayed: presence(right.is_some()).to_owned(),
+            }),
+        }
+    }
+    Ok(())
+}
+
+/// One foreman claim, as far as the ledger determines it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplayedClaim {
+    obligation: Option<ObligationId>,
+    version_at_claim: u64,
+    binding_generation: u64,
+    state: ClaimLifecycle,
+}
+
+/// Checks the claim rows against the claim events.
+///
+/// A claim is minted `live`, an expiry moves it to `expired`, and the ACK that
+/// closes its obligation moves it to `closed`; a handoff changes no lifecycle.
+/// Every one of those events names its `claim_id` in allowlisted metadata and
+/// its obligation in the event's scope, so the lifecycle, the obligation, the
+/// binding generation and the version the mint was fenced on all rebuild.
+///
+/// Two row fields cannot: `wake_delivery_id`, because the correlation ID is a
+/// possession fence that is deliberately never written into safe metadata, and
+/// `expires_at_ms`, because it is a clock reading the ledger does not record.
+/// See the module's "What is not compared, and why".
+fn compare_claims(
+    tx: &Tx<'_>,
+    events: &[LedgerEvent],
+    mismatches: &mut Vec<ProjectionMismatch>,
+) -> StoreResult<()> {
+    const TABLE: &str = "foreman_claims";
+    let mut replayed: BTreeMap<ClaimId, ReplayedClaim> = BTreeMap::new();
+
+    for event in events {
+        match event.kind {
+            EventKind::ForemanClaimMinted => {
+                replayed.insert(
+                    event.metadata.id("claim_id")?,
+                    ReplayedClaim {
+                        obligation: event.scope.obligation,
+                        version_at_claim: event.metadata.u64("expected_version")?,
+                        binding_generation: event.metadata.u64("binding_generation")?,
+                        state: ClaimLifecycle::Live,
+                    },
+                );
+            }
+            EventKind::ForemanClaimExpired => {
+                if let Some(claim) = replayed.get_mut(&event.metadata.id("claim_id")?) {
+                    claim.state = ClaimLifecycle::Expired;
+                }
+            }
+            EventKind::ForemanAcked => {
+                if let Some(claim) = replayed.get_mut(&event.metadata.id("claim_id")?) {
+                    claim.state = ClaimLifecycle::Closed;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut statement = tx.conn().prepare(
+        "SELECT claim_id, obligation_id, obligation_version_at_claim, binding_generation, state
+           FROM foreman_claims ORDER BY claim_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut stored: BTreeMap<ClaimId, ReplayedClaim> = BTreeMap::new();
+    for row in rows {
+        let (claim, obligation, version, generation, state) = row?;
+        stored.insert(
+            parse_id(&claim, TABLE, "claim_id")?,
+            ReplayedClaim {
+                obligation: Some(parse_id(&obligation, TABLE, "obligation_id")?),
+                version_at_claim: parse_u64(version, TABLE, "obligation_version_at_claim")?,
+                binding_generation: parse_u64(generation, TABLE, "binding_generation")?,
+                state: decode_claim_state(&state, TABLE)?,
+            },
+        );
+    }
+
+    for claim in stored
+        .keys()
+        .chain(replayed.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+    {
+        let row = claim.to_string();
+        match (stored.get(&claim), replayed.get(&claim)) {
+            (Some(left), Some(right)) => {
+                let mut record = |column, stored: String, expected: String| {
+                    if stored != expected {
+                        mismatches.push(ProjectionMismatch {
+                            table: TABLE,
+                            row: row.clone(),
+                            column,
+                            stored,
+                            replayed: expected,
+                        });
+                    }
+                };
+                record(
+                    "obligation_id",
+                    left.obligation.map(id_text).unwrap_or_default(),
+                    right.obligation.map(id_text).unwrap_or_default(),
+                );
+                record(
+                    "obligation_version_at_claim",
+                    left.version_at_claim.to_string(),
+                    right.version_at_claim.to_string(),
+                );
+                record(
+                    "binding_generation",
+                    left.binding_generation.to_string(),
+                    right.binding_generation.to_string(),
+                );
+                record(
+                    "state",
+                    encode_claim_state(left.state).to_owned(),
+                    encode_claim_state(right.state).to_owned(),
+                );
+            }
+            (left, right) => mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row,
+                column: "claim_id",
+                stored: presence(left.is_some()).to_owned(),
+                replayed: presence(right.is_some()).to_owned(),
+            }),
+        }
+    }
+    Ok(())
+}
+
+/// How a presence disagreement is rendered on both sides of a comparison.
+const fn presence(found: bool) -> &'static str {
+    if found { "present" } else { "absent" }
+}
+
+/// A corrupt-row error for a value this module could not narrow.
+fn corrupt(table: &'static str, column: &'static str) -> crate::error::StoreError {
+    crate::error::CorruptValue::new(
+        table,
+        column,
+        crate::error::CorruptReason::IntegerOutOfRange,
+    )
+    .into()
 }
 
 fn compare_deliveries(tx: &Tx<'_>, mismatches: &mut Vec<ProjectionMismatch>) -> StoreResult<usize> {

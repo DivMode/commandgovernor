@@ -570,6 +570,33 @@ keep obligation open; never invent an answer.
 After every generated state-machine sequence, rebuild materialized projections
 from events. Semantic state must match.
 
+Coverage, and where it stops. Obligations, their per-transition version ledger,
+turn lifecycle, artifact retention, health conditions, the foreman binding
+ladder and the foreman claims are each rebuilt from the events and compared
+with their rows. Three comparisons are narrower than a full rebuild, and the
+residue is stated rather than left implicit:
+
+- **Browser deliveries** — the delivery's state and each attempt's state are
+  ledger-derived; the revision, attempt budget, binding generation, target
+  version and accepted message ref are read from the row being verified and
+  seed the fold, so they are inputs rather than compared outputs. The row's
+  `delivery_key` is re-derived from `(obligation, generation, revision)` on
+  every read, which is what protects them.
+- **Foreman bindings** — the generation ladder, each generation's capability
+  epoch and write capability, and which generation is active all rebuild.
+  The binding's target identity (canonical conversation, browser profile,
+  connector ABI, `foreman_binding_id`) is not carried in allowlisted safe
+  metadata, so nothing in the ledger can be compared with it.
+- **Foreman claims** — the lifecycle, the obligation, the binding generation
+  and the version the mint was fenced on all rebuild. `wake_delivery_id` does
+  not, deliberately: the correlation ID is a possession fence and is never
+  written into safe metadata. `expires_at_ms` does not either; it is a clock
+  reading, not a ledger fact.
+
+The mutation journal, external attempts and resource leases are outside DB-001
+by design: their own row is the durable record, and each loader re-folds that
+row's recorded history through the domain machine on every read.
+
 ### DB-002 — transition crash matrix
 
 Inject SQLite errors/crashes around each multi-row transition. Reopen yields prior
