@@ -205,6 +205,16 @@ id_families! {
     ExternalAttempt => ExternalAttemptId,
     /// One lease over an exclusively-owned resource.
     ResourceLease => ResourceLeaseId,
+    /// One immutable resolved worker launch/resume profile.
+    WorkerLoadout => WorkerLoadoutId,
+    /// One immutable whitelist of worker capabilities.
+    CapabilityProfile => CapabilityProfileId,
+    /// One immutable recursive-delegation whitelist.
+    DelegationPolicy => DelegationPolicyId,
+    /// One immutable model-selection/policy snapshot.
+    ModelPolicy => ModelPolicyId,
+    /// One private immutable managed worker-configuration artifact.
+    ManagedConfigArtifact => ManagedConfigArtifactId,
 }
 
 /// Injectable source of opaque identities.

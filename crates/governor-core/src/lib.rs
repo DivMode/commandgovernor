@@ -119,6 +119,7 @@ pub mod mutation;
 pub mod obligation;
 pub mod outbound;
 pub mod random;
+pub mod session;
 pub mod time;
 pub mod watchdog;
 pub mod worker_command;
