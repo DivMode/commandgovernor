@@ -1,0 +1,40 @@
+import * as C from "./common.mjs";
+const RUN = Date.now().toString(36);
+const out = C.evidence("s1-05-generation-reconnect");
+const c = await C.newClient("cg-gen-1", out);
+const A = await C.createRoot(c, { name: `cg-s1-05-${RUN}` }); const id = C.sid(A);
+await C.attach(c, id); await C.prompt(c, id, "ECHO:gen-one"); await C.waitForIdle(c, id);
+const C0 = c.lastCursor; out("cursor before supervisor kill", C0); const n0 = ((await C.getMessages(c, id)).data.messages ?? []).length;
+// (1) supervisor replacement keeps the worker generation
+const P0 = c.hello.supervisorPid; out("SIGKILL supervisor", P0, C.kill(P0, "SIGKILL")); c.close();
+const cs = await C.connectEventually(C.SOCK, { clientId: "cg-gen-s", log: out.wire }, 60000);
+const as = await C.attach(cs, id, { resumeCursor: C0 }); out("(1) attach with pre-replacement cursor", as.data?.replay);
+out.check("(1) supervisor replacement keeps the worker generation; interval reported complete", as.data?.replay?.status === "complete" && as.data?.replay?.toCursor?.generation === C0.generation);
+await C.prompt(cs, id, "ECHO:gen-mid"); await C.waitForIdle(cs, id); const C1 = cs.lastCursor;
+out.check("(1) sequence continues monotonically within the same generation", C1.generation === C0.generation && C1.sequence > C0.sequence, C1);
+// (2) resident worker death -> failed -> client reopen: old cursor must not be honoured as a position
+out("SIGKILL resident worker", A.workerPid, C.kill(A.workerPid, "SIGKILL"));
+const r = await C.recoverRoot(cs, id, A.workerPid, out); const id2 = C.sid(r.summary);
+const c2 = await C.newClient("cg-gen-2", out); const a1 = await C.attach(c2, id2, { resumeCursor: C1 });
+out("(2) attach to reopened root presenting the dead generation's cursor", { replay: a1.data?.replay, snapshotMessages: (a1.data?.snapshot?.messages ?? []).length });
+out.check("(2) dead-generation cursor is not treated as a live position: replay restarts at the new generation with the snapshot as baseline", a1.data?.replay?.toCursor?.generation !== C1.generation && a1.data?.replay?.toSequence === 0 && (a1.data?.snapshot?.messages ?? []).length >= n0 + 2, { n0 });
+// (3) client-owned worker: the only path where v0.8.1 relaunches under the same active-session id -> generation change on the same id
+const co = await C.connectEventually(C.SOCK, { clientId: `cg-gen-owned-${RUN}`, log: out.wire });
+const Oc = await co.request({ type: "create", lifecycle: "client_owned", config: C.sessionConfig(), launchEnv: C.launchEnv() }, { timeoutMs: 120000 });
+if (!Oc.success) throw new Error(`owned create failed: ${Oc.error}`); const O = Oc.data; const idO = C.sid(O); out("(3) client-owned worker", { id: idO, pid: O.workerPid });
+await C.attach(co, idO); await C.prompt(co, idO, "ECHO:owned-one"); await C.waitForIdle(co, idO); const CO0 = co.lastCursor; out("(3) owned cursor", CO0);
+out("(3) SIGKILL owned worker", O.workerPid, C.kill(O.workerPid, "SIGKILL"));
+const seen = []; const rec = await C.waitUntil(async () => { const s = (await C.list(co, { includeClientOwned: true })).find((x) => C.sid(x) === idO); const k = `${s?.workerState}/${s?.workerPid}`; if (seen.at(-1) !== k) seen.push(k); return s && s.workerState === "ready" && s.workerPid !== O.workerPid ? s : (s?.workerState === "failed" ? s : null); }, 40000, 100);
+out("(3) owned worker transitions", seen, { state: rec.workerState, pid: rec.workerPid });
+out.check("(3) client-owned worker is relaunched automatically under the same active-session id", rec.workerState === "ready" && rec.workerPid !== O.workerPid && C.sid(rec) === idO);
+const co2 = await C.connectEventually(C.SOCK, { clientId: `cg-gen-owned-${RUN}`, log: out.wire });
+const ao = await C.attach(co2, idO, { resumeCursor: CO0 }); out("(3) reattach with the previous generation's cursor", ao.success ? { replay: ao.data.replay, snapshotMessages: (ao.data.snapshot?.messages ?? []).length } : ao);
+out.check("(3) old generation's sequence is not honoured as a live position (new generation, replay restarts at its baseline)", ao.success && ao.data.replay?.toCursor?.generation !== CO0.generation && ao.data.replay?.toSequence === 0, ao.data?.replay);
+out("(3) observation: replay.reason", ao.data?.replay?.reason ?? "absent (docs/protocol tests describe event_generation_changed; the live attach path reports a bare complete/0 baseline)");
+const mo = await C.getMessages(co2, idO); const mtxt = JSON.stringify((mo.data.messages ?? []).map((x) => x.content));
+out("(3) messages visible on the relaunched owned worker", (mo.data.messages ?? []).length, mtxt.slice(0, 160));
+out.check("(3) relaunched client-owned worker kept its transcript (pre-crash turn still present)", mtxt.includes("owned-one"), { count: (mo.data.messages ?? []).length });
+await C.prompt(co2, idO, "ECHO:owned-two"); await C.waitForIdle(co2, idO);
+out.check("(3) relaunched owned worker serves prompts; events carry the new generation", co2.lastCursor?.generation !== CO0.generation, co2.lastCursor);
+const kill = await co2.request({ type: "kill", activeSessionId: idO }); out("(3) kill owned worker", kill.success);
+cs.close(); c2.close(); co.close(); co2.close(); process.exit(out.failed ? 1 : 0);

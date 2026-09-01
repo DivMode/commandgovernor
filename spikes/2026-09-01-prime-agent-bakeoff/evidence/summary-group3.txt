@@ -1,0 +1,8 @@
+s1-02-supervisor-replacement.mjs exit=0 5 pass 0 fail
+s1-03-worker-crash-isolation.mjs exit=1 0 pass 0 fail
+s1-04-session-lease.mjs exit=0 7 pass 0 fail
+s1-05-generation-reconnect.mjs exit=1 5 pass 1 fail
+s1-06-idempotence.mjs exit=0 5 pass 0 fail
+s1-07-uncertain.mjs exit=1 7 pass 1 fail
+s1-08-schedule.mjs exit=0 4 pass 0 fail
+s1-09-child-recovery.mjs exit=1 1 pass 0 fail
