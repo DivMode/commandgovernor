@@ -299,6 +299,40 @@ impl WakeTarget {
     }
 }
 
+/// The persisted parts of one browser wake revision.
+///
+/// Only [`BrowserWake::rehydrate`] consumes this, and it validates the parts
+/// against each other before producing a wake. It exists because a wake cannot
+/// be rebuilt by replay: [`BrowserWake::create`] draws its correlation ID from
+/// the CSPRNG port, so replaying the creation would mint a *different*
+/// [`DeliveryId`] than the one the browser already carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedWake {
+    /// The correlation ID that was generated once and persisted.
+    pub delivery_id: DeliveryId,
+    /// The deterministic key recorded alongside it.
+    pub delivery_key: DeliveryKey,
+    /// Obligation snapshot the wake was targeted at.
+    pub target: WakeTarget,
+    /// Binding record the wake belongs to.
+    pub binding: ForemanBindingId,
+    /// Binding generation the wake belongs to.
+    pub binding_generation: BindingGeneration,
+    /// Revision number within the obligation and binding generation.
+    pub revision: DeliveryRevision,
+    /// Attempt machine, rebuilt by folding the persisted attempt events.
+    pub delivery: Delivery<AcceptedWakeEvidence>,
+}
+
+/// A persisted wake's recorded key did not match its scheduling tuple.
+///
+/// The stored row is corrupt or was written by a different key derivation. Fail
+/// closed: a wake whose identity cannot be re-derived must not authorise a
+/// claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("persisted delivery key does not match its obligation, generation and revision")]
+pub struct WakeKeyMismatch;
+
 /// One durable browser wake revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserWake {
@@ -382,6 +416,40 @@ impl BrowserWake {
             revision,
             attempt_budget,
         )
+    }
+
+    /// Rebuilds a wake revision the store previously persisted.
+    ///
+    /// This is a *validating* loader, not a field-wise constructor: the
+    /// deterministic key is re-derived from the obligation, generation and
+    /// revision in `parts` and must equal the persisted one. A row whose
+    /// identity does not re-derive is refused rather than trusted.
+    ///
+    /// It is not a derivation path for [`DeliveryId`] either — the caller must
+    /// already hold the persisted correlation ID, exactly as
+    /// [`DeliveryId::from_persisted_bytes`] requires.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WakeKeyMismatch`] when the recorded key does not match.
+    pub fn rehydrate(parts: PersistedWake) -> Result<Self, WakeKeyMismatch> {
+        let expected = DeliveryKey::derive(
+            parts.target.obligation,
+            parts.binding_generation,
+            parts.revision,
+        );
+        if expected != parts.delivery_key {
+            return Err(WakeKeyMismatch);
+        }
+        Ok(Self {
+            delivery_id: parts.delivery_id,
+            delivery_key: parts.delivery_key,
+            target: parts.target,
+            binding: parts.binding,
+            binding_generation: parts.binding_generation,
+            revision: parts.revision,
+            delivery: parts.delivery,
+        })
     }
 
     /// Deterministic idempotency key for this revision.
@@ -673,6 +741,42 @@ mod tests {
         let moved = obligation_support::cancelled(&obligation);
         let err = wake.require_current_target(&moved).unwrap_err();
         assert_eq!(err.code(), "stale_delivery_target");
+    }
+
+    #[test]
+    fn rehydration_round_trips_a_persisted_wake() {
+        let mut rng = StreamRng { next: 0 };
+        let original = wake(&mut rng, DeliveryRevision::new(4));
+        let restored = BrowserWake::rehydrate(PersistedWake {
+            delivery_id: original.delivery_id().clone(),
+            delivery_key: original.delivery_key(),
+            target: original.target().clone(),
+            binding: original.binding(),
+            binding_generation: original.binding_generation(),
+            revision: original.revision(),
+            delivery: original.delivery().clone(),
+        })
+        .expect("a faithfully persisted wake re-derives its key");
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn rehydration_refuses_a_key_that_does_not_re_derive() {
+        let mut rng = StreamRng { next: 0 };
+        let original = wake(&mut rng, DeliveryRevision::FIRST);
+        let err = BrowserWake::rehydrate(PersistedWake {
+            delivery_id: original.delivery_id().clone(),
+            delivery_key: original.delivery_key(),
+            target: original.target().clone(),
+            binding: binding_id(),
+            binding_generation: BindingGeneration::FIRST,
+            // The key was derived for revision one; claiming revision two must
+            // not be accepted just because the caller says so.
+            revision: DeliveryRevision::new(2),
+            delivery: original.delivery().clone(),
+        })
+        .expect_err("a mismatched key fails closed");
+        assert_eq!(err, WakeKeyMismatch);
     }
 
     #[test]
