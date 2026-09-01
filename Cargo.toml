@@ -37,6 +37,18 @@ sha2 = { version = "0.10.9", default-features = false }
 # outer crate, which enables the `v7` feature there.
 uuid = { version = "1.26.0", default-features = false, features = ["std"] }
 
+# The single durable authority is SQLite through `rusqlite`
+# (docs/adr/0002-rust-daemon-and-sqlite.md, "Decision"). `bundled` compiles a
+# known SQLite version into the binary instead of inheriting whatever the host
+# happens to ship, which is what makes the WAL/`synchronous`/foreign-key policy
+# and the crash matrix reproducible. No pool and no async runtime: writes are
+# serialised by one daemon-owned actor thread inside `governor-store-sqlite`.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+# Real SQLite files in throwaway directories are the only honest way to test WAL,
+# `synchronous=FULL`, and reopen behaviour; `:memory:` cannot express any of them.
+tempfile = "3.24.0"
+
 # Internal crates are addressed through the workspace so paths and versions have
 # a single source of truth. Member crates opt in with `foo.workspace = true`.
 governor-core = { path = "crates/governor-core" }
