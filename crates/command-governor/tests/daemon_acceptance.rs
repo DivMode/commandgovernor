@@ -31,14 +31,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use governor_core::fence::SafeToken;
+use governor_core::fence::{DeliveryRevision, SafeToken};
 use governor_testkit::harness::Harness;
 use governor_testkit::scenario::{
-    FINAL_RESULT, accepted_work, open_turn, record_failure, start_worker,
+    FINAL_RESULT, accept_wake, accepted_work, open_turn, publish_result, record_failure,
+    schedule_wake, sentinel_message_ref, sentinel_turn_request, start_worker,
 };
 use governor_testkit::sentinels::{
-    FINAL_RESULT_SENTINEL, FORBIDDEN, assert_absent, assert_no_forbidden_bytes,
-    assert_result_sentinel_confined, contains, sweep,
+    FINAL_RESULT_SENTINEL, FORBIDDEN, assert_absent, assert_injected_confined,
+    assert_no_forbidden_bytes, assert_none_of, assert_result_sentinel_confined, contains, sweep,
+    token_shaped, unrepresentable,
 };
 
 /// The binary under test.
@@ -740,6 +742,30 @@ fn sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes() {
         let failed = open_turn(&store);
         start_worker(&store, failed.obligation, "run-2");
         record_failure(&store, failed.obligation, "run-2").expect("a worker failure");
+
+        // A third obligation whose token-shaped request fields carry the four
+        // representable sentinels, so the daemon has something real to leak.
+        let injected = store
+            .open_worker_turn(sentinel_turn_request())
+            .expect("a turn whose token fields carry sentinels");
+        start_worker(&store, injected.obligation, "run-3");
+        publish_result(
+            &store,
+            &mut artifacts,
+            injected.obligation,
+            "run-3",
+            FINAL_RESULT,
+        )
+        .expect("publication");
+        let wake = schedule_wake(
+            &store,
+            injected.obligation,
+            work.generation,
+            DeliveryRevision::FIRST,
+        )
+        .expect("scheduling");
+        accept_wake(&store, &wake, work.generation, sentinel_message_ref());
+
         work.wake.delivery_id.expose_hex()
     };
 
@@ -788,7 +814,25 @@ fn sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes() {
         "the daemon must have written diagnostics for the sweep to mean anything: {:?}",
         files.iter().map(|(name, _)| name).collect::<Vec<_>>()
     );
-    assert_no_forbidden_bytes(&files, "the state root after a daemon lifecycle");
+    // The ten classes the charset refuses are absent from every byte.
+    assert_none_of(
+        &files,
+        &unrepresentable(),
+        "the state root after a daemon lifecycle",
+    );
+    // The four that were injected reached exactly their own column, and
+    // nothing outside the database at all.
+    assert_injected_confined(&harness.inspect(), "a daemon lifecycle");
+    let outside: Vec<(String, Vec<u8>)> = files
+        .iter()
+        .filter(|(name, _)| !name.contains("governor.sqlite3"))
+        .cloned()
+        .collect();
+    assert_none_of(
+        &outside,
+        &token_shaped(),
+        "the state root outside the database",
+    );
     assert_result_sentinel_confined(
         &files,
         "artifacts/objects/",

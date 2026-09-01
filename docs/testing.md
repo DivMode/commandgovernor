@@ -668,6 +668,38 @@ After lifecycle/browser/MCP/crash/restart scenarios, byte-scan:
 Expected zero matches. Only the explicit final-result candidate/result artifact may
 contain a sentinel deliberately placed in the **final assistant result**.
 
+How the corpus splits, and what each half actually proves:
+
+- **Ten of the fourteen are structurally unrepresentable.** They carry a space,
+  a quote, a newline, a brace or a `/`, so `SafeToken` refuses them and no
+  caller can present one to any store or daemon API. That is proven by
+  `governor-core` `fence::refuses_shapes_that_could_carry_forbidden_content`,
+  by `governor-testkit` `sentinels::the_charset_claim_matches_reality` (which
+  checks the corpus against the charset instead of trusting its own label, and
+  is re-asserted at the top of each SEC-001 acceptance test), and by
+  `governor-store-sqlite` `store_privacy`'s
+  `the_schema_has_no_column_for_forbidden_content` and
+  `safe_metadata_never_holds_a_provider_shaped_document`. The byte scan for
+  them is therefore a check that nothing else wrote them.
+- **Four are token-shaped and are injected.** A session cookie, an `sk-proj`
+  key, a `ghp_` token and an environment secret are, as strings, legitimate
+  opaque identities; no charset separates them. Each is pushed through the real
+  public request field that would accept it — `display_name`,
+  `worker_turn_ref`, `source_issue_ref`, and a wake's accepted message ref —
+  and run through a full lifecycle. The assertion is confinement, not absence:
+  each reached exactly its own column and nothing else, including nothing in
+  `safe_metadata_json` except the acceptance evidence's one allowlisted field,
+  and nothing at all outside the database. The mapping is
+  `governor-testkit` `sentinels::INJECTED`; the lifecycles are
+  `sec_acceptance::sec_001_injected_token_shaped_sentinels_reach_one_column_each`
+  and the daemon suite's SEC-001 test.
+
+A value the *run* generates cannot be in a static corpus, so the wake
+correlation ID is swept separately: the store must persist its hex in
+`browser_deliveries`, and it must appear on no output surface. The daemon suite
+asserts that over CLI stdout/stderr and `logs/`, including on the refusal path
+where a projection mismatch is reported.
+
 ### SEC-002 — bootstrap metadata minimization
 
 Populate tasks/results with sensitive repository names, refs, worker/session IDs,

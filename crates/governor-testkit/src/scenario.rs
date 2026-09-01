@@ -120,6 +120,32 @@ pub fn worker_turn_request(worker_turn_ref: &str) -> OpenWorkerTurnRequest {
     }
 }
 
+/// A worker-turn request whose token-shaped fields carry SEC-001 sentinels.
+///
+/// Three of the four representable sentinels go in here, through the ordinary
+/// public request; the fourth is the acceptance evidence a wake records. See
+/// [`crate::sentinels::INJECTED`] for the pairing and the column each is
+/// allowed to reach. Everything else about the request is the usual fixture,
+/// so a lifecycle driven from it is the same lifecycle every other suite runs.
+///
+/// # Panics
+///
+/// Panics when a sentinel the corpus calls token-shaped is not, which would
+/// mean [`crate::sentinels::FORBIDDEN`] disagrees with the charset.
+#[must_use]
+pub fn sentinel_turn_request() -> OpenWorkerTurnRequest {
+    let mut request = worker_turn_request(crate::sentinels::value_of("provider api token"));
+    request.source_issue_ref = Some(token(crate::sentinels::value_of("github credential")));
+    request.session.display_name = Some(token(crate::sentinels::value_of("environment secret")));
+    request
+}
+
+/// The acceptance evidence [`sentinel_turn_request`]'s lifecycle records.
+#[must_use]
+pub fn sentinel_message_ref() -> &'static str {
+    crate::sentinels::value_of("browser cookie")
+}
+
 /// Binds a foreman conversation and returns its generation.
 ///
 /// # Panics

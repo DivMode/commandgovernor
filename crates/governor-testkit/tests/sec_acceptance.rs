@@ -5,6 +5,7 @@
 //! | Test | `docs/testing.md` | Status |
 //! | --- | --- | --- |
 //! | [`sec_001_forbidden_data_sentinel_sweep`] | SEC-001 | covered here (every scenario family, every durable surface) |
+//! | [`sec_001_injected_token_shaped_sentinels_reach_one_column_each`] | SEC-001 | the four representable classes, pushed through real request fields and confined |
 //! | [`sec_002_bootstrap_metadata_minimization`] | SEC-002 | covered here and in `gpt_acceptance` |
 //! | [`sec_003_random_wake_correlation_survives_attacker_knowledge`] | SEC-003 | covered here (256 generated attacker attempts) |
 //! | [`sec_004_stale_fence_combinations_cannot_mutate`] | SEC-004 | covered here (every combination of five fences) |
@@ -40,11 +41,12 @@ use governor_testkit::rng::SplitMix64;
 use governor_testkit::scenario::{
     ALREADY_LAPSED, FINAL_RESULT, LIVE_CLAIM, RETENTION_GRACE, accept_wake, accepted_work,
     arm_send, bind, expire_claim, handoff, id, mint_claim, open_turn, publish_result,
-    schedule_wake, snapshot, source, start_worker,
+    schedule_wake, sentinel_message_ref, sentinel_turn_request, snapshot, source, start_worker,
 };
 use governor_testkit::sentinels::{
-    FINAL_RESULT_SENTINEL, FORBIDDEN, assert_no_forbidden_bytes, assert_result_sentinel_confined,
-    contains, sweep,
+    FINAL_RESULT_SENTINEL, FORBIDDEN, assert_injected_confined, assert_no_forbidden_bytes,
+    assert_none_of, assert_result_sentinel_confined, contains, sweep, token_shaped,
+    unrepresentable,
 };
 
 /// The workspace root, from this crate's manifest directory.
@@ -151,6 +153,79 @@ fn sec_001_forbidden_data_sentinel_sweep() {
     // A positive control, so a clean sweep is not a scanner that never matches.
     let planted = vec![("planted".to_owned(), FORBIDDEN[3].value.as_bytes().to_vec())];
     assert_eq!(sweep(&planted, FORBIDDEN).len(), 1);
+}
+
+#[test]
+fn sec_001_injected_token_shaped_sentinels_reach_one_column_each() {
+    // The half `sec_001_forbidden_data_sentinel_sweep` cannot prove. Ten
+    // sentinels are refused by the charset, so a sweep for them shows only that
+    // nothing else wrote them. The other four *would* be accepted, and the only
+    // honest evidence about those is to push them through the public request
+    // fields that take them and see where they end up.
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let mut artifacts = harness.open_artifacts();
+
+    let turn = store
+        .open_worker_turn(sentinel_turn_request())
+        .expect("opening a turn whose token fields carry sentinels");
+    let generation = bind(&store, "conv-A");
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(
+        &store,
+        &mut artifacts,
+        turn.obligation,
+        "run-1",
+        FINAL_RESULT,
+    )
+    .expect("publication");
+
+    // The fourth sentinel is acceptance evidence, which arrives from the
+    // browser surface — exactly where a session cookie could be confused for a
+    // provider message identity.
+    let wake = schedule_wake(&store, turn.obligation, generation, DeliveryRevision::FIRST)
+        .expect("scheduling");
+    accept_wake(&store, &wake, generation, sentinel_message_ref());
+
+    // Then the rest of the lifecycle, so every later projection, event and
+    // report has had a chance to copy one of them somewhere.
+    let minted =
+        mint_claim(&store, turn.obligation, &wake, generation, LIVE_CLAIM).expect("a claim");
+    handoff(&store, turn.obligation, minted.claim).expect("a handoff");
+    store
+        .acknowledge_obligation(AcknowledgeRequest {
+            obligation: turn.obligation,
+            expected_version: snapshot(&store, turn.obligation).version,
+            expected_source: snapshot(&store, turn.obligation).source,
+            binding_generation: generation,
+            claim: minted.claim,
+            disposition: Disposition::Accepted,
+            retention_grace: RETENTION_GRACE,
+        })
+        .expect("a fully fenced ACK");
+    store
+        .verify_projections()
+        .expect("replay still matches with sentinels in the columns");
+    drop(store);
+
+    // Each injected value reached exactly the column it was written to. This
+    // also fails if a value reached *nothing*, which would mean the lifecycle
+    // never carried it and the sweep below proved nothing.
+    assert_injected_confined(&harness.inspect(), "SEC-001");
+
+    // The ten unrepresentable classes are still absent from every byte of
+    // every file, injection or no injection.
+    let files = harness.all_files();
+    assert_none_of(&files, &unrepresentable(), "SEC-001 injected lifecycle");
+
+    // And the four injected ones reached nothing outside the database: not the
+    // artifact bytes, not staging, not quarantine, not `logs/`.
+    let outside: Vec<(String, Vec<u8>)> = files
+        .iter()
+        .filter(|(name, _)| !name.contains("governor.sqlite3"))
+        .cloned()
+        .collect();
+    assert_none_of(&outside, &token_shaped(), "SEC-001 outside the database");
 }
 
 #[test]

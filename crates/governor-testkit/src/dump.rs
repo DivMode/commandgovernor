@@ -192,9 +192,12 @@ pub fn columns_containing(conn: &Connection, needle: &str) -> Vec<(String, Strin
         for column in columns(conn, &table) {
             let found: i64 = conn
                 .query_row(
+                    // `instr`, not `LIKE`: a needle containing `_` or `%` is
+                    // ordinary text here, and a sentinel that happens to carry
+                    // one must not silently widen the search.
                     &format!(
                         "SELECT COUNT(*) FROM \"{table}\"
-                          WHERE CAST(\"{column}\" AS TEXT) LIKE '%' || ?1 || '%'"
+                          WHERE instr(CAST(\"{column}\" AS TEXT), ?1) > 0"
                     ),
                     rusqlite::params![needle],
                     |row| row.get(0),

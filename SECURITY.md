@@ -196,12 +196,45 @@ stable tool-use fence. Multi-tool defer cannot be projected as a clean pause.
 
 ## Security testing policy
 
-The acceptance suite injects sentinel secrets into prompt/cwd/tool-argument/tool-
-result/transcript/provider-stream/browser/GitHub fields and byte-scans SQLite,
-WAL, hook inbox, managed-run staging/receipts, logs, safe diagnostics, and crash
-state for leakage. The only allowed provider-content exception is an explicitly
-designated bounded final-result candidate/artifact when the test intentionally
-places the sentinel in the final assistant result.
+The acceptance suite carries a fourteen-sentinel corpus covering prompt, cwd,
+raw tool arguments and results, shell command, transcript path, terminal
+transcript, provider intermediate records, browser cookies/tokens/headers/
+bodies, GitHub auth, and environment secrets. Two different things are proven
+about it, and they are not interchangeable:
+
+- **Ten classes are structurally unrepresentable.** They contain a space, a
+  quote, a newline, a brace or a `/`, so `SafeToken`'s charset refuses them and
+  no caller can present one to any API. That is proven by the charset itself
+  (`governor-core` `fence`:
+  `refuses_shapes_that_could_carry_forbidden_content`), by the corpus being
+  checked against the charset rather than trusted (`governor-testkit`
+  `sentinels`: `the_charset_claim_matches_reality`, re-asserted at the top of
+  each SEC-001 acceptance test), and by the schema having nowhere to put them
+  (`governor-store-sqlite` `store_privacy`:
+  `the_schema_has_no_column_for_forbidden_content`, which pins the full column
+  list, and `safe_metadata_never_holds_a_provider_shaped_document`). All ten are
+  additionally byte-scanned for, which is a check that nothing *else* wrote
+  them.
+- **Four classes are token-shaped and are injected for real.** A session cookie,
+  an `sk-proj` key, a `ghp_` token and an environment secret are strings the
+  charset cannot distinguish from a legitimate opaque identity, so the weaker
+  claim is the honest one and it is proven empirically. Each is pushed through
+  a real public request field that would accept it — `display_name`,
+  `worker_turn_ref`, `source_issue_ref`, and a wake's accepted message ref —
+  driven through a full lifecycle, and then shown to have reached exactly the
+  column it was written to and nothing else: not another table, not
+  `safe_metadata_json`, not an artifact, not a log line, not CLI output, not an
+  error string. See `governor-testkit` `sentinels::INJECTED` for the mapping,
+  and `sec_acceptance`
+  (`sec_001_injected_token_shaped_sentinels_reach_one_column_each`) plus the
+  daemon suite's SEC-001 test for the two lifecycles that carry them.
+
+The scanned surfaces are SQLite, WAL and SHM, every artifact, staging and
+quarantine file, `logs/`, and every CLI stdout and stderr. The only allowed
+provider-content exception is an explicitly designated bounded final-result
+candidate/artifact when the test intentionally places the sentinel in the final
+assistant result; its confinement to `artifacts/objects/` is asserted
+separately.
 
 Delivery/restart tests also prove:
 
