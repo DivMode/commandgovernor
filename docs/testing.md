@@ -592,6 +592,21 @@ residue is stated rather than left implicit:
   not, deliberately: the correlation ID is a possession fence and is never
   written into safe metadata. `expires_at_ms` does not either; it is a clock
   reading, not a ledger fact.
+- **Worker loadouts** — re-proved against their own recorded digest through
+  `CommittedLoadout::rehydrate`, which is *self-consistency*, not a ledger
+  fold. It catches a row whose safe fields and digest disagree; it cannot prove
+  the row is one this store wrote, and does not claim to. Authenticity is the
+  schema's job, through the composite foreign keys, and the resume path's,
+  through the `ManagedConfigVerified` witness that comes from bytes the row does
+  not control.
+
+Session lineage *is* a genuine fold: the child is the
+`session_lineage_recorded` event's own session scope, and the parent session,
+parent turn and relation are allowlisted metadata, so every column of
+`session_edges` is rebuildable and the comparison checks the projection rather
+than restating it. Managed-configuration retention is checked too: epoch 2 pins
+every configuration unconditionally, and `compare_config_retention` asserts
+exactly that rather than leaving it an undocumented habit of the writer.
 
 The mutation journal, external attempts and resource leases are outside DB-001
 by design: their own row is the durable record, and each loader re-folds that
@@ -644,6 +659,73 @@ cannot reach review either way. A hard startup refusal is reserved for damage
 to the state root itself — the instance lock, the schema epoch, a drifted
 migration, a projection that disagrees with its ledger, an unusable artifact
 root, filesystem ownership, and the control socket.
+
+---
+
+## Session lineage / worker loadout tests
+
+### SES-001 — resume uses the exact validated launch loadout
+
+Spawn a child under loadout `L`, restart, read the persisted parts back, re-prove
+them through `CommittedLoadout::rehydrate`, and resume. The resume must commit
+exactly one `non_idempotent_write` intent with no idempotency contract, produce
+its permits only after that commit, and add no second loadout snapshot and no
+rebinding.
+
+Separately, present a fence the binding does not name — the state a superseding
+write between the outside-the-transaction verification and the commit would
+leave behind. The in-transaction re-check must refuse it with zero rows changed.
+
+### SES-002 — a missing or corrupt managed configuration fails closed
+
+Two arms: the configuration file deleted, and the configuration file rewritten
+in place. Both must refuse the resume, raise a session-scoped
+`managed_config_missing`, produce no permit and no intent, and leave
+`worker_loadouts`, `session_loadouts` and `session_edges` byte-identical.
+
+The corrupt arm is the one that matters: the row's `sha256_hex` is unchanged, so
+a metadata-only check passes. Replacing the byte read with the recorded metadata
+must break it.
+
+### SES-003 — a changed role definition cannot widen a resumed child
+
+Widen the capability profile under the same identity. `capability_profiles` must
+then hold *two* rows, the launch snapshot must still read back as its original
+capability set, the widened fence must be refused, and the original fence must
+still resume under the original set. Making the profile writer replace entries
+in place must break it.
+
+The other half: one loadout per incarnation. Rebinding an incarnation to a
+different snapshot is a typed refusal, not an update.
+
+### SES-004 — lineage survives daemon and runtime restart
+
+Build A → B → C, verify that replay rebuilds both edges from
+`session_lineage_recorded` alone, then hold that across 100 restarts, checking
+parents, delegating turns and relations every round. Re-issuing an identical
+lineage record must converge without writing a row or an event.
+
+Removing `parent_turn` or `relation` from the event's allowlisted metadata must
+break it: the fold can then no longer rebuild the edge at all.
+
+### SES-005 — a multi-hop lineage cycle fails closed
+
+A → B → C is three legal constructor calls; making C the parent of A closes a
+cycle only a walk of the whole chain can see. It must be refused with
+`session_lineage_cycle` and zero rows changed. The one-hop self-parent case is a
+different guard in a different layer and must be asserted independently.
+
+A cyclic edge written directly into a restored database must make the bounded
+walk terminate and name the affected sessions, not hang — which is what the
+depth bound exists for, since SQLite's recursive CTE has no cycle detection.
+
+### SES-006 — a parent turn must belong to the parent session
+
+Present session A as parent with a turn drawn from unrelated session Z. The
+foreign key on `parent_turn_id` is satisfied, so the schema alone permits the
+row; the two-hop `turns -> session_incarnations -> sessions` join must refuse
+it. An unknown turn identity must be refused identically, so probing reveals
+nothing, and the parent's own turn must still be accepted.
 
 ---
 

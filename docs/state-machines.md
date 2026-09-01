@@ -455,3 +455,20 @@ failure, completion, interrupt, or duplicate worker.
 16. Watchdog creates attention, never fake terminal state.
 17. Deterministic delivery metadata cannot be used to derive the random wake
    `delivery_id` required for `foreman_resume`.
+18. A resume runs under the exact loadout identity **and** digest the session was
+   launched with. Editing a role, profile or configuration produces a new
+   immutable snapshot; it never rewrites the one an existing session is bound
+   to, and it never widens that session's sandbox.
+19. A resume additionally requires the managed configuration artifact to be
+   re-read and re-hashed *now*. A deleted or rewritten configuration fails
+   closed into session-scoped attention; it never resumes under whatever
+   configuration happens to be on disk.
+20. A worker process is never spawned before a durable spawn intent is
+   committed. That intent is a non-idempotent write with no idempotency
+   contract, so a quarantined one means reconciliation and never a silent
+   respawn.
+21. A presented parent turn is proved to belong to the presented parent session
+   by the store, never trusted from the caller.
+22. Logical session lineage is acyclic at every hop count, and the ancestor walk
+   that proves it is bounded, so a cycle a restore introduced is reported
+   rather than followed forever.

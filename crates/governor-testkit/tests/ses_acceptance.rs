@@ -2,14 +2,14 @@
 //!
 //! # Coverage
 //!
-//! | Test | Issue #4 acceptance item | Status |
+//! | Test | `docs/testing.md` | Status |
 //! | --- | --- | --- |
-//! | [`ses_001_resume_requires_the_exact_launch_loadout`] | 1 — resume uses the exact validated loadout | covered here, across a restart, including the in-transaction fence re-check |
-//! | [`ses_002_missing_or_corrupt_managed_config_refuses_resume`] | 2 — a missing or corrupt config fails closed | covered here, both arms, with the durable condition and zero mutation |
-//! | [`ses_003_widened_role_definition_cannot_broaden_a_resumed_child`] | 3 — a changed role definition cannot widen a resumed child | covered here, at the schema level: two snapshots under one identity |
-//! | [`ses_004_lineage_survives_daemon_restart`] | 4 — lineage survives daemon and runtime restart | covered here, over 100 restarts, with `compare_lineage` clean each time |
-//! | [`ses_005_multi_hop_lineage_cycle_fails_closed`] | 4 (integrity) | covered here, including the one-hop case the pure constructor owns |
-//! | [`ses_006_parent_turn_must_belong_to_the_parent_session`] | 4 (integrity) | covered here, proving the foreign key alone is insufficient |
+//! | [`ses_001_resume_requires_the_exact_launch_loadout`] | SES-001 | covered here, across a restart; the in-transaction fence re-check is [`ses_001_a_binding_that_moved_under_the_verification_is_refused`] |
+//! | [`ses_002_missing_or_corrupt_managed_config_refuses_resume`] | SES-002 | covered here, both arms, with the durable condition and zero mutation; the witness half is [`ses_002_a_witness_for_a_rewritten_config_cannot_be_minted`] |
+//! | [`ses_003_widened_role_definition_cannot_broaden_a_resumed_child`] | SES-003 | covered here, at the schema level: two snapshots under one identity; rebinding is [`ses_003_a_live_incarnation_cannot_be_rebound_to_another_snapshot`] |
+//! | [`ses_004_lineage_survives_daemon_restart`] | SES-004 | covered here, over 100 restarts, with `compare_lineage` clean each time |
+//! | [`ses_005_multi_hop_lineage_cycle_fails_closed`] | SES-005 | covered here, including the one-hop case the pure constructor owns; the restored-cycle half is [`ses_005_a_cycle_a_restore_created_is_reported_rather_than_walked_forever`] |
+//! | [`ses_006_parent_turn_must_belong_to_the_parent_session`] | SES-006 | covered here, proving the foreign key alone is insufficient |
 //!
 //! Two of these are about what the store *refuses*, and both use
 //! [`assert_unchanged`] rather than a count in the one table the test happened

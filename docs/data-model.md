@@ -183,6 +183,147 @@ A session name is display metadata. Continuity that cannot be proven after
 runtime/process replacement creates a new incarnation. Delayed old-incarnation
 events may be recorded for history but cannot mutate the current incarnation.
 
+## Session lineage and worker loadouts
+
+Added at schema epoch 2, following
+`docs/adr/0007-session-lineage-memory-and-analytics.md` §4–§7.
+
+```sql
+CREATE TABLE capability_profiles (
+    capability_profile_id   TEXT NOT NULL,
+    digest_hex              TEXT NOT NULL,
+    capability_count        INTEGER NOT NULL,
+    created_event_seq       INTEGER NOT NULL REFERENCES events(seq),
+    PRIMARY KEY(capability_profile_id, digest_hex)
+);
+
+CREATE TABLE capability_profile_entries (
+    capability_profile_id   TEXT NOT NULL,
+    digest_hex              TEXT NOT NULL,
+    capability_name         TEXT NOT NULL,
+    PRIMARY KEY(capability_profile_id, digest_hex, capability_name),
+    FOREIGN KEY(capability_profile_id, digest_hex)
+        REFERENCES capability_profiles(capability_profile_id, digest_hex)
+);
+
+-- `delegation_policies` and `delegation_policy_entries` have the same shape,
+-- keyed on `delegation_policy_id`, with `allowed_role` in place of
+-- `capability_name`.
+
+CREATE TABLE model_policies (
+    model_policy_id         TEXT NOT NULL,
+    digest_hex              TEXT NOT NULL,
+    created_event_seq       INTEGER NOT NULL REFERENCES events(seq),
+    PRIMARY KEY(model_policy_id, digest_hex)
+);
+
+CREATE TABLE managed_config_artifacts (
+    managed_config_artifact_id TEXT PRIMARY KEY,
+    storage_ref             TEXT NOT NULL UNIQUE,
+    sha256_hex              TEXT NOT NULL,
+    byte_len                INTEGER NOT NULL,
+    media_type              TEXT NOT NULL,
+    hook_contract_epoch     INTEGER NOT NULL,
+    created_at_ms           INTEGER NOT NULL,
+    created_event_seq       INTEGER NOT NULL REFERENCES events(seq),
+    retention_state         TEXT NOT NULL,
+    eligible_for_delete_at_ms INTEGER
+);
+
+CREATE TABLE worker_loadouts (
+    worker_loadout_id       TEXT NOT NULL,
+    digest_hex              TEXT NOT NULL,
+    worker_kind             TEXT NOT NULL,
+    runtime_kind            TEXT NOT NULL,
+    role                    TEXT NOT NULL,
+    model_policy_id         TEXT NOT NULL,
+    model_policy_digest_hex TEXT NOT NULL,
+    capability_profile_id   TEXT NOT NULL,
+    capability_profile_digest_hex TEXT NOT NULL,
+    delegation_policy_id    TEXT NOT NULL,
+    delegation_policy_digest_hex TEXT NOT NULL,
+    managed_config_artifact_id TEXT NOT NULL
+        REFERENCES managed_config_artifacts(managed_config_artifact_id),
+    managed_config_digest_hex TEXT NOT NULL,
+    managed_config_byte_len INTEGER NOT NULL,
+    hook_contract_epoch     INTEGER NOT NULL,
+    resume_policy           TEXT NOT NULL,
+    created_event_seq       INTEGER NOT NULL REFERENCES events(seq),
+    PRIMARY KEY(worker_loadout_id, digest_hex),
+    FOREIGN KEY(capability_profile_id, capability_profile_digest_hex)
+        REFERENCES capability_profiles(capability_profile_id, digest_hex),
+    FOREIGN KEY(delegation_policy_id, delegation_policy_digest_hex)
+        REFERENCES delegation_policies(delegation_policy_id, digest_hex),
+    FOREIGN KEY(model_policy_id, model_policy_digest_hex)
+        REFERENCES model_policies(model_policy_id, digest_hex)
+);
+
+CREATE TABLE session_loadouts (
+    session_id              TEXT NOT NULL REFERENCES sessions(session_id),
+    session_incarnation_id  TEXT NOT NULL
+        REFERENCES session_incarnations(session_incarnation_id),
+    worker_loadout_id       TEXT NOT NULL,
+    digest_hex              TEXT NOT NULL,
+    bound_event_seq         INTEGER NOT NULL REFERENCES events(seq),
+    PRIMARY KEY(session_incarnation_id),
+    UNIQUE(session_id, session_incarnation_id),
+    FOREIGN KEY(worker_loadout_id, digest_hex)
+        REFERENCES worker_loadouts(worker_loadout_id, digest_hex)
+);
+
+CREATE TABLE session_edges (
+    parent_session_id       TEXT NOT NULL REFERENCES sessions(session_id),
+    child_session_id        TEXT NOT NULL REFERENCES sessions(session_id),
+    parent_turn_id          TEXT NOT NULL REFERENCES turns(turn_id),
+    relation_kind           TEXT NOT NULL,
+    created_event_seq       INTEGER NOT NULL REFERENCES events(seq),
+    CHECK(parent_session_id != child_session_id),
+    PRIMARY KEY(child_session_id)
+);
+```
+
+**Immutability is the primary key, not a rule.** Every snapshot table is keyed
+on `(identity, digest_hex)` and there is no `UPDATE` statement for any of them
+anywhere in the store. Editing a role file therefore inserts a *second*
+snapshot, and the composite foreign keys mean a loadout that embedded the first
+one continues to resolve to the first one. That is what makes "a changed role
+definition cannot widen a resumed child" a schema property.
+
+**Deviation: one loadout per incarnation.** The binding is a separate table
+rather than columns on `sessions`, keyed on `session_incarnation_id`. A resume
+that legitimately produces a new loadout revision starts a new incarnation
+rather than mutating a row, so resume cannot widen a live session's sandbox.
+
+**Deviation: one parent per child.** ADR 0007 §5 sketches the lineage relation
+without a key. `PRIMARY KEY(child_session_id)` makes it single-parent, which
+every `SessionRelation` variant including `provider_fork` already is, and which
+reduces cycle detection from a search of a general graph to a bounded upward
+walk of a chain. A future multi-parent DAG is a deliberate migration.
+
+**Deviation: managed configurations are pinned unconditionally at epoch 2.**
+`retention_state` exists for shape-compatibility with `result_artifacts` and is
+always `pinned`, with `eligible_for_delete_at_ms` always NULL, enforced by CHECK
+constraints and asserted by `replay::compare_config_retention`. A configuration
+is pinned by any loadout any session was ever launched under, and epoch 2
+defines no releaser for that relation, so releasing one would be a guess.
+Reclaiming configurations is a bounded follow-up that will arrive as a migration
+defining the releaser.
+
+**The parent-turn foreign key is necessary but not sufficient.** `turns` records
+the incarnation, not the session, so proving a presented parent turn belongs to
+the presented parent session is a two-hop join
+(`turns -> session_incarnations -> sessions`) the store performs inside the
+edge-insert transaction. The foreign key alone is satisfied by any turn of any
+session.
+
+**Cycle prevention is in the transaction, with a bound.** `SessionEdge::new`
+refuses only the one-hop self-parent case. The multi-hop case is a property of
+the whole durable graph, so the proposed parent's ancestor chain is walked under
+the write lock the insert already holds, with a depth bound of 64. SQLite's
+recursive CTE has no cycle detection of its own, so the bound is the only thing
+between a cycle a restore already created and an infinite loop; exceeding it is
+a typed refusal, never a truncation.
+
 ## Turns
 
 ```sql
@@ -750,6 +891,7 @@ CREATE TABLE health_conditions (
     kind                    TEXT NOT NULL,
     state                   TEXT NOT NULL,
     task_id                 TEXT,
+    session_id              TEXT REFERENCES sessions(session_id),
     turn_id                 TEXT,
     obligation_id           TEXT,
     external_attempt_id     TEXT REFERENCES external_attempts(external_attempt_id),
@@ -761,6 +903,7 @@ CREATE UNIQUE INDEX health_conditions_one_open_per_scope
     ON health_conditions(
         kind,
         COALESCE(task_id, ''),
+        COALESCE(session_id, ''),
         COALESCE(turn_id, ''),
         COALESCE(obligation_id, ''),
         COALESCE(external_attempt_id, '')
@@ -772,6 +915,14 @@ CREATE UNIQUE INDEX health_conditions_one_open_per_scope
 `HealthScope` field: scope is part of a condition's identity, so without it two
 ambiguous external attempts would collapse onto one condition. The partial unique
 index is the durable half of that deduplication.
+
+`session_id` is a fifth, added at schema epoch 2 for the same reason. A
+session's launch loadout, its managed configuration and its lineage are facts
+about the *session*: a session with no open turn can still have an unverifiable
+loadout, and blaming a turn for it would resolve the condition as soon as that
+turn closed. SQLite cannot alter a `CHECK`, so migration 0002 rebuilds the table
+to widen `kind` and recreates **both** indexes; losing the partial unique one
+there would silently turn one-open-per-scope back into a convention.
 
 Initial kinds include:
 
@@ -785,6 +936,9 @@ Initial kinds include:
 - `input_detail_unavailable`
 - `worker_defer_shape_unsupported`
 - `reconciliation_required`
+- `loadout_unverifiable` (session scope, epoch 2)
+- `managed_config_missing` (session scope, epoch 2)
+- `lineage_broken` (session scope, epoch 2)
 
 `reconciliation_required` is raised for an external attempt whose intent is
 durable but whose outcome was never proven — the crash window `ambiguous`
@@ -1051,6 +1205,35 @@ One transaction verifies obligation version, source event, binding generation,
 claim, and disposition; appends explicit disposition event; closes projection; and
 marks pinned artifacts retention-eligible only as policy permits. No external I/O
 occurs inside ACK.
+
+### Worker spawn/resume authorization
+
+Artifact reading happens *outside* any transaction, because the store performs
+no filesystem I/O at all. What makes that sound is that the store re-checks the
+same facts inside one before it hands anything out:
+
+1. read the persisted `session_loadouts` + `worker_loadouts` parts;
+2. `CommittedLoadout::rehydrate` — pure; a refusal raises `loadout_unverifiable`;
+3. read the managed configuration's bytes and hash them *now*; a refusal raises
+   `managed_config_missing`;
+4. `ManagedConfigVerified::verify` from that observation, then
+   `CommittedLoadout::admit_resume`, which yields a `ResumePermit`;
+5. **one `BEGIN IMMEDIATE`**: re-read the binding and require the
+   `(worker_loadout_id, digest_hex)` pair to be identical to what step 2
+   verified; re-read the configuration metadata and require it identical to what
+   step 3 observed; insert the `external_attempts` intent row;
+6. `COMMIT`, then and only then mint the `ExternalExecutionPermit`;
+7. hand the adapter `(ExternalExecutionPermit, ResumePermit)` by value.
+
+Step 3 is a byte read and a fresh hash rather than a metadata comparison: the
+row's `sha256_hex` is unchanged when the file on disk has been rewritten, so a
+metadata-only check passes for exactly the case the check exists to catch.
+
+The intent is `non_idempotent_write` with **no** idempotency contract, so
+`ExternalAttempt::admit_retry` refuses an automatic retry. A quarantined spawn
+intent means a worker process may exist: the answer is reconciliation — find it,
+or start a new logical incarnation with its own binding — never a silent
+respawn.
 
 ### How "no external I/O inside a transaction" is enforced
 
