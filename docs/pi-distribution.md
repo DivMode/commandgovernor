@@ -14,7 +14,10 @@ names each of those concerns and records that nothing owns it yet.
 ## Layout
 
 ```
-package.json                     the pi package manifest
+package.json                     the pi package manifest + tooling devDeps
+package-lock.json                the tooling lockfile
+tsconfig.json                    typecheck configuration (noEmit)
+.npmrc                           ignore-scripts=true
 harness/
   extensions/
     cg-version-guard.ts          refuses an unpinned runtime
@@ -26,6 +29,7 @@ harness/
 pins/
   pi-0.84.4/package.json         verbatim release asset
   pi-0.84.4/package-lock.json    verbatim release asset
+  pi-0.84.4/.npmrc               ignore-scripts=true
   SHA256SUMS                     verbatim release asset
   pins.json                      the pin record
 bin/cg-pi                        launcher
@@ -50,7 +54,7 @@ reads `harness/agents/` directly.
 scripts/bootstrap.sh
 ```
 
-Five steps, in an order that matters:
+Six steps, in an order that matters:
 
 1. **Node is present and at or above the floor** recorded in `pins.json`. The
    floor lives in one place; `package.json` declaring a different one is a
@@ -65,14 +69,27 @@ Five steps, in an order that matters:
 3. **`npm ci --ignore-scripts`** against the vendored lockfile root. This is
    upstream's own installer input, so it cannot drift from what `pi update`
    produces, and it reproduces the whole transitive tree by `resolved` plus
-   `integrity`.
-4. **The binary that came out reports the pinned version.** Asserted against
-   `pins.json`, not against a second hardcoded copy.
-5. **`node_modules/@earendil-works` is linked** at the repository root so
+   `integrity`. Two pinned transitive dependencies (`@google/genai`,
+   `protobufjs`) carry install scripts, so a committed `.npmrc` sets
+   `ignore-scripts=true` as well — the hardening must not depend on everyone
+   remembering to go through this script.
+4. **The repository's own tooling is installed** (`npm ci --ignore-scripts` at
+   the root: TypeScript and the Node type definitions, both devDependencies, so
+   `pi install`'s `npm install --omit=dev` never fetches them for a consumer).
+   This runs *before* step 5, because `npm ci` deletes `node_modules` wholesale
+   and links created first would be silently destroyed.
+5. **Exactly the five Pi-provided packages are linked** into
+   `node_modules/`, one by one, so
    `import { VERSION } from "@earendil-works/pi-coding-agent"` inside
-   `harness/extensions/` resolves to the pinned copy and nothing else. A scope
-   symlink rather than a whole tree, so only the five packages Pi contractually
-   provides become visible.
+   `harness/extensions/` resolves to the pinned copy and nothing else.
+   Symlinking the whole `@earendil-works` scope would be shorter and wrong in
+   both directions: it exposes `pi-client`, `pi-protocol` and `pi-telemetry`,
+   which an extension may **not** import and which would then typecheck locally
+   and fail inside Pi, and it misses `typebox`, which *is* provided but is not
+   in that scope. `P1-PACKAGES` asserts both directions.
+6. **The binary that came out reports the pinned version.** Asserted against
+   `pins.json`, not against a second hardcoded copy. Last, so it runs against
+   the tree the previous steps actually produced.
 
 Any failure exits non-zero with the two values that disagree.
 
@@ -123,6 +140,33 @@ Measured against the pinned binary, with an isolated agent directory:
 A distribution whose entire point is a curated project-level loadout cannot
 leave that to a default, so `bin/cg-pi` passes `--approve`.
 
+But Pi resolves *the project* from the **working directory**, not from where the
+launcher lives — so a bare `--approve` is not trust of this repository at all.
+It is trust of whatever directory the caller happened to be standing in.
+Measured: run from an unrelated directory holding a `.pi/extensions/`, the
+launcher loaded that directory's extension and did **not** load
+cg-version-guard. A launcher that auto-trusts unreviewed code while dropping its
+own safety extension is worse than no launcher.
+
+So the grant is confined structurally, in two halves that are both needed:
+
+1. **Refuse** unless the working directory is inside this checkout. That is what
+   stops the foreign directory being trusted.
+2. **`cd` to the repository root** before exec. That is what makes the approval
+   mean *this* repository — Pi only discovers this loadout from the root, so
+   without it a call from a subdirectory would resolve nothing, silently and
+   with a successful exit.
+
+`P1-LAUNCHER` pins both, with a negative control: from a temp directory outside
+the checkout the launcher must exit non-zero **and** the foreign extension must
+not appear in the resolved inventory.
+
+A consumer-facing launcher will need a different trust story and must not copy
+this one: a consumer trusts *their* project, which pins Command Governor as a
+package in its own `.pi/settings.json`, so the confinement would be to their
+repository root and the loadout would arrive through the pinned package rather
+than through this checkout.
+
 Read that narrowly. It is trust of **this repository's own committed
 configuration**, which is reviewed like any other code here. It is not a general
 trust bypass and it grants no permission Pi would otherwise withhold: project
@@ -131,9 +175,10 @@ ships no sandbox and no permission system, and runs with the permissions of the
 user that launched it. Do not extend `--approve` to a repository whose `.pi`
 directory nobody has read.
 
-`--approve` is passed as the first argument so a caller supplying `--no-approve`
-afterwards is making a deliberate choice. Which flag wins when both are present
-is Pi's business and was not characterized.
+`--approve` is passed as the first argument so a caller can override it.
+Characterized against the pinned binary: **the last flag wins.** `--approve
+--no-approve` resolves no project resources; `--no-approve --approve` resolves
+them. A caller appending `--no-approve` therefore gets what they asked for.
 
 ### Delegated work gets a durable home
 
@@ -186,12 +231,15 @@ that owns it, and names the ones nothing owns yet.
 
 This is checked rather than documented because the failure mode is undetectable.
 Pi 0.84.4 resolves competing extension handlers **silently by load order**: for a
-`session_before` event, every handler's result overwrites the previous one, so
-two extensions that both answer `session_before_compact` do not conflict — the
-last one loaded wins, with no error and no warning. Pi also exposes no runtime
-API for enumerating loaded extensions, so nothing can detect the collision from
-inside a session. The only place it can be caught is over the distribution's own
-pinned manifest, at build time.
+`session_before` event, each handler's result replaces the previous one, so two
+extensions that both answer `session_before_compact` do not conflict — the last
+one loaded wins, with no error and no warning. The single exception is a handler
+returning `{cancel: true}`, which short-circuits and returns immediately, so
+cancellation is first-wins while every other outcome is last-wins. Both halves
+are the same problem for a distribution: load order decides. Pi also exposes no
+runtime API for enumerating loaded extensions, so nothing can detect the
+collision from inside a session. The only place it can be caught is over the
+distribution's own pinned manifest, at build time.
 
 Two consequences for the file's shape. `concerns` is an array, not an object
 keyed by concern, because an object cannot represent two owners for one key and
@@ -216,6 +264,13 @@ Node's own `node --test` with native type stripping. No test-framework
 dependency and no build step — the `.ts` files the suite imports are the ones Pi
 loads through jiti.
 
+The run starts with `tsc --noEmit`. Node's type stripping erases types without
+checking them, so without that step every type in the harness and the suite is
+decoration. `tsconfig.json` sets `erasableSyntaxOnly`, which also rejects syntax
+the stripper cannot run — enums, parameter properties, namespaces — that tsc
+would otherwise accept and Node would refuse at load. TypeScript is an
+exact-version devDependency with a committed lockfile.
+
 **Tier 1 (credential-free)** must pass on every change and is the gate on any
 re-pin:
 
@@ -229,7 +284,9 @@ re-pin:
 | P1-ROLES | role frontmatter validates against the schema; tools and models are checked against the pinned runtime; delegation targets exist; reviewer independence |
 | P1-AUTH | no concern has two owners; settings and pins agree; every pinned package names its authority |
 | P1-DRIFT | a fabricated pin record makes the guard refuse, in both directions, and mutates nothing |
-| P1-SCAFFOLDING | the injected clock and the two domain-separated seeded streams behave; the restart primitive refuses to pretend |
+| P1-SCAFFOLDING | the injected clock and the two domain-separated seeded streams behave; delivery ids are redaction-safe over 10,000 draws; the restart primitive refuses to pretend |
+| P1-LAUNCHER | the launcher refuses outside the checkout and does not resolve a foreign project's extensions; inside it, the loadout resolves from the root and from a subdirectory |
+| P1-PACKAGES | exactly the five Pi-provided packages resolve from the repository root, and the three same-scope non-contractual ones do not |
 
 **Tier 2 (credentialed)** is skipped unless `CG_CONFORMANCE_LIVE=1`. Its five
 tests are placeholders recorded as skips with stated reasons. Each stands in for
@@ -237,6 +294,19 @@ a claim this distribution has inherited and has **not** verified — most
 importantly that `agent_settled` is non-vetoable, which is asserted by ADR 0008
 and by the Pi review but has a precedent for being wrong about a different
 harness's stop hook. None of them is faked green.
+
+### Checks that could not otherwise come back negative
+
+Two policies — the third-party pin rule and one-authority-per-concern — run over
+collections that are legitimately empty today: `pins.json` `packages[]` has no
+entries. An assertion looping over an empty array passes without evaluating
+anything, which is not a measurement. Both rules therefore live in
+`conformance/lib/policy.ts` as functions, and the suite runs them against
+fabricated records that violate each one: a git tag ref, a branch, a bare name,
+an abbreviated SHA, a package naming no authority, two packages claiming one
+concern, a duplicated concern, an owner path that does not exist, and an
+unassigned concern with no planned owner. The rules are shown to fail before
+they are trusted to pass.
 
 ### What the suite deliberately does not claim
 
@@ -255,8 +325,9 @@ not have.
 ## Re-pinning Pi
 
 The conformance suite is the **gate** on a re-pin, not a formality after one.
-Upstream cut six releases in the five weeks to v0.84.4, so this is a scheduled
-ritual rather than an ad-hoc upgrade.
+Upstream cut six releases in the roughly four and a half weeks from v0.83.0
+(2026-07-29) to v0.84.4 (2026-08-28), so this is a scheduled ritual rather than
+an ad-hoc upgrade.
 
 1. Download the new release's `pi-coding-agent-install-package.json`,
    `pi-coding-agent-install-package-lock.json` and `SHA256SUMS`. Verify the two

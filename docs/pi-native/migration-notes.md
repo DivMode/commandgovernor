@@ -25,7 +25,7 @@ It lives on two unmerged sibling branches:
   (1547 lines), `src/digest.rs`, `tests/persisted_digest_vectors.rs`;
 - **`feat/session-lineage-loadout-store`** @ `8cfbcd0` — schema **epoch 2**,
   `crates/governor-store-sqlite/src/ops/session.rs`,
-  `migrations/0002_session_lineage_and_loadouts.sql`,
+  `crates/governor-store-sqlite/src/migrations/0002_session_lineage_and_loadouts.sql`,
   `crates/governor-daemon/src/worker.rs`,
   `crates/governor-testkit/tests/ses_acceptance.rs` (779 lines), and
   **SES-001..006** plus required invariants 18–22 in the docs.
@@ -205,7 +205,7 @@ Recorded so they are decided rather than inherited:
 ## Keep the acceptance IDs
 
 `docs/testing.md` is already a complete, implementation-independent
-specification of 99 numbered acceptance tests in eight families, plus 12
+specification of 105 numbered acceptance tests in eight families, plus 12
 pattern-review tests and the six SES tests on the sibling branch. 64 of those
 IDs are implemented in `governor-testkit`.
 

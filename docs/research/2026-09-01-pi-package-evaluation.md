@@ -7,6 +7,14 @@
 
 ---
 
+> **Editorial correction, 2026-09-01 (applied when this report was filed into the
+> repository).** §1B described `pi-goal-x` as "the only candidate with an
+> explicit upper bound". The tables in this same report list two others with
+> upper bounds (`pi-blackhole` at `<1.0.0`, `@geminixiang/pi-agent-team` at
+> `<0.83.0`), so the claim is corrected to the narrower and accurate one: it has
+> the tightest upper bound. Nothing else in this document has been changed from
+> the version delivered by the research pass.
+
 ## 0. Headline correction to ADR 0008 / the 2026-09-01 research review
 
 **The npm package names cited in ADR 0008 do not resolve to the GitHub repositories cited in ADR 0008.** This is not a nuance; it changes the candidate set.
@@ -47,7 +55,7 @@ Legend for **Authority owned** — the single lifecycle concern the package woul
 | **`@geminixiang/pi-task-protocol`** | `geminixiang/pi-stuff` @ `dbfb594`, `packages/pi-task-protocol`, `0.1.0`. **Not published to npm** (E404) | MIT per `package.json`; repo has no LICENSE file | Reference contract for Command Governor's own task/obligation schema | — (pure schema, no runtime state) | 304 lines, no Pi peer dep, clean transition matrix. Lacks an idempotency key, revision/generation numbers, and stale-reply fencing — exactly the three things Command Governor needs. Unpublished, so adopting means vendoring ~300 lines. | **ADOPT as vendored reference**, then extend |
 | **`@geminixiang/pi-supervisor`** | `geminixiang/pi-stuff` @ `dbfb594`, `packages/pi-supervisor`, `0.1.0`. **Not published to npm** (E404) | MIT per `package.json`; repo has no LICENSE file | — | Would contend with `pi-subagents` for run/process lifecycle, as a machine-global singleton | **It reconciles by killing.** `src/runner.ts:77-96` terminalises every non-terminal task on daemon restart — including ones whose process identity verifies, which it SIGTERM/SIGKILLs and marks `failed`. Zero test coverage of that branch. No directory fsync. One commit ever. See §2.2. | **REJECT** |
 | **`pi-background-tasks`** | npm `2.4.2` (2026-08-14); `ismailsaleekh/pi-background-tasks` @ `37fdcf0` | ISC | — | Would contend with `pi-subagents` for background child processes | Peer range includes `^0.84.0`; 26,575 downloads/week; state in durable `.pi/tasks`. But `src/extension.ts:56-59` states outright: *"No detached/restart reattachment: live child processes belong to this Pi extension runtime and are killed on session shutdown/reload."* Delegated work does not survive a restart. | **REJECT** |
-| **`pi-goal-x`** | npm `0.30.5` (2026-08-25); `github.com/tmonk/pi-goal-x` @ `59826ec818aa8883329a74c62000d18aa1e1dbfe` | MIT | Durable long-running objectives | **Collides with Command Governor's own obligation authority and with `pi-subagents` missions** | Peer deps `>=0.83.0 <0.85.0` — compatible with the pin, and the only candidate with an explicit upper bound. Has real fault-injection and checkpoint-recovery tests (`tests/fault-injection.test.ts`, `tests/goal-ledger-checkpoint.test.ts`, `npm run test:checkpoint-recovery`). But it writes auto-continue checkpoints **into the Pi session file** and ships `pi-goal-x-recover` to repair sessions bloated by its own earlier versions (README §"Session checkpoint recovery"). It also runs its own **independent completion review** agent, which is precisely the foreman disposition authority Command Governor must own. | **REJECT** for the foundation — direct authority conflict. Re-examine its ledger/fault-injection tests as a source of conformance-test ideas |
+| **`pi-goal-x`** | npm `0.30.5` (2026-08-25); `github.com/tmonk/pi-goal-x` @ `59826ec818aa8883329a74c62000d18aa1e1dbfe` | MIT | Durable long-running objectives | **Collides with Command Governor's own obligation authority and with `pi-subagents` missions** | Peer deps `>=0.83.0 <0.85.0` — compatible with the pin, and the tightest upper bound among the candidates (`pi-blackhole` declares `<1.0.0` and `pi-agent-team` `<0.83.0`, so it is not the only one with an upper bound). Has real fault-injection and checkpoint-recovery tests (`tests/fault-injection.test.ts`, `tests/goal-ledger-checkpoint.test.ts`, `npm run test:checkpoint-recovery`). But it writes auto-continue checkpoints **into the Pi session file** and ships `pi-goal-x-recover` to repair sessions bloated by its own earlier versions (README §"Session checkpoint recovery"). It also runs its own **independent completion review** agent, which is precisely the foreman disposition authority Command Governor must own. | **REJECT** for the foundation — direct authority conflict. Re-examine its ledger/fault-injection tests as a source of conformance-test ideas |
 
 ### C. Memory (evaluation only — not in the first PR)
 

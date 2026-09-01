@@ -8,12 +8,20 @@
 
 ---
 
+> **Editorial correction, 2026-09-01 (applied when this report was filed into the
+> repository).** The acceptance-ID count was stated as 99 in §0 and §4.9. The
+> per-family enumeration in §4.9 sums to **105** (OBL 10, ART 11, DEL 18, GPT 12,
+> WRK 25, INP 11, DB 8, SEC 10), and re-counting the unique IDs in
+> `docs/testing.md` also gives 105. Both figures are corrected below. Nothing
+> else in this document has been changed from the version delivered by the
+> research pass, apart from stripping absolute scratchpad paths.
+
 ## 0. Executive summary
 
 The Rust scaffold is worth mining for four things, with sharply different values.
 
 1. **The acceptance-ID catalog.** `docs/testing.md` is already a complete,
-   implementation-independent specification of 99 numbered acceptance tests in
+   implementation-independent specification of 105 numbered acceptance tests in
    eight families, plus 12 numbered pattern-review tests and six SES tests on a
    sibling branch. 64 of those IDs are implemented in `governor-testkit`. Adopt
    the IDs verbatim: an ID that survives the pivot is how a reviewer proves the
@@ -2424,7 +2432,7 @@ Plus the daemon's startup/doctor refusal codes (`authority_held`,
 
 ### 4.9 The acceptance-ID catalog
 
-`docs/testing.md` defines 99 IDs across eight families — OBL 1–10, ART 1–11,
+`docs/testing.md` defines 105 IDs across eight families — OBL 1–10, ART 1–11,
 DEL 1–18, GPT 1–12, WRK 1–25, INP 1–11, DB 1–8, SEC 1–10 — plus SES 1–6 on the
 sibling branch and the pattern review's numbered tests 1–12. **64 are implemented
 in `governor-testkit`**, with per-file coverage tables mapping test → ID → status,
