@@ -10,7 +10,9 @@ name: CI
 #
 # The Rust toolchain is never named here: every job picks it up from
 # rust-toolchain.toml via rustup, so the pin has exactly one source of truth.
-# Third-party actions are pinned by full commit SHA per docs/threat-model.md.
+# Third-party actions are pinned by full commit SHA per docs/threat-model.md,
+# installed tools by exact version, and every Cargo invocation that resolves
+# dependencies runs --locked so CI builds exactly what Cargo.lock records.
 
 on:
   push:
@@ -62,9 +64,9 @@ jobs:
         with:
           key: ${{ matrix.os }}
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
   supply-chain:
     # Vulnerability, licence, source, and banned-crate policy. Kept in its own
@@ -77,8 +79,8 @@ jobs:
       - name: Install cargo-audit and cargo-deny
         uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
         with:
-          tool: cargo-audit,cargo-deny
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - name: cargo audit
         run: cargo audit --deny warnings
       - name: cargo deny check
-        run: cargo deny --all-features check
+        run: cargo deny --all-features --locked check
