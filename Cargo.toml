@@ -50,6 +50,25 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # `synchronous=FULL`, and reopen behaviour; `:memory:` cannot express any of them.
 tempfile = "3.24.0"
 
+# The OS entropy source, for the production `SecureRandom` port in
+# `governor-daemon`. `getrandom` is the rust-random project's thin wrapper over
+# `getentropy(2)`/`getrandom(2)` — no userspace generator, so there is no seed
+# to get wrong and no state to fork-share. `uuid`'s `v7` feature already pulls
+# it in, so naming it here adds a call site rather than a dependency.
+getrandom = "0.4.3"
+
+# `SIGINT`/`SIGTERM` handling for the daemon's clean shutdown. The workspace
+# denies `unsafe_code`, and installing a signal handler is unavoidably unsafe;
+# `signal-hook` is the ecosystem's small, audited encapsulation of exactly that.
+# Only `flag::register` is used, so the `channel`/`iterator` defaults are off.
+signal-hook = { version = "0.4.4", default-features = false }
+
+# `anyhow` at the binary/composition boundary only, per
+# docs/adr/0002-rust-daemon-and-sqlite.md "Error policy": `command-governor`'s
+# `main` adds operational context to a refusal that is already typed and
+# machine-classifiable by the time it gets there.
+anyhow = "1.0.104"
+
 # Internal crates are addressed through the workspace so paths and versions have
 # a single source of truth. Member crates opt in with `foo.workspace = true`.
 governor-core = { path = "crates/governor-core" }

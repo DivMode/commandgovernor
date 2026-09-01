@@ -14,6 +14,27 @@ name = "command-governor"
 path = "src/main.rs"
 
 [dependencies]
+governor-daemon.workspace = true
+
+# Typed usage errors, so the exit-code decision is a match rather than string
+# comparison. The domain crates' policy applies here too.
+thiserror.workspace = true
+
+# The binary/composition boundary, and the only place `anyhow` is permitted
+# (docs/adr/0002-rust-daemon-and-sqlite.md, "Error policy"). Every refusal is
+# already a typed `DaemonError` by the time it reaches `main`; `anyhow` adds the
+# operational context around it and nothing else.
+anyhow.workspace = true
+
+[dev-dependencies]
+# The acceptance suite spawns this crate's own binary, which is why it lives
+# here: `CARGO_BIN_EXE_command-governor` is only set for integration tests of
+# the package that defines the binary.
+governor-testkit.workspace = true
+governor-core.workspace = true
+governor-store-sqlite.workspace = true
+governor-artifacts.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

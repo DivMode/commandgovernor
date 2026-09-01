@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -42,6 +48,16 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "command-governor"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "governor-artifacts",
+ "governor-core",
+ "governor-daemon",
+ "governor-store-sqlite",
+ "governor-testkit",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -183,6 +199,17 @@ dependencies = [
 [[package]]
 name = "governor-daemon"
 version = "0.0.0"
+dependencies = [
+ "getrandom",
+ "governor-artifacts",
+ "governor-core",
+ "governor-store-sqlite",
+ "sha2",
+ "signal-hook",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
 
 [[package]]
 name = "governor-store-sqlite"
@@ -373,6 +400,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -469,6 +516,7 @@ version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
+ "getrandom",
  "js-sys",
  "wasm-bindgen",
 ]
