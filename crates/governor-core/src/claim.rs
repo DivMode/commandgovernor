@@ -124,6 +124,82 @@ impl ForemanClaim {
     }
 }
 
+/// The persisted parts of one foreman claim.
+///
+/// Only [`ForemanClaim::rehydrate`] consumes this, and it re-proves the parts
+/// against the wake that minted them before producing a claim. It exists
+/// because a claim cannot be rebuilt by replaying [`mint_claim`]: minting
+/// advances the obligation, so replaying it against the *current* obligation
+/// would either fail or mint a different claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedClaim {
+    /// Claim identity.
+    pub id: ClaimId,
+    /// Obligation the claim holds.
+    pub obligation: ObligationId,
+    /// Obligation version at the moment of claiming.
+    pub version_at_claim: ObligationVersion,
+    /// Binding generation the claim was minted under.
+    pub binding_generation: BindingGeneration,
+    /// Random correlation ID of the accepted wake it was minted from.
+    pub wake_delivery: DeliveryId,
+    /// Recorded lifecycle state.
+    pub state: ClaimState,
+    /// Instant the claim was minted.
+    pub created_at: Timestamp,
+    /// Instant the claim stops authorising mutations.
+    pub expires_at: Timestamp,
+}
+
+/// A persisted claim could not be re-proved against its originating wake.
+///
+/// The stored row is corrupt, or was written against a different wake. Fail
+/// closed: a claim whose provenance cannot be re-established must not authorise
+/// an ACK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("persisted claim does not match the accepted wake it records")]
+pub struct ClaimProvenanceMismatch;
+
+impl ForemanClaim {
+    /// Rebuilds a claim the store previously persisted.
+    ///
+    /// A *validating* loader, not a field-wise constructor: it re-runs the wake
+    /// half of [`mint_claim`]'s admission test against `wake`, which is frozen
+    /// once accepted and therefore still checkable at any later time. The
+    /// obligation half is deliberately not re-checked — minting advanced the
+    /// obligation past `version_at_claim`, so the current version is *expected*
+    /// to differ.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClaimProvenanceMismatch`] when the wake is not an accepted,
+    /// same-generation wake for this obligation, when the recorded correlation
+    /// ID is not the wake's, or when the recorded lifetime runs backwards.
+    pub fn rehydrate(
+        parts: PersistedClaim,
+        wake: &BrowserWake,
+    ) -> Result<Self, ClaimProvenanceMismatch> {
+        let provenance = wake.state() == DeliveryState::Accepted
+            && wake.binding_generation() == parts.binding_generation
+            && wake.target().obligation == parts.obligation
+            && wake.correlates_with(&parts.wake_delivery)
+            && parts.expires_at >= parts.created_at;
+        if !provenance {
+            return Err(ClaimProvenanceMismatch);
+        }
+        Ok(Self {
+            id: parts.id,
+            obligation: parts.obligation,
+            version_at_claim: parts.version_at_claim,
+            binding_generation: parts.binding_generation,
+            wake_delivery: parts.wake_delivery,
+            state: parts.state,
+            created_at: parts.created_at,
+            expires_at: parts.expires_at,
+        })
+    }
+}
+
 /// The fences `foreman_resume` must present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeRequest {
@@ -503,6 +579,91 @@ mod tests {
             disposition,
             at: at(12),
         }
+    }
+
+    #[test]
+    fn rehydration_round_trips_a_persisted_claim() {
+        let mut rng = StreamRng { next: 0 };
+        let obligation = obligation_support::completed();
+        let wake = accepted_wake(&mut rng, &obligation);
+        let bindings = binding_support::bound("conv-A");
+        let minted = mint_claim(
+            &resume_request(&wake, &obligation),
+            &bindings,
+            &wake,
+            &obligation,
+            claim_id(),
+            at(10),
+            DurationMs::from_millis(60_000),
+        )
+        .unwrap();
+        let original = minted.claim;
+
+        let restored = ForemanClaim::rehydrate(
+            PersistedClaim {
+                id: original.id(),
+                obligation: original.obligation(),
+                version_at_claim: original.version_at_claim(),
+                binding_generation: original.binding_generation(),
+                wake_delivery: original.wake_delivery().clone(),
+                state: original.state(),
+                created_at: original.created_at(),
+                expires_at: original.expires_at(),
+            },
+            &wake,
+        )
+        .expect("a faithfully persisted claim re-proves against its wake");
+        assert_eq!(restored, original);
+        // And it is still usable for the fence it exists for.
+        assert!(restored.require_live(at(11)).is_ok());
+    }
+
+    #[test]
+    fn rehydration_refuses_a_claim_whose_wake_does_not_prove_it() {
+        let mut rng = StreamRng { next: 0 };
+        let obligation = obligation_support::completed();
+        let wake = accepted_wake(&mut rng, &obligation);
+        let parts = |wake_delivery: DeliveryId| PersistedClaim {
+            id: claim_id(),
+            obligation: obligation.id(),
+            version_at_claim: obligation.version(),
+            binding_generation: BindingGeneration::FIRST,
+            wake_delivery,
+            state: ClaimState::Live,
+            created_at: at(10),
+            expires_at: at(60_010),
+        };
+
+        // A correlation ID this wake does not carry.
+        let mut other = StreamRng { next: 200 };
+        let forged = DeliveryId::generate(&mut other);
+        assert_eq!(
+            ForemanClaim::rehydrate(parts(forged), &wake),
+            Err(ClaimProvenanceMismatch)
+        );
+
+        // A wake that was never accepted cannot have minted a claim.
+        let pending = BrowserWake::create(
+            &mut rng,
+            WakeTarget::snapshot(&obligation),
+            ForemanBindingId::from_uuid(Uuid::from_u128(1)),
+            BindingGeneration::FIRST,
+            3,
+        );
+        assert_eq!(
+            ForemanClaim::rehydrate(parts(pending.delivery_id().clone()), &pending),
+            Err(ClaimProvenanceMismatch)
+        );
+
+        // A lifetime that runs backwards is not a lifetime.
+        let backwards = PersistedClaim {
+            expires_at: at(9),
+            ..parts(wake.delivery_id().clone())
+        };
+        assert_eq!(
+            ForemanClaim::rehydrate(backwards, &wake),
+            Err(ClaimProvenanceMismatch)
+        );
     }
 
     #[test]
