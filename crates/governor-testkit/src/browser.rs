@@ -26,14 +26,15 @@
 //! it.
 
 use governor_core::delivery::{DeliveryId, WeakBrowserSignal};
-use governor_core::fence::AttemptNo;
+use governor_core::fence::{AttemptNo, BindingGeneration};
 use governor_core::foreman_turn::ProviderMessageRef;
 use governor_core::id::ObligationId;
-use governor_core::outbound::{AmbiguityReason, FailureClass};
+use governor_core::outbound::{AmbiguityReason, DeliveryState, FailureClass};
+use governor_store_sqlite::{ClaimedDelivery, DeliveryOutcome, Store};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
 use std::path::Path;
 
-use crate::scenario::token;
+use crate::scenario::{arm_send, record_outcome, token};
 
 /// One physical submission the fake actually performed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,4 +353,56 @@ impl WakePayload {
     pub fn into_text(self) -> String {
         self.0
     }
+}
+
+/// Drives one attempt through the whole browser boundary, in order.
+///
+/// Navigate, select the app, stage the composer, commit the durable ambiguity
+/// fence, invoke Send, record what was observed. Every step is a real call into
+/// [`FakeBrowser`], so an adapter that reordered them would take the fake's
+/// panic rather than a soft assertion, and the recorded outcome is whatever the
+/// simulated page actually did.
+///
+/// A weak signal becomes `ambiguous`, never `accepted`: there is no
+/// [`DeliveryOutcome`] variant that would let an adapter decide otherwise, and
+/// that is `docs/testing.md` DEL-014 expressed in the type system. The match
+/// below is exhaustive on purpose — a new [`SendOutcome`] variant must be
+/// classified here deliberately, and failing to compile is how that is
+/// noticed.
+///
+/// # Panics
+///
+/// Panics through [`FakeBrowser`] when the store does not already show the
+/// state each step requires, and when recording the observed outcome is
+/// refused by the delivery machine.
+pub fn deliver_wake(
+    store: &Store,
+    browser: &mut FakeBrowser,
+    obligation: ObligationId,
+    generation: BindingGeneration,
+    wake: &ClaimedDelivery,
+) -> DeliveryState {
+    browser.navigate(&wake.delivery_id, wake.attempt);
+    browser.select_app(&wake.delivery_id, wake.attempt);
+    if let Err(failure) = browser.stage_composer(&wake.delivery_id, wake.attempt) {
+        return record_outcome(
+            store,
+            wake,
+            wake.attempt,
+            DeliveryOutcome::Failed { failure },
+        )
+        .expect("recording a proven pre-submit failure");
+    }
+
+    arm_send(store, wake, generation).expect("arming the Send fence");
+
+    let recorded = match browser.send(&wake.delivery_id, wake.attempt, obligation) {
+        SendOutcome::Accepted(message) => DeliveryOutcome::Accepted { message },
+        SendOutcome::RefusedBeforeSubmit(failure) => DeliveryOutcome::Failed { failure },
+        SendOutcome::Lost(reason) => DeliveryOutcome::Ambiguous { reason },
+        SendOutcome::WeakOnly(_) => DeliveryOutcome::Ambiguous {
+            reason: AmbiguityReason::EvidenceInconclusive,
+        },
+    };
+    record_outcome(store, wake, wake.attempt, recorded).expect("recording the observed outcome")
 }

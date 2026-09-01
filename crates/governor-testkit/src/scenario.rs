@@ -11,7 +11,13 @@
 //! transaction, which is the file-before-database ordering itself rather than a
 //! stand-in for it.
 
-use governor_artifacts::{ArtifactError, ArtifactStore, PublishRequest, PublishedArtifact};
+use std::collections::BTreeSet;
+
+use governor_artifacts::{
+    ArtifactError, ArtifactStore, InvalidStorageKey, PublishRequest, PublishedArtifact,
+    RetentionInput, StorageKey,
+};
+use governor_core::artifact::{ArtifactDigest, RetentionState};
 use governor_core::binding::{ConversationRef, WriteCapabilityState};
 use governor_core::fence::{
     AttemptNo, BindingGeneration, DeliveryRevision, IncarnationGeneration, ObligationVersion,
@@ -20,7 +26,7 @@ use governor_core::fence::{
 use governor_core::foreman_turn::ProviderMessageRef;
 use governor_core::id::{ClaimId, Id, IdKind, ObligationId};
 use governor_core::obligation::Disposition;
-use governor_core::time::DurationMs;
+use governor_core::time::{DurationMs, Timestamp};
 use governor_core::worker_evidence::{ChildExitStatus, ManagedRunOutcome, WorkerFailureClass};
 use governor_store_sqlite::{
     AcknowledgeRequest, Acknowledged, ArmDeliverySendRequest, BindForemanRequest, ClaimedDelivery,
@@ -31,7 +37,10 @@ use governor_store_sqlite::{
     RecordWorkerFailureRequest, RecordWorkerStartedRequest, SessionSpec, Store, StoreError,
     StoreResult,
 };
+use rusqlite::Connection;
 use uuid::Uuid;
+
+use crate::harness::Harness;
 
 /// Retention delay the fixtures apply when closing an obligation.
 ///
@@ -85,24 +94,30 @@ pub fn open_turn(store: &Store) -> OpenedWorkerTurn {
 /// Panics when the store refuses.
 pub fn open_named_turn(store: &Store, worker_turn_ref: &str) -> OpenedWorkerTurn {
     store
-        .open_worker_turn(OpenWorkerTurnRequest {
-            project: ProjectSpec {
-                source_host: token("github.com"),
-                source_repo_id: Some(token("R_kgDO")),
-                source_repo_display: Some(token("DivMode.commandgovernor")),
-            },
-            source_issue_ref: Some(token("issue-2")),
-            session: SessionSpec {
-                runtime_kind: token("herdr"),
-                worker_kind: token("claude"),
-                display_name: Some(token("phase1-testkit")),
-                runtime_instance_ref: Some(token("pane-3")),
-                worker_session_ref: Some(token("sess-9")),
-            },
-            worker_turn_ref: Some(token(worker_turn_ref)),
-            priority: 10,
-        })
+        .open_worker_turn(worker_turn_request(worker_turn_ref))
         .expect("opening a worker turn")
+}
+
+/// The request [`open_turn`] sends, for a caller that must handle the refusal.
+#[must_use]
+pub fn worker_turn_request(worker_turn_ref: &str) -> OpenWorkerTurnRequest {
+    OpenWorkerTurnRequest {
+        project: ProjectSpec {
+            source_host: token("github.com"),
+            source_repo_id: Some(token("R_kgDO")),
+            source_repo_display: Some(token("DivMode.commandgovernor")),
+        },
+        source_issue_ref: Some(token("issue-2")),
+        session: SessionSpec {
+            runtime_kind: token("herdr"),
+            worker_kind: token("claude"),
+            display_name: Some(token("phase1-testkit")),
+            runtime_instance_ref: Some(token("pane-3")),
+            worker_session_ref: Some(token("sess-9")),
+        },
+        worker_turn_ref: Some(token(worker_turn_ref)),
+        priority: 10,
+    }
 }
 
 /// Binds a foreman conversation and returns its generation.
@@ -112,17 +127,23 @@ pub fn open_named_turn(store: &Store, worker_turn_ref: &str) -> OpenedWorkerTurn
 /// Panics when the store refuses.
 pub fn bind(store: &Store, conversation: &str) -> BindingGeneration {
     store
-        .bind_foreman(BindForemanRequest {
-            provider: token("chatgpt"),
-            conversation: ConversationRef::new(token(conversation)),
-            conversation_url_ref: token(conversation),
-            profile: token("cg-profile"),
-            connector_abi: token("command-governor-foreman.v1"),
-            capability_epoch: 1,
-            write_capability: WriteCapabilityState::Proven,
-        })
+        .bind_foreman(bind_request(conversation))
         .expect("binding a verified conversation")
         .generation
+}
+
+/// The request [`bind`] sends, for a caller that must handle the refusal.
+#[must_use]
+pub fn bind_request(conversation: &str) -> BindForemanRequest {
+    BindForemanRequest {
+        provider: token("chatgpt"),
+        conversation: ConversationRef::new(token(conversation)),
+        conversation_url_ref: token(conversation),
+        profile: token("cg-profile"),
+        connector_abi: token("command-governor-foreman.v1"),
+        capability_epoch: 1,
+        write_capability: WriteCapabilityState::Proven,
+    }
 }
 
 /// Drives an obligation to `running`.
@@ -479,4 +500,182 @@ pub fn handed_over(
     .expect("minting a claim from the accepted wake");
     handoff(store, work.obligation, minted.claim).expect("handing the result over");
     (work, minted.claim)
+}
+
+// --- Reading back what actually committed ------------------------------------
+
+/// One committed `result_artifacts` row, as the durable authority holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRow {
+    /// Opaque daemon-allocated key the bytes live under.
+    pub storage_ref: String,
+    /// Recorded digest, lowercase hex.
+    pub sha256_hex: String,
+    /// Recorded length.
+    pub byte_len: u64,
+    /// Whether an open obligation still pins it.
+    pub retention_state: String,
+    /// Earliest permitted deletion instant, stamped by a closing ACK.
+    pub deletable_at: Option<Timestamp>,
+}
+
+impl ArtifactRow {
+    /// The key, re-validated. A tampered row must not become a path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidStorageKey`] when the recorded value is not a legal
+    /// single path component.
+    pub fn key(&self) -> Result<StorageKey, InvalidStorageKey> {
+        StorageKey::parse(&self.storage_ref)
+    }
+
+    /// The recorded digest.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the column is not 32 bytes of hex, which is a corrupt row
+    /// rather than a test fixture problem.
+    #[must_use]
+    pub fn digest(&self) -> ArtifactDigest {
+        let mut bytes = [0u8; 32];
+        assert_eq!(self.sha256_hex.len(), 64, "a digest column is 32 hex bytes");
+        for (slot, pair) in bytes.iter_mut().zip(self.sha256_hex.as_bytes().chunks(2)) {
+            let text = std::str::from_utf8(pair).expect("hex is ascii");
+            *slot = u8::from_str_radix(text, 16).expect("hex digit pair");
+        }
+        ArtifactDigest::from_bytes(bytes)
+    }
+
+    /// Retention as the domain models it.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a label outside the closed set.
+    #[must_use]
+    pub fn retention(&self) -> RetentionState {
+        match self.retention_state.as_str() {
+            "pinned" => RetentionState::Pinned,
+            "eligible" => RetentionState::Eligible,
+            other => panic!("unknown retention label {other}"),
+        }
+    }
+
+    /// The input one retention sweep decides on.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the recorded key is not a legal storage key.
+    #[must_use]
+    pub fn as_retention_input(&self) -> RetentionInput {
+        RetentionInput {
+            key: self.key().expect("committed keys are valid"),
+            state: self.retention(),
+            deletable_at: self.deletable_at,
+        }
+    }
+}
+
+/// Every committed artifact row, ordered by key.
+///
+/// # Panics
+///
+/// Panics when the table cannot be read.
+#[must_use]
+pub fn artifact_rows(conn: &Connection) -> Vec<ArtifactRow> {
+    let mut statement = conn
+        .prepare(
+            "SELECT storage_ref, sha256_hex, byte_len, retention_state,
+                    eligible_for_delete_at_ms
+               FROM result_artifacts ORDER BY storage_ref",
+        )
+        .expect("preparing the artifact query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok(ArtifactRow {
+                storage_ref: row.get(0)?,
+                sha256_hex: row.get(1)?,
+                byte_len: row.get::<_, i64>(2)?.try_into().expect("non-negative"),
+                retention_state: row.get(3)?,
+                deletable_at: row
+                    .get::<_, Option<i64>>(4)?
+                    .map(Timestamp::from_unix_millis),
+            })
+        })
+        .expect("querying artifacts");
+    rows.map(|row| row.expect("artifact row")).collect()
+}
+
+/// Every `storage_ref` a committed row references.
+///
+/// # Panics
+///
+/// As [`artifact_rows`].
+#[must_use]
+pub fn committed_keys(conn: &Connection) -> BTreeSet<StorageKey> {
+    artifact_rows(conn)
+        .into_iter()
+        .filter_map(|row| row.key().ok())
+        .collect()
+}
+
+/// Storage refs referenced by an obligation in `completed_unprocessed`.
+///
+/// # Panics
+///
+/// Panics when the join cannot be read.
+#[must_use]
+pub fn completed_unprocessed_refs(conn: &Connection) -> Vec<String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT ra.storage_ref
+               FROM obligations o JOIN result_artifacts ra
+                 ON ra.result_artifact_id = o.result_artifact_id
+              WHERE o.state = 'completed_unprocessed'
+              ORDER BY ra.storage_ref",
+        )
+        .expect("preparing the completion query");
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("querying completions");
+    rows.map(|row| row.expect("completion row")).collect()
+}
+
+/// **The forbidden outcome.**
+///
+/// `docs/testing.md` ART-001: no committed `completed_unprocessed` obligation
+/// may reference a missing or non-durable result artifact. Every crash-matrix
+/// cell ends here.
+///
+/// # Panics
+///
+/// Panics naming the storage ref whose bytes are not durable and verifiable.
+pub fn assert_no_completion_without_durable_bytes(harness: &Harness, context: &str) {
+    let conn = harness.inspect();
+    let artifacts = harness.open_artifacts();
+    let rows = artifact_rows(&conn);
+    for storage_ref in completed_unprocessed_refs(&conn) {
+        let row = rows
+            .iter()
+            .find(|row| row.storage_ref == storage_ref)
+            .unwrap_or_else(|| {
+                panic!("{context}: a completion references an unknown artifact row")
+            });
+        let key = row
+            .key()
+            .unwrap_or_else(|_| panic!("{context}: a completion references an illegal key"));
+        let bytes = artifacts
+            .read_verified(&key, row.digest(), row.byte_len)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{context}: completed_unprocessed references {storage_ref}, \
+                     which is not durable and verifiable: {error}"
+                )
+            });
+        assert_eq!(
+            u64::try_from(bytes.len()).expect("length fits"),
+            row.byte_len,
+            "{context}: the stored length disagrees with the committed row"
+        );
+    }
 }
