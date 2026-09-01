@@ -808,6 +808,7 @@ fn health_event(event: &LedgerEvent) -> StoreResult<Option<HealthTransition>> {
 const fn scope_of(event: &LedgerEvent) -> HealthScope {
     HealthScope {
         task: event.scope.task,
+        session: event.scope.session,
         turn: event.scope.turn,
         obligation: event.scope.obligation,
         external_attempt: None,
@@ -877,12 +878,14 @@ pub(crate) fn open_condition_id(
             "SELECT health_condition_id FROM health_conditions
               WHERE state = 'open' AND kind = ?1
                 AND COALESCE(task_id, '') = ?2
-                AND COALESCE(turn_id, '') = ?3
-                AND COALESCE(obligation_id, '') = ?4
-                AND COALESCE(external_attempt_id, '') = ?5",
+                AND COALESCE(session_id, '') = ?3
+                AND COALESCE(turn_id, '') = ?4
+                AND COALESCE(obligation_id, '') = ?5
+                AND COALESCE(external_attempt_id, '') = ?6",
             params![
                 crate::codec::encode_health_kind(kind),
                 scope.task.map(id_text).unwrap_or_default(),
+                scope.session.map(id_text).unwrap_or_default(),
                 scope.turn.map(id_text).unwrap_or_default(),
                 scope.obligation.map(id_text).unwrap_or_default(),
                 scope.external_attempt.map(id_text).unwrap_or_default(),
@@ -903,7 +906,8 @@ pub(crate) fn open_condition_id(
 pub(crate) fn open_conditions(tx: &Tx<'_>) -> StoreResult<Vec<OpenCondition>> {
     const TABLE: &str = "health_conditions";
     let mut statement = tx.conn().prepare(
-        "SELECT kind, state, task_id, turn_id, obligation_id, external_attempt_id
+        "SELECT kind, state, task_id, session_id, turn_id, obligation_id,
+                external_attempt_id
            FROM health_conditions WHERE state = 'open' ORDER BY opened_event_seq",
     )?;
     let rows = statement.query_map([], |row| {
@@ -914,12 +918,13 @@ pub(crate) fn open_conditions(tx: &Tx<'_>) -> StoreResult<Vec<OpenCondition>> {
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (kind, state, task, turn, obligation, attempt) = row?;
+        let (kind, state, task, session, turn, obligation, attempt) = row?;
         // Decoded, not trusted: an unknown label is a corrupt row.
         if decode_health_state(&state, TABLE)? != HealthConditionState::Open {
             continue;
@@ -929,6 +934,9 @@ pub(crate) fn open_conditions(tx: &Tx<'_>) -> StoreResult<Vec<OpenCondition>> {
             scope: HealthScope {
                 task: task
                     .map(|text| parse_id(&text, TABLE, "task_id"))
+                    .transpose()?,
+                session: session
+                    .map(|text| parse_id(&text, TABLE, "session_id"))
                     .transpose()?,
                 turn: turn
                     .map(|text| parse_id(&text, TABLE, "turn_id"))

@@ -335,6 +335,7 @@ fn the_schema_has_no_column_for_forbidden_content() {
         ("health_conditions", "obligation_id"),
         ("health_conditions", "opened_event_seq"),
         ("health_conditions", "resolved_event_seq"),
+        ("health_conditions", "session_id"),
         ("health_conditions", "state"),
         ("health_conditions", "task_id"),
         ("health_conditions", "turn_id"),

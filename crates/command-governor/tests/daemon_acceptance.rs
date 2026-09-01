@@ -516,7 +516,16 @@ fn status_and_obligations_report_the_seeded_lifecycle() {
 
     let status = stdout_of(&run(root, &["status"]));
     assert!(has_line(&status, "daemon.state=running"), "{status}");
-    assert!(has_line(&status, "store.schema_epoch=1"), "{status}");
+    assert!(
+        has_line(
+            &status,
+            &format!(
+                "store.schema_epoch={}",
+                governor_store_sqlite::SUPPORTED_SCHEMA_EPOCH
+            )
+        ),
+        "{status}"
+    );
     assert!(has_line(&status, "obligations.open=3"), "{status}");
     assert!(has_line(&status, "obligations.attention=2"), "{status}");
     assert!(

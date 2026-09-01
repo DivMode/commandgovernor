@@ -8,7 +8,7 @@
 //! [`docs/data-model.md`]: https://github.com/DivMode/commandgovernor/blob/main/docs/data-model.md
 
 use crate::error::{Outcome, Transition};
-use crate::id::{ExternalAttemptId, HealthConditionId, ObligationId, TaskId, TurnId};
+use crate::id::{ExternalAttemptId, HealthConditionId, ObligationId, SessionId, TaskId, TurnId};
 use crate::time::Timestamp;
 
 /// The initial condition kinds from the data model.
@@ -43,6 +43,26 @@ pub enum HealthConditionKind {
     /// scope carries [`HealthScope::external_attempt`] so the resolver can find
     /// the exact recorded attempt, class, destination and idempotency key.
     ReconciliationRequired,
+    /// A logical session's persisted launch loadout no longer proves itself.
+    ///
+    /// Raised when [`crate::session::CommittedLoadout::rehydrate`] refuses the
+    /// row a session was launched under. Scoped to the session, because the
+    /// damage is to *that* session's launch snapshot and nothing else; every
+    /// other session under the same profile is unaffected.
+    LoadoutUnverifiable,
+    /// A session's private managed configuration artifact will not verify.
+    ///
+    /// Its bytes are missing, truncated or rewritten. Scoped to the session:
+    /// resume fails closed, and no worker is started under whatever
+    /// configuration happens to be on disk now.
+    ManagedConfigMissing,
+    /// A session's durable lineage cannot be walked to a root.
+    ///
+    /// Only reachable from durable state a legal sequence of store operations
+    /// could not have produced — a restored or edited database — because the
+    /// edge-insert transaction refuses a cycle before it commits. Scoped to the
+    /// child session whose ancestor walk did not terminate.
+    LineageBroken,
 }
 
 impl HealthConditionKind {
@@ -60,6 +80,9 @@ impl HealthConditionKind {
             Self::InputDetailUnavailable => "input_detail_unavailable",
             Self::WorkerDeferShapeUnsupported => "worker_defer_shape_unsupported",
             Self::ReconciliationRequired => "reconciliation_required",
+            Self::LoadoutUnverifiable => "loadout_unverifiable",
+            Self::ManagedConfigMissing => "managed_config_missing",
+            Self::LineageBroken => "lineage_broken",
         }
     }
 }
@@ -84,6 +107,15 @@ pub enum HealthConditionState {
 pub struct HealthScope {
     /// Task the condition concerns, if any.
     pub task: Option<TaskId>,
+    /// Logical session the condition concerns, if any.
+    ///
+    /// A session's launch loadout, its managed configuration and its lineage
+    /// are all facts about the *session*, not about any one turn or obligation
+    /// it produced: a session with no open turn can still have an unverifiable
+    /// loadout, and blaming a turn for it would resolve the condition as soon
+    /// as that turn closed. Scope is part of a condition's identity, so this
+    /// had to be its own field rather than a reuse of the turn one.
+    pub session: Option<SessionId>,
     /// Turn the condition concerns, if any.
     pub turn: Option<TurnId>,
     /// Obligation the condition concerns, if any.
@@ -98,9 +130,19 @@ impl HealthScope {
     pub const fn global() -> Self {
         Self {
             task: None,
+            session: None,
             turn: None,
             obligation: None,
             external_attempt: None,
+        }
+    }
+
+    /// Scopes a condition to one logical session.
+    #[must_use]
+    pub const fn session(id: SessionId) -> Self {
+        Self {
+            session: Some(id),
+            ..Self::global()
         }
     }
 
@@ -300,6 +342,9 @@ mod tests {
             HealthConditionKind::InputDetailUnavailable,
             HealthConditionKind::WorkerDeferShapeUnsupported,
             HealthConditionKind::ReconciliationRequired,
+            HealthConditionKind::LoadoutUnverifiable,
+            HealthConditionKind::ManagedConfigMissing,
+            HealthConditionKind::LineageBroken,
         ];
         let mut codes: Vec<&str> = kinds.iter().map(|kind| kind.code()).collect();
         codes.sort_unstable();
@@ -341,6 +386,40 @@ mod tests {
             obligation_scope()
         ));
         assert!(ledger.is_open(HealthConditionKind::ReconciliationRequired, first));
+    }
+
+    #[test]
+    fn a_session_scope_collides_with_nothing_else() {
+        // Scope is part of a condition's identity, so a session-scoped
+        // condition must not be deduplicated against a turn- or
+        // obligation-scoped one that happens to share a kind.
+        let session = HealthScope::session(SessionId::from_uuid(Uuid::from_u128(7)));
+        assert_ne!(session, obligation_scope());
+        assert_ne!(session, HealthScope::global());
+
+        let ledger = HealthLedger::new()
+            .raise(
+                condition_id(1),
+                HealthConditionKind::LoadoutUnverifiable,
+                session,
+                at(1),
+            )
+            .unwrap()
+            .advanced()
+            .unwrap();
+        assert!(ledger.is_open(HealthConditionKind::LoadoutUnverifiable, session));
+        assert!(!ledger.is_open(HealthConditionKind::LoadoutUnverifiable, obligation_scope()));
+        assert!(
+            ledger
+                .raise(
+                    condition_id(2),
+                    HealthConditionKind::LoadoutUnverifiable,
+                    session,
+                    at(2),
+                )
+                .unwrap()
+                .is_duplicate()
+        );
     }
 
     #[test]

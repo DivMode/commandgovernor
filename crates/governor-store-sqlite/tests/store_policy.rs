@@ -69,9 +69,12 @@ fn foreign_keys_actually_reject_a_dangling_reference() {
 fn a_fresh_database_migrates_and_reopens_unchanged() {
     let harness = Harness::new();
     let store = harness.open().expect("first open");
-    assert_eq!(store.startup().migrations.applied, vec![1]);
+    assert_eq!(store.startup().migrations.applied, vec![1, 2]);
     assert!(store.startup().migrations.verified.is_empty());
-    assert_eq!(store.startup().migrations.epoch, 1);
+    assert_eq!(
+        store.startup().migrations.epoch,
+        governor_store_sqlite::SUPPORTED_SCHEMA_EPOCH
+    );
     let instance = store.startup().migrations.database_instance_id;
     drop(store);
 
@@ -80,7 +83,7 @@ fn a_fresh_database_migrates_and_reopens_unchanged() {
         store.startup().migrations.applied.is_empty(),
         "a migrated database applies nothing on reopen"
     );
-    assert_eq!(store.startup().migrations.verified, vec![1]);
+    assert_eq!(store.startup().migrations.verified, vec![1, 2]);
     assert_eq!(
         store.startup().migrations.database_instance_id,
         instance,
@@ -163,10 +166,80 @@ fn an_interrupted_migration_rolls_back_and_reapplies() {
     let store = harness.open().expect("reopening after the interruption");
     assert_eq!(
         store.startup().migrations.applied,
-        vec![1],
+        vec![1, 2],
         "the migration is applied cleanly on the next attempt"
     );
     assert!(store.startup().migrations.verified.is_empty());
+}
+
+#[test]
+fn the_health_rebuild_keeps_one_open_condition_per_scope() {
+    // Migration 0002 rebuilds `health_conditions` to widen its `kind` CHECK and
+    // add the session scope, because SQLite cannot alter a CHECK in place. The
+    // rebuild is where the partial unique index would be silently lost, and
+    // losing it would turn the one-open-per-(kind, scope) rule back into a
+    // convention. So the index is asserted to exist, to still be UNIQUE, and to
+    // still refuse a second open row for the same scope.
+    let harness = Harness::new();
+    let store = harness.open().expect("opening at epoch 2");
+    let turn = support::open_turn(&store);
+
+    let raised = store
+        .raise_foreman_unreachable(governor_store_sqlite::RaiseForemanUnreachableRequest {
+            obligation: turn.obligation,
+        })
+        .expect("attention on open work");
+    assert!(!raised.duplicate);
+    assert!(
+        store
+            .raise_foreman_unreachable(governor_store_sqlite::RaiseForemanUnreachableRequest {
+                obligation: turn.obligation,
+            })
+            .expect("a repeat converges")
+            .duplicate,
+        "the store still deduplicates after the rebuild"
+    );
+    drop(store);
+
+    let conn = harness.inspect();
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+              WHERE type = 'index' AND name = 'health_conditions_one_open_per_scope'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the rebuild recreated the scope index");
+    assert!(sql.contains("UNIQUE"), "{sql}");
+    assert!(sql.contains("session_id"), "{sql}");
+    assert!(
+        conn.query_row(
+            "SELECT sql FROM sqlite_schema
+              WHERE type = 'index' AND name = 'health_conditions_open'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .is_ok(),
+        "the rebuild recreated the open-by-kind index too"
+    );
+    assert_eq!(count(&conn, "health_conditions"), 1);
+    drop(conn);
+
+    // And the index, not merely the code path, is what refuses the second row:
+    // a direct insert that bypasses the store is rejected by the engine.
+    let conn = rusqlite::Connection::open(harness.database_path()).expect("writable connection");
+    let refused = conn.execute(
+        "INSERT INTO health_conditions (health_condition_id, kind, state,
+                obligation_id, opened_event_seq)
+         SELECT '00000000-0000-0000-0000-0000000000fe', kind, state,
+                obligation_id, opened_event_seq
+           FROM health_conditions",
+        [],
+    );
+    assert!(
+        refused.is_err(),
+        "a second open condition for one (kind, scope) must be impossible"
+    );
 }
 
 #[test]

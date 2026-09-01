@@ -358,6 +358,9 @@ code_labels! {
         HealthConditionKind::InputDetailUnavailable,
         HealthConditionKind::WorkerDeferShapeUnsupported,
         HealthConditionKind::ReconciliationRequired,
+        HealthConditionKind::LoadoutUnverifiable,
+        HealthConditionKind::ManagedConfigMissing,
+        HealthConditionKind::LineageBroken,
     ]
 }
 

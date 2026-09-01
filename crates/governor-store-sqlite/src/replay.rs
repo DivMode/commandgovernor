@@ -399,7 +399,8 @@ fn compare_health(
     }
 
     let mut statement = tx.conn().prepare(
-        "SELECT kind, state, task_id, turn_id, obligation_id, external_attempt_id
+        "SELECT kind, state, task_id, session_id, turn_id, obligation_id,
+                external_attempt_id
            FROM health_conditions",
     )?;
     let rows = statement.query_map([], |row| {
@@ -410,14 +411,18 @@ fn compare_health(
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
     let mut stored: BTreeMap<String, usize> = BTreeMap::new();
     for row in rows {
-        let (kind, state, task, turn, obligation, attempt) = row?;
+        let (kind, state, task, session, turn, obligation, attempt) = row?;
         let scope = HealthScope {
             task: task
                 .map(|text| parse_id(&text, TABLE, "task_id"))
+                .transpose()?,
+            session: session
+                .map(|text| parse_id(&text, TABLE, "session_id"))
                 .transpose()?,
             turn: turn
                 .map(|text| parse_id(&text, TABLE, "turn_id"))
@@ -464,9 +469,10 @@ fn condition_key(
 ) -> String {
     let part = |id: Option<String>| id.unwrap_or_else(|| "-".to_owned());
     format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         encode_health_kind(kind),
         part(scope.task.map(id_text)),
+        part(scope.session.map(id_text)),
         part(scope.turn.map(id_text)),
         part(scope.obligation.map(id_text)),
         part(scope.external_attempt.map(id_text)),

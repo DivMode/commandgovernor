@@ -343,7 +343,7 @@ const fn event_scope(scope: HealthScope) -> EventScope {
     EventScope {
         project: None,
         task: scope.task,
-        session: None,
+        session: scope.session,
         incarnation: None,
         turn: scope.turn,
         obligation: scope.obligation,
@@ -394,15 +394,18 @@ fn raise(
 
     tx.conn().execute(
         "INSERT INTO health_conditions (health_condition_id, kind, state,
-                task_id, turn_id, obligation_id, opened_event_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                task_id, session_id, turn_id, obligation_id, external_attempt_id,
+                opened_event_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id_text(condition),
             encode_health_kind(kind),
             encode_health_state(HealthConditionState::Open),
             scope.task.map(id_text),
+            scope.session.map(id_text),
             scope.turn.map(id_text),
             scope.obligation.map(id_text),
+            scope.external_attempt.map(id_text),
             event::store_seq(seq)?,
         ],
     )?;

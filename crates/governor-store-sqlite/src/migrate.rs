@@ -36,7 +36,7 @@ use crate::meta;
 use crate::tx::{Failpoint, FailpointHook, Tx};
 
 /// Highest schema epoch this binary implements.
-pub const SUPPORTED_SCHEMA_EPOCH: u32 = 1;
+pub const SUPPORTED_SCHEMA_EPOCH: u32 = 2;
 
 /// One numbered migration.
 struct Migration {
@@ -47,12 +47,20 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    epoch: 1,
-    sql: include_str!("migrations/0001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        epoch: 1,
+        sql: include_str!("migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "session_lineage_and_loadouts",
+        epoch: 2,
+        sql: include_str!("migrations/0002_session_lineage_and_loadouts.sql"),
+    },
+];
 
 impl Migration {
     fn checksum(&self) -> String {

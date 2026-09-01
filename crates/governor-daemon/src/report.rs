@@ -177,12 +177,18 @@ const ALL_HEALTH_KINDS: &[HealthConditionKind] = &[
     HealthConditionKind::InputDetailUnavailable,
     HealthConditionKind::WorkerDeferShapeUnsupported,
     HealthConditionKind::ReconciliationRequired,
+    HealthConditionKind::LoadoutUnverifiable,
+    HealthConditionKind::ManagedConfigMissing,
+    HealthConditionKind::LineageBroken,
 ];
 
 fn scope(scope: HealthScope) -> String {
     let mut fields = Vec::new();
     if let Some(task) = scope.task {
         fields.push(format!("scope.task={task}"));
+    }
+    if let Some(session) = scope.session {
+        fields.push(format!("scope.session={session}"));
     }
     if let Some(turn) = scope.turn {
         fields.push(format!("scope.turn={turn}"));
@@ -296,18 +302,27 @@ mod tests {
         let obligation_id = ObligationId::from_uuid(Uuid::from_u128(42));
         let lines = health_lines(&[OpenCondition {
             kind: HealthConditionKind::ResultArtifactMissing,
-            scope: HealthScope {
-                task: None,
-                turn: None,
-                obligation: Some(obligation_id),
-                external_attempt: None,
-            },
+            scope: HealthScope::obligation(obligation_id),
         }]);
         assert!(lines.contains(&"health.open=1".to_owned()));
         assert!(lines.contains(&"health.kind.result_artifact_missing=1".to_owned()));
         assert!(lines.iter().any(|line| {
             line == &format!("health kind=result_artifact_missing scope.obligation={obligation_id}")
         }));
+    }
+
+    #[test]
+    fn a_session_scoped_condition_names_its_session() {
+        let session = governor_core::id::SessionId::from_uuid(Uuid::from_u128(9));
+        let lines = health_lines(&[OpenCondition {
+            kind: HealthConditionKind::ManagedConfigMissing,
+            scope: HealthScope::session(session),
+        }]);
+        assert!(lines.contains(&"health.kind.managed_config_missing=1".to_owned()));
+        assert!(
+            lines.iter().any(|line| line
+                == &format!("health kind=managed_config_missing scope.session={session}"))
+        );
     }
 
     #[test]

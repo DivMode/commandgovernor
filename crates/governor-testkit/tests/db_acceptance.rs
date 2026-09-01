@@ -929,13 +929,118 @@ fn db_004_migration_crash_recovery() {
         let store = harness
             .open()
             .expect("reopen applies the migration cleanly");
-        assert_eq!(store.startup().migrations.applied, vec![1]);
+        assert_eq!(store.startup().migrations.applied, vec![1, 2]);
         assert!(store.startup().migrations.verified.is_empty());
         drop(store);
 
         let store = harness.open().expect("and a third open verifies it");
         assert!(store.startup().migrations.applied.is_empty());
+        assert_eq!(store.startup().migrations.verified, vec![1, 2]);
+    }
+}
+
+#[test]
+fn db_004_a_later_migration_rolls_back_without_disturbing_the_earlier_one() {
+    // The single-migration case above always interrupts version 1, so it says
+    // nothing about a *ladder*. Each migration is its own transaction, so an
+    // interrupted version 2 must leave version 1 applied and recorded, and the
+    // next open must apply only what is missing.
+    for point in MIGRATION_FAILPOINTS {
+        let harness = Harness::new();
+        // Skip every announcement version 1 makes, then fire inside version 2.
+        let crash = NthAnnouncement::at("migrate", *point, 2);
+        let interrupted = harness.open_with(Some(crash.boxed()));
+        assert!(
+            interrupted.is_err(),
+            "{point:?}: an interrupted migration must not hand back a store"
+        );
+        assert!(
+            crash.fired(),
+            "{point:?}: the point was never reached twice"
+        );
+        drop(interrupted);
+
+        let conn = harness.inspect();
+        assert_eq!(
+            governor_testkit::dump::scalar(
+                &conn,
+                "SELECT CAST(MAX(version) AS TEXT) FROM schema_migrations"
+            )
+            .as_deref(),
+            Some("1"),
+            "{point:?}: version 1 stays applied when version 2 rolls back"
+        );
+        assert_eq!(
+            governor_testkit::dump::scalar(
+                &conn,
+                "SELECT value FROM meta WHERE key = 'schema_epoch'"
+            )
+            .as_deref(),
+            Some("1"),
+            "{point:?}: version 2's epoch bump rolled back with its transaction"
+        );
+        drop(conn);
+
+        let store = harness.open().expect("reopen applies only what is missing");
+        assert_eq!(store.startup().migrations.applied, vec![2]);
         assert_eq!(store.startup().migrations.verified, vec![1]);
+    }
+}
+
+/// A failpoint hook that fires on the *n*-th match rather than the first.
+///
+/// Both migrations run under the operation name `migrate`, so
+/// [`StoreCrash`] — which fires on the first match — can only ever interrupt
+/// version 1. Counting matches is what makes the later rungs of the ladder
+/// reachable.
+#[derive(Debug, Clone)]
+struct NthAnnouncement {
+    target: (&'static str, governor_store_sqlite::Failpoint),
+    nth: usize,
+    seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NthAnnouncement {
+    fn at(op: &'static str, point: governor_store_sqlite::Failpoint, nth: usize) -> Self {
+        Self {
+            target: (op, point),
+            nth,
+            seen: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn boxed(&self) -> Box<dyn governor_store_sqlite::FailpointHook> {
+        Box::new(self.clone())
+    }
+}
+
+impl governor_store_sqlite::FailpointHook for NthAnnouncement {
+    fn reached(
+        &self,
+        op: &'static str,
+        point: governor_store_sqlite::Failpoint,
+    ) -> Result<(), StoreError> {
+        if (op, point) != self.target {
+            return Ok(());
+        }
+        let seen = self
+            .seen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        if seen != self.nth {
+            return Ok(());
+        }
+        self.fired.store(true, std::sync::atomic::Ordering::Relaxed);
+        Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+            Some(format!("injected crash at {op} announcement {seen}")),
+        )))
     }
 }
 
