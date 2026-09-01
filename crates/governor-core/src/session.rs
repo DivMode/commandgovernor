@@ -557,6 +557,7 @@ impl HookContractEpoch {
 
 /// Resume policy for one resolved loadout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum ResumePolicy {
     /// Resume only when the exact loadout identity and digest match the launch
     /// snapshot. This is the only V1-safe policy.
@@ -715,10 +716,16 @@ pub struct PersistedWorkerLoadout {
 ///
 /// `governor-core` performs no I/O and so cannot distinguish a genuine row from
 /// a fabricated one: a caller that invents both a spec and a matching digest gets
-/// a `CommittedLoadout`, because the two agree. That is the same boundary
-/// [`crate::claim::ForemanClaim::rehydrate`] sits on — the loader re-proves a row
-/// against itself, and authenticity of the row is the store's problem, enforced
-/// there by the durable schema and by nothing in this crate.
+/// a `CommittedLoadout`, because the two agree. Rehydration is an internal
+/// consistency check, and authenticity of the row is the store's problem,
+/// enforced there by the durable schema and by nothing in this crate.
+///
+/// [`crate::claim::ForemanClaim::rehydrate`] does better than that, and the
+/// difference is worth naming: it re-proves its parts against a `BrowserWake`,
+/// an independent value the row's author did not write. The equivalent here is
+/// not rehydration but [`Self::admit_resume`], whose [`ManagedConfigVerified`]
+/// witness comes from bytes read outside the row. A forged row therefore still
+/// has to survive a re-hash of a configuration artifact it does not control.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedLoadout {
     loadout: WorkerLoadout,
