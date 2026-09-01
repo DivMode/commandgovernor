@@ -111,16 +111,7 @@ impl ResultArtifact {
         observed_digest: ArtifactDigest,
         observed_len: u64,
     ) -> Result<(), ArtifactIntegrityError> {
-        if observed_len != self.byte_len {
-            return Err(ArtifactIntegrityError::LengthMismatch {
-                expected: self.byte_len,
-                observed: observed_len,
-            });
-        }
-        if observed_digest != self.digest {
-            return Err(ArtifactIntegrityError::DigestMismatch);
-        }
-        Ok(())
+        ArtifactIntegrityError::check(self.digest, self.byte_len, observed_digest, observed_len)
     }
 
     /// Derives retention from the obligations that reference this artifact.
@@ -161,6 +152,41 @@ pub enum ArtifactIntegrityError {
     DigestMismatch,
 }
 
+impl ArtifactIntegrityError {
+    /// Compares observed bytes against expected metadata.
+    ///
+    /// The rule [`ResultArtifact::verify`] applies, stated once and usable
+    /// without a metadata row — the storage layer verifies bytes it read for a
+    /// key whose identity and creation instant play no part in the check, and
+    /// inventing a row for it would mean writing the comparison twice.
+    ///
+    /// Length is checked first deliberately: a truncated read has a perfectly
+    /// valid digest *of the truncation*, and reporting that as a digest
+    /// mismatch would hide which failure actually happened.
+    ///
+    /// # Errors
+    ///
+    /// Returns the mismatch that was found. Callers must fail closed and
+    /// return no bytes at all.
+    pub fn check(
+        expected_digest: ArtifactDigest,
+        expected_len: u64,
+        observed_digest: ArtifactDigest,
+        observed_len: u64,
+    ) -> Result<(), Self> {
+        if observed_len != expected_len {
+            return Err(Self::LengthMismatch {
+                expected: expected_len,
+                observed: observed_len,
+            });
+        }
+        if observed_digest != expected_digest {
+            return Err(Self::DigestMismatch);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +221,35 @@ mod tests {
         assert_eq!(
             artifact.verify(ArtifactDigest::from_bytes([9u8; 32]), 1_024),
             Err(ArtifactIntegrityError::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn the_rule_is_usable_without_a_metadata_row_and_checks_length_first() {
+        // The storage layer verifies bytes it read for a key whose identity and
+        // creation instant play no part in the check. A truncated read has a
+        // perfectly valid digest *of the truncation*, so reporting length first
+        // is what keeps the two failures distinguishable.
+        assert_eq!(
+            ArtifactIntegrityError::check(
+                ArtifactDigest::from_bytes([7u8; 32]),
+                1_024,
+                ArtifactDigest::from_bytes([9u8; 32]),
+                512,
+            ),
+            Err(ArtifactIntegrityError::LengthMismatch {
+                expected: 1_024,
+                observed: 512
+            })
+        );
+        assert_eq!(
+            ArtifactIntegrityError::check(
+                ArtifactDigest::from_bytes([7u8; 32]),
+                1_024,
+                ArtifactDigest::from_bytes([7u8; 32]),
+                1_024,
+            ),
+            Ok(())
         );
     }
 
