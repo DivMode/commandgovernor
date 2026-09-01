@@ -4,10 +4,15 @@ Command Governor is a local-first durable control plane for reliable AI/software
 
 [commandgovernor.com](https://commandgovernor.com)
 
-> **Status:** reviewed architecture and safety contracts. There is no executable
-> implementation yet. The next allowed step is a small pure-Rust kernel/store/
-> testkit scaffold after the architecture PR is accepted; live service adapters
-> remain gated.
+> **Status:** reviewed architecture and safety contracts, plus the Phase 1
+> pure-Rust kernel/store/testkit scaffold landed on this branch: the pure kernel
+> (`governor-core`), the single-writer SQLite store (`governor-store-sqlite`),
+> the private immutable result-artifact store (`governor-artifacts`), the
+> deterministic testkit and its acceptance suites (`governor-testkit`), and a
+> daemon skeleton with a CLI (`command-governor daemon` / `status` /
+> `obligations` / `doctor`). No live service adapter is wired yet: ChatGPT
+> browser transport, the foreman MCP surface, GitHub, and the Claude/Herdr
+> worker adapters remain gated.
 
 ## What it solves
 
