@@ -486,8 +486,8 @@ pub struct ArtifactRow {
     pub sha256_hex: String,
     pub byte_len: u64,
     pub retention_state: String,
-    /// Latest instant at which an obligation referencing it closed.
-    pub released_at: Option<Timestamp>,
+    /// The earliest permitted deletion instant the ACK transaction stamped.
+    pub deletable_at: Option<Timestamp>,
 }
 
 impl ArtifactRow {
@@ -519,26 +519,23 @@ impl ArtifactRow {
         RetentionInput {
             key: StorageKey::parse(&self.storage_ref).expect("committed keys are valid"),
             state: self.retention(),
-            released_at: self.released_at,
+            deletable_at: self.deletable_at,
         }
     }
 }
 
-/// Every committed artifact row, with the release instant a sweep needs.
+/// Every committed artifact row, exactly as the durable authority holds it.
 ///
-/// The release instant is derived here rather than read from
-/// `eligible_for_delete_at_ms`, which the store leaves `NULL` — see the
-/// deviation note in `governor_artifacts::gc`.
+/// The deletion instant is read straight out of `eligible_for_delete_at_ms`:
+/// the fenced ACK writes it, and a sweep that reconstructed it from the ledger
+/// instead would be testing the reconstruction rather than the column.
 pub fn artifact_rows(conn: &Connection) -> Vec<ArtifactRow> {
     let mut statement = conn
         .prepare(
-            "SELECT ra.result_artifact_id, ra.storage_ref, ra.sha256_hex, ra.byte_len,
-                    ra.retention_state,
-                    (SELECT MAX(e.observed_at_ms)
-                       FROM obligations o JOIN events e ON e.seq = o.closed_event_seq
-                      WHERE o.result_artifact_id = ra.result_artifact_id)
-               FROM result_artifacts ra
-              ORDER BY ra.storage_ref",
+            "SELECT result_artifact_id, storage_ref, sha256_hex, byte_len,
+                    retention_state, eligible_for_delete_at_ms
+               FROM result_artifacts
+              ORDER BY storage_ref",
         )
         .expect("preparing the artifact query");
     let rows = statement
@@ -549,7 +546,7 @@ pub fn artifact_rows(conn: &Connection) -> Vec<ArtifactRow> {
                 sha256_hex: row.get(2)?,
                 byte_len: row.get::<_, i64>(3)?.try_into().expect("non-negative"),
                 retention_state: row.get(4)?,
-                released_at: row
+                deletable_at: row
                     .get::<_, Option<i64>>(5)?
                     .map(Timestamp::from_unix_millis),
             })

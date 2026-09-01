@@ -75,7 +75,8 @@ pub use ops::bootstrap::{
     SessionSpec,
 };
 pub use ops::claim::{
-    AcknowledgeRequest, Acknowledged, DeliverHandoffRequest, MintClaimRequest, MintedClaim,
+    AcknowledgeRequest, Acknowledged, DeliverHandoffRequest, ExpireClaimRequest, ExpiredClaim,
+    MintClaimRequest, MintedClaim,
 };
 pub use ops::delivery::{
     ArmDeliverySendRequest, ClaimedDelivery, CreateOrClaimDeliveryRequest, DeliveryOutcome,

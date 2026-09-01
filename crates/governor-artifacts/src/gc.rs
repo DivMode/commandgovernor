@@ -24,16 +24,21 @@
 //! [`ArtifactConfig::orphan_grace`] and then *moved to quarantine*, where it
 //! stays. Nothing in this crate deletes a quarantined file.
 //!
-//! # Deviation: where the release instant comes from
+//! # Where the deletion instant comes from
 //!
 //! `docs/data-model.md` gives `result_artifacts` an
-//! `eligible_for_delete_at_ms` column, and the schema has it, but no store
-//! operation currently writes it — the store recomputes `retention_state` and
-//! leaves the instant `NULL`. So [`RetentionInput::released_at`] is supplied by
-//! the caller, from the closing event's timestamp, and an eligible artifact
-//! with **no** release instant is refused
-//! ([`RetentionDecision::ReleaseInstantUnknown`]) rather than deleted. Failing
-//! closed here costs disk; guessing costs a result.
+//! `eligible_for_delete_at_ms` column, and the fenced ACK transaction writes
+//! it: the closing instant plus the retention delay that ACK was given. So
+//! [`RetentionInput::deletable_at`] is read from that column, and the grace
+//! period is **not** recomputed here — a sweep that added its own configured
+//! delay to a durable instant would be a second policy authority, and the two
+//! would eventually disagree.
+//!
+//! An eligible artifact with **no** recorded instant is refused
+//! ([`RetentionDecision::ReleaseInstantUnknown`]) rather than deleted. That is
+//! the state of a closure that carried no retention policy — user
+//! cancellation, today — and failing closed there costs disk, while guessing
+//! costs a result.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -54,8 +59,12 @@ pub struct RetentionInput {
     pub key: StorageKey,
     /// Whether any open obligation still needs it.
     pub state: RetentionState,
-    /// When the last obligation referencing it closed, if it has.
-    pub released_at: Option<Timestamp>,
+    /// Earliest instant deletion is permitted, as the durable authority
+    /// recorded it in `result_artifacts.eligible_for_delete_at_ms`.
+    ///
+    /// `None` for an artifact that is still pinned, and for one released by a
+    /// closure that carried no retention policy — which is kept, not deleted.
+    pub deletable_at: Option<Timestamp>,
 }
 
 impl RetentionInput {
@@ -63,7 +72,9 @@ impl RetentionInput {
     ///
     /// Pass every obligation in the projection: [`ResultArtifact::retention`]
     /// selects the ones that reference this artifact, so a caller cannot
-    /// accidentally filter out the pinning one.
+    /// accidentally filter out the pinning one. `deletable_at` still comes from
+    /// the durable row: it is a policy stamp the ACK transaction wrote, not
+    /// something the obligations can answer.
     ///
     /// # Errors
     ///
@@ -73,12 +84,12 @@ impl RetentionInput {
     pub fn from_artifact<'a>(
         artifact: &ResultArtifact,
         obligations: impl IntoIterator<Item = &'a Obligation>,
-        released_at: Option<Timestamp>,
+        deletable_at: Option<Timestamp>,
     ) -> ArtifactResult<Self> {
         Ok(Self {
             key: StorageKey::new(artifact.storage_ref().clone())?,
             state: artifact.retention(obligations),
-            released_at,
+            deletable_at,
         })
     }
 }
@@ -89,8 +100,8 @@ impl RetentionInput {
 pub enum RetentionDecision {
     /// An open obligation needs it. Deleting it would destroy work in flight.
     Pinned,
-    /// Released, but the release instant is unknown, so the grace period
-    /// cannot be evaluated. Fails closed: keep it.
+    /// Released, but the durable authority recorded no deletion instant, so
+    /// the grace period cannot be evaluated. Fails closed: keep it.
     ReleaseInstantUnknown,
     /// Released, and still inside the retention grace period.
     WithinGrace {
@@ -110,14 +121,18 @@ impl RetentionDecision {
 }
 
 /// Decides one artifact's fate. Pure, and the whole retention policy.
+///
+/// There is no grace parameter: the delay was applied once, by the ACK
+/// transaction that released the pin, and its answer is
+/// [`RetentionInput::deletable_at`]. Re-applying a locally configured grace on
+/// top of that instant would delete on a schedule nobody wrote down.
 #[must_use]
-pub fn decide(input: &RetentionInput, now: Timestamp, grace: DurationMs) -> RetentionDecision {
-    match (input.state, input.released_at) {
+pub const fn decide(input: &RetentionInput, now: Timestamp) -> RetentionDecision {
+    match (input.state, input.deletable_at) {
         (RetentionState::Pinned, _) => RetentionDecision::Pinned,
         (RetentionState::Eligible, None) => RetentionDecision::ReleaseInstantUnknown,
-        (RetentionState::Eligible, Some(released_at)) => {
-            let deletable_at = released_at.saturating_add(grace);
-            if now >= deletable_at {
+        (RetentionState::Eligible, Some(deletable_at)) => {
+            if now.as_unix_millis() >= deletable_at.as_unix_millis() {
                 RetentionDecision::Deletable
             } else {
                 RetentionDecision::WithinGrace { deletable_at }
@@ -193,7 +208,7 @@ impl ArtifactStore {
     ) -> ArtifactResult<CollectionReport> {
         let mut report = CollectionReport::default();
         for input in inputs {
-            let decision = decide(input, now, self.config().retention_grace);
+            let decision = decide(input, now);
             if !decision.permits_deletion() {
                 report.kept.push((input.key.clone(), decision));
                 continue;
@@ -365,22 +380,19 @@ fn age_of(metadata: &fs::Metadata, now: Timestamp) -> DurationMs {
 mod tests {
     use super::*;
 
-    fn input(state: RetentionState, released_at: Option<i64>) -> RetentionInput {
+    fn input(state: RetentionState, deletable_at: Option<i64>) -> RetentionInput {
         RetentionInput {
             key: StorageKey::parse("ra-0001").expect("valid key"),
             state,
-            released_at: released_at.map(Timestamp::from_unix_millis),
+            deletable_at: deletable_at.map(Timestamp::from_unix_millis),
         }
     }
-
-    const GRACE: DurationMs = DurationMs::from_millis(1_000);
 
     #[test]
     fn an_open_obligation_keeps_the_bytes_whatever_the_clock_says() {
         let decision = decide(
             &input(RetentionState::Pinned, Some(0)),
             Timestamp::from_unix_millis(i64::MAX),
-            GRACE,
         );
         assert_eq!(decision, RetentionDecision::Pinned);
         assert!(!decision.permits_deletion());
@@ -389,9 +401,8 @@ mod tests {
     #[test]
     fn release_starts_a_grace_period_rather_than_a_deletion() {
         let decision = decide(
-            &input(RetentionState::Eligible, Some(1_000)),
+            &input(RetentionState::Eligible, Some(2_000)),
             Timestamp::from_unix_millis(1_500),
-            GRACE,
         );
         assert_eq!(
             decision,
@@ -403,12 +414,18 @@ mod tests {
     }
 
     #[test]
-    fn only_a_release_plus_the_full_delay_permits_deletion() {
+    fn only_the_recorded_instant_itself_permits_deletion() {
         assert!(
             decide(
-                &input(RetentionState::Eligible, Some(1_000)),
+                &input(RetentionState::Eligible, Some(2_000)),
                 Timestamp::from_unix_millis(2_000),
-                GRACE,
+            )
+            .permits_deletion()
+        );
+        assert!(
+            !decide(
+                &input(RetentionState::Eligible, Some(2_000)),
+                Timestamp::from_unix_millis(1_999),
             )
             .permits_deletion()
         );
@@ -419,7 +436,6 @@ mod tests {
         let decision = decide(
             &input(RetentionState::Eligible, None),
             Timestamp::from_unix_millis(i64::MAX),
-            GRACE,
         );
         assert_eq!(decision, RetentionDecision::ReleaseInstantUnknown);
         assert!(!decision.permits_deletion());

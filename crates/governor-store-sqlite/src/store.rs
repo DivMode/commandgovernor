@@ -35,7 +35,8 @@ use crate::ops::bootstrap::{
 };
 use crate::ops::claim::{
     AcknowledgeObligation, AcknowledgeRequest, Acknowledged, DeliverHandoff, DeliverHandoffRequest,
-    MintClaimRequest, MintForemanClaim, MintedClaim,
+    ExpireClaimRequest, ExpireForemanClaim, ExpiredClaim, MintClaimRequest, MintForemanClaim,
+    MintedClaim,
 };
 use crate::ops::delivery::{
     ArmDeliverySend, ArmDeliverySendRequest, ClaimedDelivery, CreateOrClaimDelivery,
@@ -325,6 +326,24 @@ impl Store {
     pub fn acknowledge_obligation(&self, request: AcknowledgeRequest) -> StoreResult<Acknowledged> {
         self.writer
             .call::<AcknowledgeObligation, _>(request, Command::AcknowledgeObligation)
+    }
+
+    /// Returns a lapsed claim's obligation to the attention state it came from.
+    ///
+    /// Internal coordination, never a decision about the work: this closes
+    /// nothing and releases no artifact (`docs/state-machines.md` "Claim/ACK
+    /// fencing").
+    ///
+    /// # Errors
+    ///
+    /// - [`governor_core::error::Conflict::ObligationAlreadyClaimed`] when the
+    ///   claim is still live, so there is nothing to expire;
+    /// - [`governor_core::error::Conflict::StaleClaim`] when a different claim
+    ///   holds the obligation;
+    /// - a [`crate::StoreError`] from the transaction.
+    pub fn expire_foreman_claim(&self, request: ExpireClaimRequest) -> StoreResult<ExpiredClaim> {
+        self.writer
+            .call::<ExpireForemanClaim, _>(request, Command::ExpireForemanClaim)
     }
 
     /// Commits the `received` row that must precede a consequential dispatch.

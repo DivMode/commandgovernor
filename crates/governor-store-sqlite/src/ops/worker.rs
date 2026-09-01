@@ -58,16 +58,75 @@ use crate::tx::{Failpoint, Tx, WriteOp};
 ///
 /// A crash before the transaction leaves an unreferenced orphan file, which is
 /// the safe direction and is quarantined by a later sweep.
+///
+/// # Why the fields are private
+///
+/// The value *is* the durability claim. Public fields would make it a plain
+/// record that any caller could fill in from a filename and a guess, and the
+/// seam would then be documentation rather than structure. There is exactly one
+/// way to build one — [`DurableArtifact::assert_durable_from_parts`] — and its
+/// name is the assertion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableArtifact {
+    storage_ref: SafeToken,
+    digest: ArtifactDigest,
+    byte_len: u64,
+    media_type: SafeToken,
+}
+
+impl DurableArtifact {
+    /// Asserts that one artifact's bytes and immutable name are already durable.
+    ///
+    /// **The caller asserts that the crash-safe publication ordering —
+    /// temp → write → `fsync` → link → directory `fsync` → verify — completed
+    /// for these exact bytes.** This crate cannot check that; it holds the
+    /// database half and never touches a file. Calling this without having
+    /// performed that sequence is how the forbidden outcome is reintroduced:
+    /// a committed open obligation pointing at an artifact that was never made
+    /// durable.
+    ///
+    /// The sanctioned callers are
+    /// `governor_artifacts::PublishedArtifact::durable`, which can only be
+    /// reached from a value the artifact layer produced on the far side of the
+    /// directory `fsync`, and test fixtures that stand in for it.
+    #[must_use]
+    pub const fn assert_durable_from_parts(
+        storage_ref: SafeToken,
+        digest: ArtifactDigest,
+        byte_len: u64,
+        media_type: SafeToken,
+    ) -> Self {
+        Self {
+            storage_ref,
+            digest,
+            byte_len,
+            media_type,
+        }
+    }
+
     /// Daemon-allocated opaque storage key. A worker never supplies a path.
-    pub storage_ref: SafeToken,
+    #[must_use]
+    pub const fn storage_ref(&self) -> &SafeToken {
+        &self.storage_ref
+    }
+
     /// Digest of the bytes as written.
-    pub digest: ArtifactDigest,
+    #[must_use]
+    pub const fn digest(&self) -> ArtifactDigest {
+        self.digest
+    }
+
     /// Length of the bytes as written.
-    pub byte_len: u64,
+    #[must_use]
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
     /// Opaque media type label.
-    pub media_type: SafeToken,
+    #[must_use]
+    pub const fn media_type(&self) -> &SafeToken {
+        &self.media_type
+    }
 }
 
 /// The bounded safe receipts that prove one managed run completed.
@@ -417,14 +476,14 @@ impl WriteOp for PublishWorkerResult {
                 id_text(loaded.identity.task),
                 id_text(turn),
                 event::store_seq(appended.seq())?,
-                self.request.artifact.storage_ref.as_str(),
-                hex32(self.request.artifact.digest.as_bytes()),
+                self.request.artifact.storage_ref().as_str(),
+                hex32(self.request.artifact.digest().as_bytes()),
                 store_u64(
-                    self.request.artifact.byte_len,
+                    self.request.artifact.byte_len(),
                     "result_artifacts",
                     "byte_len"
                 )?,
-                self.request.artifact.media_type.as_str(),
+                self.request.artifact.media_type().as_str(),
                 store_time(self.now),
                 // Provisional: `record_obligation_transition` recomputes it from
                 // the obligations that actually reference the artifact.

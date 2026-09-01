@@ -656,6 +656,10 @@ fn delivery_event(
 /// obligation references it. There is no setter, so nothing can release an
 /// artifact an open obligation still needs.
 ///
+/// The deletion instant is kept consistent with that answer in the same
+/// statement: a pinned artifact has no deletion instant, full stop. Stamping it
+/// is a separate, explicit act — see [`stamp_deletion_instant`].
+///
 /// # Errors
 ///
 /// Returns a SQLite error.
@@ -665,11 +669,57 @@ pub(crate) fn refresh_retention(tx: &Tx<'_>, artifact: ResultArtifactId) -> Stor
             SET retention_state = CASE WHEN EXISTS (
                     SELECT 1 FROM obligations
                      WHERE result_artifact_id = ?1 AND closed_event_seq IS NULL
-                ) THEN ?2 ELSE ?3 END
+                ) THEN ?2 ELSE ?3 END,
+                eligible_for_delete_at_ms = CASE WHEN EXISTS (
+                    SELECT 1 FROM obligations
+                     WHERE result_artifact_id = ?1 AND closed_event_seq IS NULL
+                ) THEN NULL ELSE eligible_for_delete_at_ms END
           WHERE result_artifact_id = ?1",
         params![
             id_text(artifact),
             encode_retention(RetentionLabel::Pinned),
+            encode_retention(RetentionLabel::Eligible),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Records the earliest instant at which a released artifact may be deleted.
+///
+/// `docs/data-model.md`: *ACK only makes an artifact retention-eligible;
+/// asynchronous GC deletes later.* This writes the "later": the instant a sweep
+/// compares `now` against, computed by the caller as **ACK instant + the
+/// retention delay it was given**. The store invents neither half.
+///
+/// Two guards, both deliberate:
+///
+/// - `retention_state = 'eligible'` — [`refresh_retention`] has already
+///   recomputed the pin from the obligations that actually reference the
+///   artifact, so this stamps only what that recompute genuinely released. An
+///   artifact another open obligation still needs is untouched.
+/// - `COALESCE` — the first release instant stands. A repeated or idempotent
+///   ACK must not push the deletion of an already-released artifact further
+///   into the future.
+///
+/// A row that never gets here keeps `NULL`, and the artifact layer's retention
+/// decision fails closed on it: an artifact whose deletion instant is unknown
+/// is kept, never guessed at.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-value error for an unstorable instant.
+pub(crate) fn stamp_deletion_instant(
+    tx: &Tx<'_>,
+    artifact: ResultArtifactId,
+    deletable_at: Timestamp,
+) -> StoreResult<()> {
+    tx.conn().execute(
+        "UPDATE result_artifacts
+            SET eligible_for_delete_at_ms = COALESCE(eligible_for_delete_at_ms, ?2)
+          WHERE result_artifact_id = ?1 AND retention_state = ?3",
+        params![
+            id_text(artifact),
+            crate::codec::store_time(deletable_at),
             encode_retention(RetentionLabel::Eligible),
         ],
     )?;

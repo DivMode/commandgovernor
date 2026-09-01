@@ -14,17 +14,26 @@
 //! | [`the_claim_path_requires_the_random_correlation_id`] | invariant 17 |
 //! | [`duplicate_scheduling_converges_on_one_delivery_identity`] | data model |
 //! | [`a_bounded_retry_keeps_the_revision_and_its_correlation_id`] | data model |
+//! | [`an_ack_records_when_the_released_bytes_may_go`] | ACK layer 3, retention |
+//! | [`claim_expiry_returns_the_attention_it_came_from`] | OBL-002, ART-002 |
+//! | [`an_expired_claim_can_be_replaced_by_a_new_one`] | OBL-008 reclaim |
+//! | [`the_displaced_claim_cannot_ack_after_a_reclaim`] | OBL-004 |
+//! | [`a_live_claim_cannot_be_expired`] | claim/ACK fencing |
 //! | [`projection_replay_equals_committed_state`] | DB-001, research test 11 |
+//! | [`replay_still_matches_across_a_claim_expiry`] | DB-001 with expiry |
 
 mod support;
 
-use governor_core::fence::{AttemptNo, DeliveryRevision, ObligationVersion};
+use governor_core::fence::{AttemptNo, BindingGeneration, DeliveryRevision, ObligationVersion};
+use governor_core::id::{ClaimId, ObligationId};
 use governor_core::obligation::{Disposition, ObligationState};
 use governor_core::outbound::{DeliveryState, FailureClass};
 use governor_core::time::DurationMs;
+use governor_core::worker_evidence::WorkerFailureClass;
 use governor_store_sqlite::{
-    AcknowledgeRequest, CreateOrClaimDeliveryRequest, DeliverHandoffRequest, DeliveryOutcome,
-    MintClaimRequest, RecordDeliveryOutcomeRequest, RecordWorkerStartedRequest, StoreError,
+    AcknowledgeRequest, ClaimedDelivery, CreateOrClaimDeliveryRequest, DeliverHandoffRequest,
+    DeliveryOutcome, ExpireClaimRequest, MintClaimRequest, RecordDeliveryOutcomeRequest,
+    RecordWorkerFailureRequest, RecordWorkerStartedRequest, Store, StoreError,
 };
 use support::{
     Harness, accept_wake, bind, count, open_turn, publish_result, schedule_wake, source,
@@ -257,6 +266,10 @@ fn worker_completion_leaves_the_obligation_open() {
     assert!(closed.is_none());
 }
 
+/// Retention delay the ACK fixtures apply. Long enough that nothing in these
+/// suites is deletable, so a released artifact is released and not gone.
+const RETENTION_GRACE: DurationMs = DurationMs::from_millis(86_400_000);
+
 /// Drives one obligation all the way to a fenced ACK and returns the harness.
 fn acknowledged() -> (Harness, governor_core::id::ObligationId) {
     let harness = Harness::new();
@@ -306,6 +319,7 @@ fn acknowledged() -> (Harness, governor_core::id::ObligationId) {
             binding_generation: generation,
             claim: minted.claim,
             disposition: Disposition::Accepted,
+            retention_grace: RETENTION_GRACE,
         })
         .expect("a fully fenced ACK closes the obligation");
     assert_eq!(acked.obligation.state, ObligationState::Acknowledged);
@@ -695,4 +709,376 @@ fn a_delivery_attempt_is_claimed_before_the_send_fence_is_armed() {
         1
     );
     let _ = DeliveryState::Accepted;
+}
+
+/// Drives one obligation to an attention state, accepts a wake for it, mints a
+/// claim, and hands the work over.
+///
+/// `needs_input` is deliberately absent: Phase 1 has no store write path to it
+/// — there is no input-boundary event kind — so it cannot be driven from here.
+/// Its expiry behaviour is the state machine's, and `governor-core` owns it.
+fn handed_over(
+    store: &Store,
+    attention: ObligationState,
+    lifetime: DurationMs,
+) -> (ObligationId, BindingGeneration, ClaimedDelivery, ClaimId) {
+    let turn = open_turn(store);
+    let generation = bind(store, "conv-A");
+    start_worker(store, turn.obligation, "run-1");
+    match attention {
+        ObligationState::CompletedUnprocessed => {
+            publish_result(store, turn.obligation, "run-1").expect("publication");
+        }
+        ObligationState::Failed => {
+            store
+                .record_worker_failure(RecordWorkerFailureRequest {
+                    obligation: turn.obligation,
+                    source: source("claude.result", "run-1", "error"),
+                    incarnation: governor_core::fence::IncarnationGeneration::FIRST,
+                    failure: WorkerFailureClass::StructuredError,
+                })
+                .expect("a verified terminal worker failure");
+        }
+        other => panic!("{other:?} is not a reachable attention state here"),
+    }
+
+    let snapshot = store.read_obligation(turn.obligation).expect("snapshot");
+    assert_eq!(snapshot.state, attention);
+    let claimed = schedule_wake(
+        store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("scheduling a wake");
+    accept_wake(store, &claimed, generation, "msg-1");
+
+    let minted = store
+        .mint_foreman_claim(MintClaimRequest {
+            obligation: turn.obligation,
+            presented_delivery_id: claimed.delivery_id.clone(),
+            binding_generation: generation,
+            expected_version: snapshot.version,
+            expected_source: snapshot.source.clone(),
+            lifetime,
+        })
+        .expect("minting a claim from the accepted wake");
+    store
+        .deliver_handoff(DeliverHandoffRequest {
+            obligation: turn.obligation,
+            claim: minted.claim,
+        })
+        .expect("handing the work to the claiming foreman");
+
+    (turn.obligation, generation, claimed, minted.claim)
+}
+
+/// A claim minted with no lifetime at all is past its expiry the moment the
+/// next operation reads the stepping clock. That is what makes expiry
+/// deterministic here rather than a race against the test's own runtime.
+const ALREADY_LAPSED: DurationMs = DurationMs::ZERO;
+
+#[test]
+fn an_ack_records_when_the_released_bytes_may_go() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let grace = DurationMs::from_millis(10_000);
+    let (obligation, generation, _wake, claim) = handed_over(
+        &store,
+        ObligationState::CompletedUnprocessed,
+        DurationMs::from_millis(60_000),
+    );
+
+    let conn = harness.inspect();
+    let row = || -> (String, Option<i64>) {
+        conn.query_row(
+            "SELECT retention_state, eligible_for_delete_at_ms FROM result_artifacts",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("reading the artifact row")
+    };
+    assert_eq!(
+        row(),
+        ("pinned".to_owned(), None),
+        "a pinned artifact carries no deletion instant"
+    );
+
+    let processing = store.read_obligation(obligation).expect("snapshot");
+    let request = AcknowledgeRequest {
+        obligation,
+        expected_version: processing.version,
+        expected_source: processing.source.clone(),
+        binding_generation: generation,
+        claim,
+        disposition: Disposition::Accepted,
+        retention_grace: grace,
+    };
+    store
+        .acknowledge_obligation(request.clone())
+        .expect("a fully fenced ACK");
+
+    let acked_at: i64 = conn
+        .query_row(
+            "SELECT observed_at_ms FROM events WHERE kind = 'foreman_acked'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the ACK is in the ledger");
+    assert_eq!(
+        row(),
+        (
+            "eligible".to_owned(),
+            Some(acked_at + i64::try_from(grace.as_millis()).expect("fits"))
+        ),
+        "the ACK instant plus the delay it was given, and nothing invented"
+    );
+
+    // An idempotent repeat must not push the deletion further out.
+    store
+        .acknowledge_obligation(request)
+        .expect("an exact repeat is idempotent success");
+    assert_eq!(
+        row().1,
+        Some(acked_at + i64::try_from(grace.as_millis()).expect("fits"))
+    );
+}
+
+#[test]
+fn claim_expiry_returns_the_attention_it_came_from() {
+    for attention in [
+        ObligationState::CompletedUnprocessed,
+        ObligationState::Failed,
+    ] {
+        let harness = Harness::new();
+        let store = harness.open().expect("opening");
+        let (obligation, _generation, _wake, claim) =
+            handed_over(&store, attention, ALREADY_LAPSED);
+        let processing = store.read_obligation(obligation).expect("snapshot");
+        assert_eq!(processing.state, ObligationState::Processing);
+
+        let expired = store
+            .expire_foreman_claim(ExpireClaimRequest { obligation, claim })
+            .expect("a lapsed claim expires");
+        assert_eq!(
+            expired.obligation.state, attention,
+            "expiry restores exactly the attention state the claim was taken from"
+        );
+        assert!(
+            expired.obligation.version > processing.version,
+            "the transition advances the compare-and-swap version"
+        );
+
+        let snapshot = store.read_obligation(obligation).expect("snapshot");
+        assert!(snapshot.open, "expiry never closes work");
+        assert!(snapshot.claim.is_none(), "the claim no longer holds it");
+        assert_eq!(snapshot.result_artifact, processing.result_artifact);
+
+        let conn = harness.inspect();
+        let (state, released): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT state, released_event_seq FROM foreman_claims WHERE claim_id = ?1",
+                rusqlite::params![claim.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("reading the claim row");
+        assert_eq!(state, "expired");
+        assert!(released.is_some(), "the release is recorded durably");
+        let closed: Option<i64> = conn
+            .query_row(
+                "SELECT closed_event_seq FROM obligations WHERE obligation_id = ?1",
+                rusqlite::params![obligation.to_string()],
+                |row| row.get(0),
+            )
+            .expect("reading the projection");
+        assert!(closed.is_none(), "no closing disposition was recorded");
+
+        if attention == ObligationState::CompletedUnprocessed {
+            let retention: (String, Option<i64>) = conn
+                .query_row(
+                    "SELECT retention_state, eligible_for_delete_at_ms FROM result_artifacts",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("reading the artifact row");
+            assert_eq!(
+                retention,
+                ("pinned".to_owned(), None),
+                "ART-002: expiry releases nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_live_claim_cannot_be_expired() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let (obligation, _generation, _wake, claim) = handed_over(
+        &store,
+        ObligationState::CompletedUnprocessed,
+        DurationMs::from_millis(60_000),
+    );
+    let conn = harness.inspect();
+    let events = count(&conn, "events");
+    let transitions = count(&conn, "obligation_events");
+
+    let error = store
+        .expire_foreman_claim(ExpireClaimRequest { obligation, claim })
+        .expect_err("a claim that still has time left is not expired");
+    assert_eq!(error.conflict_code(), Some("obligation_already_claimed"));
+    assert_eq!(count(&conn, "events"), events);
+    assert_eq!(count(&conn, "obligation_events"), transitions);
+    assert_eq!(
+        store.read_obligation(obligation).expect("snapshot").state,
+        ObligationState::Processing
+    );
+}
+
+/// Expires a lapsed claim and mints a new one from the same accepted wake.
+fn reclaimed(store: &Store) -> (ObligationId, BindingGeneration, ClaimId, ClaimId) {
+    let (obligation, generation, wake, first) =
+        handed_over(store, ObligationState::CompletedUnprocessed, ALREADY_LAPSED);
+    let expired = store
+        .expire_foreman_claim(ExpireClaimRequest {
+            obligation,
+            claim: first,
+        })
+        .expect("a lapsed claim expires");
+    assert!(
+        expired.wake_repointed,
+        "the accepted wake follows the obligation it is still about"
+    );
+
+    let snapshot = store.read_obligation(obligation).expect("snapshot");
+    let second = store
+        .mint_foreman_claim(MintClaimRequest {
+            obligation,
+            presented_delivery_id: wake.delivery_id.clone(),
+            binding_generation: generation,
+            expected_version: snapshot.version,
+            expected_source: snapshot.source.clone(),
+            lifetime: DurationMs::from_millis(60_000),
+        })
+        .expect("OBL-008: an obligation may be reclaimed after claim expiry")
+        .claim;
+    assert_ne!(first, second, "a reclaim mints a genuinely new claim");
+    (obligation, generation, first, second)
+}
+
+#[test]
+fn an_expired_claim_can_be_replaced_by_a_new_one() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let (obligation, _generation, first, second) = reclaimed(&store);
+
+    let snapshot = store.read_obligation(obligation).expect("snapshot");
+    assert_eq!(snapshot.state, ObligationState::ClaimedByForeman);
+    assert_eq!(snapshot.claim, Some(second));
+
+    let conn = harness.inspect();
+    let states: Vec<(String, String)> = {
+        let mut statement = conn
+            .prepare("SELECT claim_id, state FROM foreman_claims ORDER BY claim_id")
+            .expect("preparing");
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("querying claims");
+        rows.map(|row| row.expect("claim row")).collect()
+    };
+    assert_eq!(states.len(), 2, "the expired claim is history, not deleted");
+    assert!(
+        states
+            .iter()
+            .any(|(id, state)| id == &first.to_string() && state == "expired")
+    );
+    assert!(
+        states
+            .iter()
+            .any(|(id, state)| id == &second.to_string() && state == "live")
+    );
+}
+
+#[test]
+fn the_displaced_claim_cannot_ack_after_a_reclaim() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let (obligation, generation, first, second) = reclaimed(&store);
+    store
+        .deliver_handoff(DeliverHandoffRequest {
+            obligation,
+            claim: second,
+        })
+        .expect("handing the work to the new claim");
+
+    let processing = store.read_obligation(obligation).expect("snapshot");
+    let conn = harness.inspect();
+    let events = count(&conn, "events");
+    let transitions = count(&conn, "obligation_events");
+
+    let error = store
+        .acknowledge_obligation(AcknowledgeRequest {
+            obligation,
+            expected_version: processing.version,
+            expected_source: processing.source.clone(),
+            binding_generation: generation,
+            claim: first,
+            disposition: Disposition::Accepted,
+            retention_grace: RETENTION_GRACE,
+        })
+        .expect_err("OBL-004: the displaced claim cannot close the work");
+    assert_eq!(error.conflict_code(), Some("stale_claim"));
+
+    assert_eq!(count(&conn, "events"), events, "zero rows changed");
+    assert_eq!(count(&conn, "obligation_events"), transitions);
+    let after = store.read_obligation(obligation).expect("snapshot");
+    assert_eq!(after.state, ObligationState::Processing);
+    assert_eq!(after.version, processing.version);
+    assert!(after.open);
+    let retention: String = conn
+        .query_row("SELECT retention_state FROM result_artifacts", [], |row| {
+            row.get(0)
+        })
+        .expect("reading retention");
+    assert_eq!(retention, "pinned", "the artifact is still required");
+}
+
+#[test]
+fn replay_still_matches_across_a_claim_expiry() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let (obligation, generation, _first, second) = reclaimed(&store);
+    store
+        .deliver_handoff(DeliverHandoffRequest {
+            obligation,
+            claim: second,
+        })
+        .expect("handing the work over again");
+    let processing = store.read_obligation(obligation).expect("snapshot");
+    store
+        .acknowledge_obligation(AcknowledgeRequest {
+            obligation,
+            expected_version: processing.version,
+            expected_source: processing.source.clone(),
+            binding_generation: generation,
+            claim: second,
+            disposition: Disposition::Accepted,
+            retention_grace: RETENTION_GRACE,
+        })
+        .expect("the second claim closes the work");
+
+    // The ledger now carries a claim, a handoff, an expiry, a second claim, a
+    // second handoff and an ACK for one obligation. DB-001 must still hold.
+    let verified = store.verify_projections().expect("replay equivalence");
+    assert_eq!(verified.obligations, 1);
+    assert_eq!(verified.deliveries, 1);
+
+    drop(store);
+    let store = harness.open().expect("reopen replays before serving");
+    assert_eq!(store.startup().projections.obligations, 1);
+    assert_eq!(
+        store.read_obligation(obligation).expect("snapshot").state,
+        ObligationState::Acknowledged
+    );
 }

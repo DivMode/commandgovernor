@@ -292,13 +292,19 @@ pub fn completion_receipts(run: &str) -> CompletionReceipts {
 }
 
 /// Artifact metadata for bytes a test pretends are already durable.
+///
+/// The assertion [`DurableArtifact::assert_durable_from_parts`] demands is
+/// *stood in for* here, not performed: these suites drive the database half
+/// alone and have no artifact root. The file half — and the real bridge through
+/// `governor_artifacts::PublishedArtifact::durable` — is proven by the
+/// `governor-artifacts` suites, which publish real bytes and then commit.
 pub fn durable_artifact(storage_ref: &str) -> DurableArtifact {
-    DurableArtifact {
-        storage_ref: token(storage_ref),
-        digest: governor_core::artifact::ArtifactDigest::from_bytes([7u8; 32]),
-        byte_len: 128,
-        media_type: token("text.markdown"),
-    }
+    DurableArtifact::assert_durable_from_parts(
+        token(storage_ref),
+        governor_core::artifact::ArtifactDigest::from_bytes([7u8; 32]),
+        128,
+        token("text.markdown"),
+    )
 }
 
 /// Publishes a confirmed result for an obligation already `running`.

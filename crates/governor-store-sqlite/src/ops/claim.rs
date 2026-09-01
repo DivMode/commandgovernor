@@ -1,4 +1,4 @@
-//! `foreman_resume` claim minting, handoff, and the fenced ACK.
+//! `foreman_resume` claim minting, handoff, expiry, and the fenced ACK.
 //!
 //! Two of `docs/data-model.md`'s critical transaction boundaries live here, and
 //! they are the two that decide whether work stays owed.
@@ -14,10 +14,18 @@
 //! and disposition, appends the explicit disposition event, and closes the
 //! projection. It is the only normal path that closes an obligation, and it is
 //! [`governor_core::claim::acknowledge`] that decides — this module supplies
-//! the fenced state and persists the answer.
+//! the fenced state and persists the answer. Closing is also where an artifact's
+//! deletion instant is stamped: the pin is released and the grace period starts
+//! in the same transaction.
 //!
-//! Both delegate every rule to `governor-core`. A stale fence returns the typed
-//! conflict and the transaction rolls back, so zero rows change.
+//! **Expiry** is the one operation here that is *not* a decision about the work.
+//! `docs/state-machines.md` "Claim/ACK fencing": claim expiry is internal
+//! coordination, it may return the obligation to its prior attention state, and
+//! it never closes work or releases a required result artifact. See
+//! [`ExpireForemanClaim`].
+//!
+//! All of them delegate every rule to `governor-core`. A stale fence returns the
+//! typed conflict and the transaction rolls back, so zero rows change.
 
 use governor_core::claim::{
     AckOutcome, ClaimState, ForemanClaim, PersistedClaim, ResumeRequest, acknowledge, mint_claim,
@@ -298,6 +306,14 @@ pub struct AcknowledgeRequest {
     pub claim: ClaimId,
     /// Semantic decision.
     pub disposition: Disposition,
+    /// How long a released artifact is kept before a sweep may delete it.
+    ///
+    /// Policy, supplied by the composition root rather than invented here: the
+    /// transaction stamps `result_artifacts.eligible_for_delete_at_ms` with
+    /// *this ACK's instant plus this delay* for the artifact the closure
+    /// releases. `docs/data-model.md`: "ACK only makes an artifact
+    /// retention-eligible; asynchronous GC deletes later."
+    pub retention_grace: DurationMs,
 }
 
 /// What an ACK did.
@@ -334,6 +350,19 @@ impl WriteOp for AcknowledgeObligation {
     fn commit(&self, tx: &Tx<'_>) -> StoreResult<Self::Committed> {
         let bindings = load::bindings(tx)?;
         let loaded = load::obligation(tx, self.request.obligation)?;
+
+        // Fence the *obligation's* current claim before the presented claim row
+        // is even rehydrated. An obligation that was reclaimed after an expiry
+        // is held by a different claim, and the honest answer for the displaced
+        // one is `stale_claim` (`docs/testing.md` OBL-004) rather than the
+        // `expired_claim` its own row also happens to say. Skipped when nothing
+        // holds the obligation, which is the already-closed case: an exact
+        // repeat of the committed ACK must still return idempotent success, and
+        // `governor_core::claim::acknowledge` decides that.
+        if loaded.projection.claim().is_some() {
+            loaded.projection.require_claim(self.request.claim)?;
+        }
+
         let claim = rehydrate_claim(tx, self.request.obligation, self.request.claim)?;
 
         let ack = AckRequest {
@@ -411,6 +440,18 @@ impl WriteOp for AcknowledgeObligation {
             Some(self.request.disposition),
         )?;
 
+        // The closure released the pin — `record_obligation_transition`
+        // recomputed that from the obligations themselves. Record when the
+        // bytes may go, in the same transaction that released them, so a sweep
+        // never has to reconstruct the closing instant from the ledger.
+        if let Some(artifact) = committed.obligation.result_artifact() {
+            load::stamp_deletion_instant(
+                tx,
+                artifact,
+                self.now.saturating_add(self.request.retention_grace),
+            )?;
+        }
+
         tx.reach(Failpoint::AfterProjectionUpdate)?;
         tx.reach(Failpoint::BeforeCommit)?;
         Ok(Acknowledged {
@@ -422,6 +463,210 @@ impl WriteOp for AcknowledgeObligation {
     fn finish(self, committed: Self::Committed) -> Self::Output {
         committed
     }
+}
+
+/// The claim whose bounded lifetime the caller believes has elapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpireClaimRequest {
+    /// Obligation the claim holds.
+    pub obligation: ObligationId,
+    /// Claim whose lifetime elapsed.
+    pub claim: ClaimId,
+}
+
+/// What a claim expiry committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredClaim {
+    /// The claim, now `expired`.
+    pub claim: ClaimId,
+    /// The obligation, back in the attention state it was claimed from and
+    /// still open.
+    pub obligation: ObligationAdvanced,
+    /// Whether the accepted wake that minted the claim was re-pointed at the
+    /// restored obligation, so the same delivery can mint the next claim.
+    pub wake_repointed: bool,
+}
+
+/// Returns an obligation whose claim lapsed to the attention it came from.
+///
+/// # What this must never do
+///
+/// Close work, and release an artifact. Both are structurally out of reach:
+/// the transition is [`ObligationEvent::ClaimExpired`], which `governor-core`
+/// resolves to the recorded prior attention state and nothing else, and the
+/// artifact pin is recomputed by `record_obligation_transition` from the
+/// obligations that reference it — an obligation back in
+/// `completed_unprocessed` is open, so its artifact stays pinned
+/// (`docs/testing.md` ART-002, fourth attempt).
+///
+/// # Where the prior attention state comes from
+///
+/// Not from a column. `crate::load::obligation` folds the obligation's ledger
+/// slice, so the `foreman_claim_minted` event in that slice is what set
+/// `prior_attention` on the projection this operation applies the expiry to.
+/// There is no field-wise constructor for an [`Obligation`], which is exactly
+/// why the restored state cannot be a stored value that drifted.
+///
+/// [`Obligation`]: governor_core::obligation::Obligation
+///
+/// # Re-pointing the wake
+///
+/// A claim advanced the obligation's version, and so did this expiry, so the
+/// accepted wake's target snapshot — frozen at scheduling time — no longer
+/// matches and [`mint_claim`] would refuse it as a stale delivery target. That
+/// would strand the obligation: work still owed, with the only accepted wake
+/// unable to hand it over again. So the same transaction re-points that one
+/// wake at the restored obligation, and only under the condition that makes it
+/// honest: the wake's recorded **source** fact is still the obligation's
+/// current one. The source moves only on accepted worker events, so this
+/// re-points across a claim/expiry round trip that changed nothing else, and
+/// refuses to across a worker event that genuinely made the wake about older
+/// work.
+pub(crate) struct ExpireForemanClaim {
+    request: ExpireClaimRequest,
+    event: EventId,
+    now: Timestamp,
+}
+
+impl WriteOp for ExpireForemanClaim {
+    type Request = ExpireClaimRequest;
+    type Committed = ExpiredClaim;
+    type Output = ExpiredClaim;
+
+    const NAME: &'static str = "expire_foreman_claim";
+
+    fn prepare(request: Self::Request, ports: &mut StorePorts) -> StoreResult<Self> {
+        Ok(Self {
+            request,
+            event: ports.next_id(),
+            now: ports.now(),
+        })
+    }
+
+    fn commit(&self, tx: &Tx<'_>) -> StoreResult<Self::Committed> {
+        let loaded = load::obligation(tx, self.request.obligation)?;
+        let claim = rehydrate_claim(tx, self.request.obligation, self.request.claim)?;
+
+        // A claim that has not run out of time is not expired, whatever a
+        // caller believes. Refusing with the "already held by a live claim"
+        // conflict is the literal truth here.
+        if !claim.is_expired_at(self.now) && claim.state() == ClaimState::Live {
+            return Err(Conflict::ObligationAlreadyClaimed {
+                obligation: self.request.obligation,
+                holder: claim.id(),
+            }
+            .into());
+        }
+
+        let before = loaded.projection;
+        let transition = before.apply(&ObligationEvent::ClaimExpired {
+            claim: self.request.claim,
+            at: self.now,
+        })?;
+        let Some(after) = transition.advanced() else {
+            // The claim is already released. Nothing to do, and saying so is
+            // not the same as pretending an expiry happened.
+            return Ok(ExpiredClaim {
+                claim: self.request.claim,
+                obligation: unchanged(&before),
+                wake_repointed: false,
+            });
+        };
+
+        let appended = event::append(
+            tx,
+            &NewEvent {
+                event_id: self.event,
+                kind: EventKind::ForemanClaimExpired,
+                source: internal_source(self.request.claim, "foreman_claim_expired")?,
+                observed_at: self.now,
+                occurred_at: None,
+                scope: EventScope {
+                    task: Some(loaded.identity.task),
+                    turn: loaded.identity.turn,
+                    obligation: Some(self.request.obligation),
+                    ..EventScope::default()
+                },
+                metadata: SafeMetadata::new().id("claim_id", self.request.claim),
+            },
+        )?;
+        if appended.is_duplicate() {
+            return Ok(ExpiredClaim {
+                claim: self.request.claim,
+                obligation: unchanged(&before),
+                wake_repointed: false,
+            });
+        }
+        let seq = appended.seq();
+
+        tx.conn().execute(
+            "UPDATE foreman_claims SET state = ?2, released_event_seq = ?3
+              WHERE claim_id = ?1",
+            params![
+                id_text(self.request.claim),
+                encode_claim_state(ClaimLifecycle::Expired),
+                event::store_seq(seq)?,
+            ],
+        )?;
+
+        record_obligation_transition(
+            tx,
+            &before,
+            &after,
+            seq,
+            loaded.source_event_seq,
+            ActorClass::Daemon,
+            None,
+        )?;
+
+        let wake_repointed =
+            repoint_wake(tx, claim.wake_delivery(), &after, loaded.source_event_seq)?;
+
+        tx.reach(Failpoint::AfterProjectionUpdate)?;
+        tx.reach(Failpoint::BeforeCommit)?;
+        Ok(ExpiredClaim {
+            claim: self.request.claim,
+            obligation: advanced(&after),
+            wake_repointed,
+        })
+    }
+
+    fn finish(self, committed: Self::Committed) -> Self::Output {
+        committed
+    }
+}
+
+/// Moves one accepted wake's target snapshot onto the restored obligation.
+///
+/// Guarded on the source fact, not merely on the delivery: the `WHERE` clause
+/// requires the wake to still be pinned to the event carrying the obligation's
+/// *current* source fact. A wake scheduled against an older source fact is
+/// genuinely about work that has moved on and stays stale, which is what
+/// [`governor_core::delivery::BrowserWake::require_current_target`] exists to
+/// catch.
+///
+/// Returns whether the row was re-pointed.
+fn repoint_wake(
+    tx: &Tx<'_>,
+    delivery: &DeliveryId,
+    restored: &governor_core::obligation::Obligation,
+    source_event_seq: governor_core::fence::EventSeq,
+) -> StoreResult<bool> {
+    let changed = tx.conn().execute(
+        "UPDATE browser_deliveries
+            SET target_obligation_version = ?2
+          WHERE delivery_id = ?1 AND target_source_event_seq = ?3",
+        params![
+            delivery.expose_hex(),
+            store_u64(
+                restored.version().get(),
+                "browser_deliveries",
+                "target_obligation_version"
+            )?,
+            event::store_seq(source_event_seq)?,
+        ],
+    )?;
+    Ok(changed == 1)
 }
 
 /// Rebuilds a persisted claim, re-proving it against the wake that minted it.

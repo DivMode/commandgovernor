@@ -44,7 +44,9 @@ use crate::error::{StoreError, StoreResult};
 use crate::load::OpenCondition;
 use crate::ops::AttemptEvidence;
 use crate::ops::bootstrap::{BindForeman, OpenWorkerTurn};
-use crate::ops::claim::{AcknowledgeObligation, DeliverHandoff, MintForemanClaim};
+use crate::ops::claim::{
+    AcknowledgeObligation, DeliverHandoff, ExpireForemanClaim, MintForemanClaim,
+};
 use crate::ops::delivery::{ArmDeliverySend, CreateOrClaimDelivery, RecordDeliveryOutcome};
 use crate::ops::effect::{MarkExternalDispatched, RecordExternalIntent, RecordExternalOutcome};
 use crate::ops::lease::{AcquireLease, ReleaseLease, RenewLease};
@@ -95,6 +97,7 @@ pub(crate) enum Command {
     MintForemanClaim(Job<MintForemanClaim>),
     DeliverHandoff(Job<DeliverHandoff>),
     AcknowledgeObligation(Job<AcknowledgeObligation>),
+    ExpireForemanClaim(Job<ExpireForemanClaim>),
     BeginMutation(Job<BeginMutation>),
     CompleteMutation(Job<CompleteMutation>),
     AckMutationReceipt(Job<AckMutationReceipt>),
@@ -167,6 +170,7 @@ fn dispatch(
         Command::MintForemanClaim(job) => run(conn, ports, hook, job),
         Command::DeliverHandoff(job) => run(conn, ports, hook, job),
         Command::AcknowledgeObligation(job) => run(conn, ports, hook, job),
+        Command::ExpireForemanClaim(job) => run(conn, ports, hook, job),
         Command::BeginMutation(job) => run(conn, ports, hook, job),
         Command::CompleteMutation(job) => run(conn, ports, hook, job),
         Command::AckMutationReceipt(job) => run(conn, ports, hook, job),

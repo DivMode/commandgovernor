@@ -87,6 +87,11 @@ pub const DEFAULT_ORPHAN_GRACE: DurationMs = DurationMs::from_millis(15 * 60 * 1
 ///
 /// `docs/data-model.md`: "ACK only makes an artifact retention-eligible;
 /// asynchronous GC deletes later."
+///
+/// This is where the policy is *defined*; it is not where it is *applied*. The
+/// composition root hands it to the fenced ACK, which stamps the resulting
+/// instant on the row, and the sweep then obeys the stamp. See
+/// [`ArtifactConfig::retention_grace`].
 pub const DEFAULT_RETENTION_GRACE: DurationMs = DurationMs::from_millis(24 * 60 * 60 * 1_000);
 
 /// Policy knobs for one artifact root.
@@ -97,6 +102,13 @@ pub struct ArtifactConfig {
     /// How long an unreferenced file is left alone before quarantine.
     pub orphan_grace: DurationMs,
     /// How long a released artifact is kept before it may be deleted.
+    ///
+    /// Read by the composition root and passed to the fenced ACK
+    /// (`AcknowledgeRequest::retention_grace`), which records the resulting
+    /// instant durably. [`ArtifactStore::collect`] deliberately does **not**
+    /// consult it: the sweep obeys the recorded instant so that changing this
+    /// knob cannot retroactively move the deletion time of work already
+    /// closed.
     pub retention_grace: DurationMs,
 }
 
@@ -171,14 +183,20 @@ impl PublishedArtifact {
     /// [`Store::publish_worker_result`](governor_store_sqlite::Store::publish_worker_result),
     /// and it exists only on a value that could only have come from a
     /// completed publication.
+    ///
+    /// This is the sanctioned caller of
+    /// [`DurableArtifact::assert_durable_from_parts`]: the assertion that
+    /// method demands — temp → write → `fsync` → link → directory `fsync` →
+    /// verify — is exactly the sequence [`ArtifactStore::publish`] performed
+    /// before it produced `self`.
     #[must_use]
     pub fn durable(&self) -> DurableArtifact {
-        DurableArtifact {
-            storage_ref: self.key.as_token().clone(),
-            digest: self.digest,
-            byte_len: self.byte_len,
-            media_type: self.media_type.clone(),
-        }
+        DurableArtifact::assert_durable_from_parts(
+            self.key.as_token().clone(),
+            self.digest,
+            self.byte_len,
+            self.media_type.clone(),
+        )
     }
 }
 
