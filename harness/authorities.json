@@ -1,0 +1,110 @@
+{
+  "$comment": [
+    "One authority per concern, written down because it cannot be trusted.",
+    "",
+    "Pi 0.84.4 resolves competing extension handlers silently by load order: for",
+    "a `session_before` event every handler result overwrites the previous one,",
+    "so two extensions that both answer `session_before_compact` do not conflict",
+    "-- the last one loaded simply wins, with no error and no warning. Pi also",
+    "exposes no runtime API for enumerating loaded extensions, so an extension",
+    "cannot detect the collision from inside either.",
+    "",
+    "That makes a second owner an undetectable failure mode rather than a",
+    "degraded one, and it is why this file exists and why conformance asserts",
+    "over it. `concerns` is an ARRAY, not an object keyed by concern: an object",
+    "cannot represent two owners for one key, which would make the duplicate",
+    "check vacuous. The check has to be able to fail.",
+    "",
+    "`status: \"unassigned\"` is a real entry, not a placeholder to be tidied",
+    "away. Naming an unowned concern is what stops it being quietly adopted by",
+    "whichever package is installed next."
+  ],
+  "schemaVersion": 1,
+  "concerns": [
+    {
+      "concern": "pi-runtime",
+      "status": "assigned",
+      "owner": "pins/pi-0.84.4",
+      "note": "The pinned Pi release. Provider abstraction, the agent loop, sessions, branching and compaction mechanics are ADOPTED from core and not reimplemented."
+    },
+    {
+      "concern": "session-persistence",
+      "status": "assigned",
+      "owner": "pins/pi-0.84.4",
+      "note": "Pi's own session JSONL. Command Governor does not ship a competing transcript format. Durable Command Governor state lives in an extension-owned sidecar instead, and that sidecar is a separate concern."
+    },
+    {
+      "concern": "runtime-version-gate",
+      "status": "assigned",
+      "owner": "harness/extensions/cg-version-guard.ts",
+      "note": "Sole reader of pins.json at runtime. Any second version check must consume this module rather than re-deriving the pin."
+    },
+    {
+      "concern": "launch-preflight-and-trust",
+      "status": "assigned",
+      "owner": "bin/cg-pi",
+      "note": "Decides the pi binary, asserts its version before the process starts, passes --approve for this repository's own settings, and sets PI_SUBAGENTS_TEMP_ROOT to a durable path. ctx.shutdown() is a no-op in print mode, so the launcher is the only place a version refusal is fatal."
+    },
+    {
+      "concern": "agent-role-definitions",
+      "status": "assigned",
+      "owner": "harness/agents",
+      "note": "The role files are the definitions. They are NOT the enforcement: Pi core has no agents concept, and the `tools` and `model` frontmatter fields bind only whatever extension reads them. See role-loadout-enforcement."
+    },
+    {
+      "concern": "conformance-suite",
+      "status": "assigned",
+      "owner": "conformance",
+      "note": "The credential-free tier gates every re-pin. No second suite may claim to verify the pin."
+    },
+    {
+      "concern": "role-loadout-enforcement",
+      "status": "unassigned",
+      "phase": "C",
+      "plannedOwner": "pi-subagents@0.62.0 capability ceilings, registered by a Command Governor policy extension",
+      "note": "ADR 0008 invariant 6 has no enforcement point in Pi core today. Until a package owns this, harness/agents/*.md restrictions are documentation, and the conformance suite says so rather than implying otherwise."
+    },
+    {
+      "concern": "subagent-process-lifecycle",
+      "status": "unassigned",
+      "phase": "C",
+      "plannedOwner": "pi-subagents@0.62.0",
+      "note": "Selected, reviewed, not installed. Installing it obliges us to set PI_SUBAGENTS_TEMP_ROOT, which bin/cg-pi already does, because the package defaults its durable run state to os.tmpdir()."
+    },
+    {
+      "concern": "foreman-transport",
+      "status": "unassigned",
+      "phase": "B",
+      "plannedOwner": "harness/extensions/cg-foreman (interface only in this revision)",
+      "note": "Gate P4. Transport candidates are capability-gated and replaceable; the interface is fixed now so neither candidate's shape reaches the ledger."
+    },
+    {
+      "concern": "foreman-event-ledger",
+      "status": "unassigned",
+      "phase": "B",
+      "plannedOwner": "a Command Governor extension-owned durable sidecar",
+      "note": "Must not be the Pi session JSONL: pi.appendEntry is session-scoped and does not survive as a single authority across fork or switch."
+    },
+    {
+      "concern": "compaction-summary",
+      "status": "unassigned",
+      "phase": "E",
+      "plannedOwner": "exactly one memory package, not yet chosen",
+      "note": "The highest-risk unassigned concern. Pi resolves two session_before_compact handlers by load order with no error, so this must be exactly one owner forever. Deferred deliberately: no evaluated candidate satisfies ADR 0007 (c) or (d)."
+    },
+    {
+      "concern": "observational-memory",
+      "status": "unassigned",
+      "phase": "E",
+      "plannedOwner": "undecided",
+      "note": "Deferred. Memory is never authority for exact lifecycle, capability, safety or user-owned decision facts (ADR 0008 invariant 5)."
+    },
+    {
+      "concern": "tool-gating-and-veto",
+      "status": "unassigned",
+      "phase": "C",
+      "plannedOwner": "a Command Governor policy extension",
+      "note": "ADR 0008 invariant 7 needs a single arbiter. cg-version-guard registers a tool_call handler today, but only to fail closed on an unverified runtime -- it is not a policy gate and must not become one by accretion."
+    }
+  ]
+}

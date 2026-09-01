@@ -1,0 +1,27 @@
+{
+  "$comment": [
+    "Command Governor worker profile. Copy this file to <project>/.pi/settings.json",
+    "in a project a worker will run in, then add the Command Governor package pin.",
+    "",
+    "Add it as an exact, immutable source:",
+    "  \"packages\": [\"git:github.com/DivMode/commandgovernor@<40-char commit sha>\"]",
+    "Pi treats any git ref as `pinned`, including a mutable branch or tag, and it",
+    "keeps no lockfile for the packages it installs -- so only a full commit SHA",
+    "is actually a pin. `packages` is left empty here rather than carrying a",
+    "placeholder, because a fake pin that passes a policy check is worse than no",
+    "pin at all.",
+    "",
+    "`defaultTools` in a project settings file REPLACES the global array rather",
+    "than merging with it, which is what makes this a least-authority loadout and",
+    "not a suggestion. Note the limit honestly: this restricts which tools the",
+    "session starts with. It is not a sandbox. Pi runs with the permissions of",
+    "the user that launched it, and `bash` can reach anything that user can.",
+    "",
+    "Launch through bin/cg-pi, not `pi`. Headless Pi never prompts for project",
+    "trust and, under the default setting, silently ignores this entire file."
+  ],
+  "packages": [],
+  "defaultTools": ["read", "write", "edit", "grep", "find", "ls", "bash"],
+  "enableSkillCommands": true,
+  "quietStartup": false
+}

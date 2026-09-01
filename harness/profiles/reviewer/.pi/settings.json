@@ -1,0 +1,25 @@
+{
+  "$comment": [
+    "Command Governor reviewer profile. Copy to <project>/.pi/settings.json for a",
+    "session whose only job is to read a change and report on it.",
+    "",
+    "The difference from the worker profile is `defaultTools`: no `write`, no",
+    "`edit`. A reviewer that can modify the code under review can make its own",
+    "finding disappear, and the cheapest way to prevent that is to not hand it",
+    "the tool. `bash` stays, because independent review means reading git history",
+    "and GitHub evidence rather than the implementer's summary.",
+    "",
+    "This is a starting loadout, not an enforced ceiling. Pi has no permission",
+    "system and no sandbox, and `bash` can still write files. Real enforcement",
+    "arrives with the subagent capability ceilings in Phase C; until then this",
+    "file is a default, and harness/authorities.json records that the concern is",
+    "unowned.",
+    "",
+    "Add the Command Governor package as a 40-character commit SHA:",
+    "  \"packages\": [\"git:github.com/DivMode/commandgovernor@<40-char commit sha>\"]"
+  ],
+  "packages": [],
+  "defaultTools": ["read", "grep", "find", "ls", "bash"],
+  "enableSkillCommands": true,
+  "quietStartup": false
+}
