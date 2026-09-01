@@ -378,8 +378,12 @@ fn del_007_crash_around_the_activation_fence() {
         // The activation happens and then the process dies before any outcome
         // is recorded.
         let outcome = browser.send(&wake.delivery_id, wake.attempt, obligation);
+        assert_eq!(
+            outcome.may_have_submitted(),
+            expected_sends == 1,
+            "{label}: the simulated page and the expected physical world disagree"
+        );
         assert_eq!(browser.sends().len(), expected_sends, "{label}");
-        let _ = outcome;
         drop(store);
 
         let store = harness.open().expect("reopen");

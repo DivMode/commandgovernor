@@ -205,7 +205,7 @@ fn db_002_transition_crash_matrix() {
         let harness = Harness::new();
         let store = harness.open().expect("opening");
         let mut artifacts = harness.open_artifacts();
-        let (_, wake, generation) = orphaned_prefix(&harness, &store, &mut artifacts);
+        let (_, wake, generation) = orphaned_prefix(&store, &mut artifacts);
         arm_send(&store, &wake, generation).expect("arming");
         drop(store);
 
@@ -597,7 +597,6 @@ fn published_prefix(
 
 /// A published obligation with a wake claimed and nothing sent.
 fn orphaned_prefix(
-    _harness: &Harness,
     store: &Store,
     artifacts: &mut governor_artifacts::ArtifactStore,
 ) -> (
@@ -730,7 +729,11 @@ fn db_003_unknown_newer_schema_fails_closed() {
         &governor_testkit::dump::dump_domain(&harness.inspect()),
         "DB-003: a refused open mutates nothing",
     );
-    let _ = work;
+    assert!(
+        governor_testkit::dump::count(&harness.inspect(), "obligations") == 1,
+        "the obligation the refused open would have served is still there: {}",
+        work.obligation
+    );
 }
 
 #[test]
@@ -836,7 +839,7 @@ fn db_006_startup_quarantines_every_ambiguous_effect_first() {
 
     // One orphan of each family, plus ready work the daemon would want to act
     // on the moment it came up.
-    let (_, wake, generation) = orphaned_prefix(&harness, &store, &mut artifacts);
+    let (_, wake, generation) = orphaned_prefix(&store, &mut artifacts);
     arm_send(&store, &wake, generation).expect("arming");
     store
         .begin_mutation(begin_request(&store, 960))

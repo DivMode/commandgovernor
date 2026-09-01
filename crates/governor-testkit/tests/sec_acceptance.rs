@@ -613,7 +613,12 @@ fn sec_009_browser_credentials_are_never_exported() {
             );
         }
     }
-    let _ = work;
+    assert!(
+        files
+            .iter()
+            .any(|(name, _)| name.contains(work.artifact.key().as_str())),
+        "the artifact root must be part of the scan"
+    );
 }
 
 #[test]

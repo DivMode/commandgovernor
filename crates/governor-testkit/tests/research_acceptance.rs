@@ -212,7 +212,7 @@ fn research_03_kill_after_io_before_outcome() {
         let mut adapter = FakeExternalDestination::attach(&harness.database_path());
 
         let granted = store
-            .record_external_intent(intent(&store, class.clone()))
+            .record_external_intent(intent(&store, class))
             .expect("a durable intent");
         store
             .mark_external_dispatched(MarkExternalDispatchedRequest {
@@ -253,7 +253,6 @@ fn research_03_kill_after_io_before_outcome() {
             })
             .expect_err("a quarantined attempt is terminal");
         assert!(error.conflict_code().is_some(), "{label}: {error}");
-        let _ = class;
     }
 }
 
@@ -500,7 +499,7 @@ fn research_09_a_receipt_ack_permits_retention_only() {
     for round in 0..3 {
         let store = harness.open().expect("reopen");
         let current = snapshot(&store, work.obligation);
-        let _ = round;
+        assert!(round < 3);
         assert_eq!(current.state, ObligationState::CompletedUnprocessed);
         assert!(current.open, "a receipt ACK closes no engineering work");
         assert_eq!(
