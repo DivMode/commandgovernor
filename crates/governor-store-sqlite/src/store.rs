@@ -18,6 +18,7 @@
 //! caller cannot skip them: [`Store`] is only reachable through
 //! [`OpenStore::start`], and there is no constructor that takes a connection.
 
+use governor_core::artifact::ResultArtifact;
 use governor_core::effect::EffectDecision;
 use governor_core::fence::DaemonEpoch;
 use governor_core::id::{ExternalAttemptId, ObligationId};
@@ -25,7 +26,7 @@ use rusqlite::TransactionBehavior;
 use uuid::Uuid;
 
 use crate::error::StoreResult;
-use crate::load::OpenCondition;
+use crate::load::{OpenCondition, OpenObligation};
 use crate::migrate::{self, MigrationReport};
 use crate::open::{self, PolicyReport, StoreConfig};
 use crate::ops::AttemptEvidence;
@@ -531,6 +532,32 @@ impl Store {
     /// Returns a corrupt-row error for an undecodable condition.
     pub fn open_health_conditions(&self) -> StoreResult<Vec<OpenCondition>> {
         self.writer.query(Command::OpenHealthConditions)
+    }
+
+    /// Reads every obligation that still owes somebody something.
+    ///
+    /// Each one's state is folded from its ledger slice, not read out of the
+    /// materialised row, so this is the same fact
+    /// [`Self::read_obligation`] reports, for the whole open set.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row error, or whatever folding an obligation refused
+    /// on.
+    pub fn list_open_obligations(&self) -> StoreResult<Vec<OpenObligation>> {
+        self.writer.query(Command::ListOpenObligations)
+    }
+
+    /// Reads every committed result-artifact record.
+    ///
+    /// The artifact root's orphan sweep needs the set of keys the durable
+    /// authority knows about; anything else in the root is unreferenced.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row error for an undecodable row.
+    pub fn list_committed_artifacts(&self) -> StoreResult<Vec<ResultArtifact>> {
+        self.writer.query(Command::ListCommittedArtifacts)
     }
 
     /// Opens `foreman_unreachable` for an obligation whose wake budget is spent.

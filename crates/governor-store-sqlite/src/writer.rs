@@ -36,12 +36,13 @@
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
+use governor_core::artifact::ResultArtifact;
 use governor_core::effect::EffectDecision;
 use governor_core::id::{ExternalAttemptId, ObligationId};
 use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
-use crate::load::OpenCondition;
+use crate::load::{OpenCondition, OpenObligation};
 use crate::ops::AttemptEvidence;
 use crate::ops::bootstrap::{BindForeman, OpenWorkerTurn};
 use crate::ops::claim::{
@@ -121,6 +122,8 @@ pub(crate) enum Command {
     RecoverStartup(Job<RecoverStartup>),
     VerifyProjections(Query<VerifiedProjections>),
     OpenHealthConditions(Query<Vec<OpenCondition>>),
+    ListOpenObligations(Query<Vec<OpenObligation>>),
+    ListCommittedArtifacts(Query<Vec<ResultArtifact>>),
     ReadObligation(Ask<ObligationId, ObligationSnapshot>),
     ResolveExternalAttempt(Ask<ExternalAttemptId, EffectDecision<AttemptEvidence>>),
     Shutdown,
@@ -209,6 +212,24 @@ fn dispatch(
                 hook,
                 "open_health_conditions",
                 crate::load::open_conditions,
+            );
+            let _ = query.reply.send(answer);
+        }
+        Command::ListOpenObligations(query) => {
+            let answer = in_read_transaction(
+                conn,
+                hook,
+                "list_open_obligations",
+                crate::load::open_obligations,
+            );
+            let _ = query.reply.send(answer);
+        }
+        Command::ListCommittedArtifacts(query) => {
+            let answer = in_read_transaction(
+                conn,
+                hook,
+                "list_committed_artifacts",
+                crate::load::committed_artifacts,
             );
             let _ = query.reply.send(answer);
         }

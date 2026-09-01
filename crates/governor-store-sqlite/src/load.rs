@@ -25,6 +25,7 @@
 //! completion, replay would fail closed with
 //! [`CorruptReason::UnprovableEvidence`] instead of quietly projecting success.
 
+use governor_core::artifact::{ArtifactDigest, ResultArtifact};
 use governor_core::binding::{
     BindingEvent, BindingLedger, BrowserProfileRef, ConnectorAbi, ConversationRef,
     VerifiedBindingTarget,
@@ -39,7 +40,9 @@ use governor_core::fence::{
 use governor_core::foreman_turn::ProviderMessageRef;
 use governor_core::health::{HealthConditionKind, HealthConditionState, HealthLedger, HealthScope};
 use governor_core::id::{HealthConditionId, ObligationId, ResultArtifactId, TaskId, TurnId};
-use governor_core::obligation::{AckRequest, Obligation, ObligationEvent, ObligationKind};
+use governor_core::obligation::{
+    AckRequest, Obligation, ObligationEvent, ObligationKind, ObligationState,
+};
 use governor_core::outbound::{Delivery, DeliveryEvent};
 use governor_core::time::Timestamp;
 use governor_core::worker_evidence::{
@@ -940,4 +943,141 @@ pub(crate) fn open_conditions(tx: &Tx<'_>) -> StoreResult<Vec<OpenCondition>> {
         });
     }
     Ok(out)
+}
+
+// --- Open work, for the daemon's status surface -----------------------------
+
+/// One obligation that still owes somebody something.
+///
+/// Built for the daemon's status/diagnostic surface, so every field is either
+/// an opaque identity, a class, a counter, or an instant — the safe-diagnostics
+/// set `docs/threat-model.md` "Threat: diagnostics become exfiltration" allows.
+/// There is no task title, no repository reference, and no artifact content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenObligation {
+    /// Opaque obligation identity.
+    pub id: ObligationId,
+    /// What the obligation is about.
+    pub kind: ObligationKind,
+    /// Current lifecycle state, folded from the ledger.
+    pub state: ObligationState,
+    /// Current compare-and-swap version.
+    pub version: ObligationVersion,
+    /// When the obligation was created, from its creating event.
+    pub created_at: Timestamp,
+    /// The artifact this obligation pins, when it has one.
+    ///
+    /// The whole record rather than the identity, because the caller that
+    /// needs it is startup artifact verification, and it needs the digest and
+    /// length to prove the bytes.
+    pub result_artifact: Option<ResultArtifact>,
+}
+
+/// Every obligation whose projection row has no closing event.
+///
+/// The row is used only as the *index* of open work; each obligation's state is
+/// then folded from its ledger slice exactly as [`obligation`] does, so nothing
+/// here reads a fenced value out of the materialised copy.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or whatever folding one obligation refused on.
+pub(crate) fn open_obligations(tx: &Tx<'_>) -> StoreResult<Vec<OpenObligation>> {
+    let mut statement = tx.conn().prepare(
+        "SELECT obligation_id FROM obligations
+          WHERE closed_event_seq IS NULL
+          ORDER BY created_event_seq",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(parse_id(&row?, "obligations", "obligation_id")?);
+    }
+
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let loaded = obligation(tx, id)?;
+        let artifact = loaded
+            .projection
+            .result_artifact()
+            .map(|artifact| result_artifact(tx, artifact))
+            .transpose()?;
+        out.push(OpenObligation {
+            id,
+            kind: loaded.identity.kind,
+            state: loaded.projection.state(),
+            version: loaded.projection.version(),
+            created_at: created_at(tx, loaded.identity.created_event_seq)?,
+            result_artifact: artifact,
+        });
+    }
+    Ok(out)
+}
+
+/// The instant an event was observed.
+fn created_at(tx: &Tx<'_>, seq: EventSeq) -> StoreResult<Timestamp> {
+    let millis: Option<i64> = tx
+        .conn()
+        .query_row(
+            "SELECT observed_at_ms FROM events WHERE seq = ?1",
+            params![store_seq(seq)?],
+            |row| row.get(0),
+        )
+        .optional()?;
+    millis
+        .map(crate::codec::parse_time)
+        .ok_or_else(|| dangling("obligations", "created_event_seq"))
+}
+
+/// Reads one committed result-artifact row.
+///
+/// # Errors
+///
+/// Returns a corrupt-row error when the row is missing or undecodable.
+pub(crate) fn result_artifact(tx: &Tx<'_>, id: ResultArtifactId) -> StoreResult<ResultArtifact> {
+    let row: Option<(String, String, i64, i64)> = tx
+        .conn()
+        .query_row(
+            "SELECT storage_ref, sha256_hex, byte_len, created_at_ms
+               FROM result_artifacts WHERE result_artifact_id = ?1",
+            params![id_text(id)],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let (storage_ref, digest_hex, byte_len, created) =
+        row.ok_or_else(|| dangling("result_artifacts", "result_artifact_id"))?;
+    Ok(ResultArtifact::new(
+        id,
+        parse_token(&storage_ref, "result_artifacts", "storage_ref")?,
+        ArtifactDigest::from_bytes(crate::codec::parse_hex32(
+            &digest_hex,
+            "result_artifacts",
+            "sha256_hex",
+        )?),
+        parse_u64(byte_len, "result_artifacts", "byte_len")?,
+        crate::codec::parse_time(created),
+    ))
+}
+
+/// Every committed result-artifact row.
+///
+/// The daemon's orphan sweep needs the set of storage keys the durable
+/// authority actually knows about: anything else in the artifact root is
+/// unreferenced.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error for an undecodable row.
+pub(crate) fn committed_artifacts(tx: &Tx<'_>) -> StoreResult<Vec<ResultArtifact>> {
+    let mut statement = tx
+        .conn()
+        .prepare("SELECT result_artifact_id FROM result_artifacts ORDER BY result_artifact_id")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(parse_id(&row?, "result_artifacts", "result_artifact_id")?);
+    }
+    ids.into_iter().map(|id| result_artifact(tx, id)).collect()
 }

@@ -49,6 +49,7 @@
 mod codec;
 pub mod error;
 mod event;
+pub mod inspect;
 mod load;
 mod meta;
 mod migrate;
@@ -66,7 +67,8 @@ pub use error::{
     StoreResult,
 };
 pub use event::EventKind;
-pub use load::OpenCondition;
+pub use inspect::ReadOnlyDiagnosis;
+pub use load::{OpenCondition, OpenObligation};
 pub use migrate::{MigrationReport, SUPPORTED_SCHEMA_EPOCH};
 pub use open::{DEFAULT_BUSY_TIMEOUT_MS, PolicyReport, StoreConfig};
 pub use ops::AttemptEvidence;
