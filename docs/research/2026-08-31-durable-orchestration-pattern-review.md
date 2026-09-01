@@ -256,6 +256,44 @@ External attempts remain a separate domain table because command delivery and th
 external side effect are different facts. Record effect class, destination fence,
 idempotency key when applicable, source event, and attempt state.
 
+#### As implemented in Phase 1
+
+The conceptual table above is a sketch; migration `0001_initial` differs from it
+in three ways that came out of building it, and
+[`../data-model.md`](../data-model.md) carries the authoritative schema. Recorded
+here so this review is not read as the current shape:
+
+- **`fingerprint` is mandatory, and the conceptual table has no such column.**
+  "Exact retry" has to mean exact. A client reusing a `(actor_id, command_id)`
+  identity for a *different* operation would otherwise be handed the first
+  operation's recorded result, which is a wrongly replayed result dressed up as
+  idempotency. The same identity with a different fingerprint is a typed
+  `mutation_command_mismatch`. The fingerprint is a digest of the fenced
+  parameters, never the parameters.
+- **`safe_result_blob_or_ref` became three bounded columns** —
+  `safe_result_kind`, `safe_result_ref`, `safe_result_conflict`. A column that
+  can hold an arbitrary response body is where prompts, tool output and
+  credentials accumulate, and the privacy contract this review's REJECT list
+  already states makes that column unwritable in practice. Narrowing it up front
+  is cheaper than policing it.
+- **`uncertain -> completed` exists, and dispatches nothing.** `uncertain` is a
+  finding, not a verdict: late *proven* evidence that the mutation did commit may
+  record the completion. That is a record of what happened, never a retry, and
+  the resolve path offers a caller no way to dispatch. An exact retry of a
+  `received` or `uncertain` identity still returns typed
+  `mutation_result_uncertain`.
+
+For external attempts, one Phase 1 policy is worth stating plainly: a generic
+external-attempt `ambiguous` is **strictly terminal**. There is no promotion path
+out of it — no reconciliation that turns it into a success. Progress requires a
+*new* attempt, which the domain admits only for a read, a proven-absent effect,
+or an idempotent write reproducing the recorded contract and exact key; an
+ambiguous non-idempotent write admits nothing and stays a
+`reconciliation_required` decision for a human. Browser deliveries are the one
+exception, and they are not this machinery: they keep their own exact-evidence
+promotion (`../testing.md` DEL-015), which requires the provider-native message
+identity in the bound conversation and performs no send.
+
 ### resource ownership
 
 Where exclusive ownership is required, use canonical resource identity plus a

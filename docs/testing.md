@@ -786,6 +786,47 @@ Also require:
 - no blind auto-merge for security-sensitive dependencies;
 - deterministic fake suites do not require live credentials.
 
+### Phase 1 implementation mapping
+
+Where the plan above currently lands in code. A mapping note, not a second plan:
+every ID keeps its definition here.
+
+- **Implemented in the deterministic suites** (`governor-testkit` acceptance
+  tests, plus the `governor-store-sqlite` and `governor-artifacts` crate suites,
+  which carry the single-layer halves): OBL-001 through OBL-010, ART-001 through
+  ART-005, DEL-001 through DEL-018, GPT-001 through GPT-009, DB-001 through
+  DB-008 within the limit noted below, and SEC-001 through SEC-010. Each suite
+  states its own per-ID coverage split.
+- **The pattern review's acceptance tests 1 through 12** — the "Acceptance tests
+  to add before adapters" section of the [durable orchestration pattern
+  review][pattern-review] — are implemented as a deterministic suite of their
+  own, covering intent-before-I/O, both crash windows, the four
+  mutation-identity cases, the two lease cases, receipt-versus-semantic ACK
+  separation, replay equivalence, and the journal's forbidden-data scan.
+- **Durable health conditions now have store operations**, so the attention half
+  of OBL-006 (conflicting terminal evidence), GPT-006 (`foreman_unreachable` on
+  budget exhaustion, and its resolution when a later wake lands) and DB-008
+  (`result_artifact_missing`, and its resolution on a successful verify) is
+  proven durably rather than in memory. DEL-015's `ambiguous -> accepted`
+  promotion likewise has a real store operation, fenced on the exact
+  provider-native message identity and performing no Send.
+- **ART-006 through ART-011, and every `WRK-` and `INP-` test**, need the
+  worker-host, managed-run staging, the hook inbox, or a live Claude session.
+  They stay Phase 2 and Live Gate C. Windows ACL policy under ART-005 remains a
+  separate platform suite.
+- **GPT-010 through GPT-012** are behind Live Gate A: Phase 1 builds no MCP
+  client and no connector, so there is no ABI to mismatch, no write capability
+  to lose, and no product confirmation to refuse to bypass. The one half
+  representable today — a lost write capability never relaxing the ACK
+  requirement — is proven in the pure binding machine.
+- **DB-005 is half-implemented on purpose.** The daemon epoch fence — a
+  previous-lifetime holder cannot mutate current ownership — is proven. Electing
+  a single daemon instance against one state root is a daemon-lifecycle feature,
+  and this plan already refuses to accept SQLite writer serialization as that
+  election, so the process half lives with the daemon.
+
+[pattern-review]: research/2026-08-31-durable-orchestration-pattern-review.md
+
 ## Architecture-to-implementation exit criteria
 
 The **pure Rust core/store/testkit scaffold may begin after the architecture PR is

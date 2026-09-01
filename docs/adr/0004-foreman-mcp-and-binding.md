@@ -102,6 +102,34 @@ Browser accepted != ChatGPT physically settled != ACK.
 A stale/expired/different disposition ACK cannot rewrite terminal state. An exact
 repeat of an already committed identical ACK may return idempotent success.
 
+### The disposition set
+
+Named here rather than left to each caller, because "valid semantic disposition"
+above was doing real work without saying what the choices were:
+
+- `Accepted` — the result was reviewed and accepted;
+- `RejectedNeedsRework` — the result or failure was reviewed and rejected;
+  follow-up work is a separate obligation, not a reopening of this one;
+- `FailureAcknowledged` — a worker failure was reviewed and acknowledged;
+- `Abandoned` — the work is being dropped deliberately.
+
+Validity depends on the attention state the obligation was claimed from, and a
+disposition that does not fit it is refused with zero mutation:
+
+| Claimed from | Accepted | RejectedNeedsRework | FailureAcknowledged | Abandoned |
+| --- | --- | --- | --- | --- |
+| `completed_unprocessed` | yes | yes | no | yes |
+| `failed` | no | yes | yes | yes |
+| `needs_input` | no | no | no | yes |
+
+Three rules, stated as rules rather than as a table to memorise: a success
+disposition cannot close a failure, a failure disposition cannot close a result,
+and an outstanding input request closes only by abandoning it — answering it is
+not a closure, because the worker has not necessarily received the answer. This
+was decided during Phase 1 implementation; it constrains ACK further than the
+original "valid semantic disposition" and weakens nothing. `foreman_answer_input`
+remains the path that answers input, and it leaves the obligation open.
+
 ## Reachability
 
 Use the currently supported OpenAI Secure MCP Tunnel/connectivity path rather than
