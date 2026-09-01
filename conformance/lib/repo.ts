@@ -76,14 +76,6 @@ export function exists(path: string): boolean {
 	}
 }
 
-export function isDirectory(path: string): boolean {
-	try {
-		return statSync(path).isDirectory();
-	} catch {
-		return false;
-	}
-}
-
 /** The pin record, read once per test file. */
 export interface PinRecord {
 	readonly pi: {

@@ -50,8 +50,11 @@ class SplitMix64 {
 	}
 }
 
-/** Crockford base32, which is why a generated id always contains letters. */
+/** Crockford base32: 32 symbols, 22 of which are letters. */
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** Bound on the redraw loop in {@link SeededStreams.nextDeliveryId}. */
+const MAX_DELIVERY_ID_DRAWS = 64;
 
 function encodeCrockford(value: bigint, digits: number): string {
 	let out = "";
@@ -96,16 +99,34 @@ export class SeededStreams {
 	}
 
 	/**
-	 * A delivery id honouring the transport encoding rule: it must contain
-	 * letters, because one candidate transport's readback redaction destroys a
-	 * long run of digits and hyphens. Crockford base32 over 128 bits makes a
-	 * letter-free result astronomically unlikely, and
-	 * {@link isRedactionSafeDeliveryId} is what actually checks it.
+	 * A delivery id honouring the transport encoding rule.
+	 *
+	 * The rule is not "contains a letter somewhere". One candidate transport
+	 * replaces any run of ten or more digits, spaces, parentheses and hyphens
+	 * with a `<PHONE>` placeholder when it reads a conversation back, and the
+	 * `CG-D-` prefix ends in a hyphen -- so an id whose random part merely
+	 * *starts* with nine digits already forms a qualifying run and is destroyed,
+	 * even though the rest is full of letters. Crockford base32 makes that
+	 * unlikely, not impossible: measured at roughly 1 in 5,700 draws.
+	 *
+	 * "Unlikely" is not a property. Draw until the id actually satisfies
+	 * {@link isRedactionSafeDeliveryId}, so the generator cannot emit an id its
+	 * own validator rejects. The loop is bounded because a generator that could
+	 * spin forever is a worse failure than the one it is fixing.
 	 */
 	nextDeliveryId(): string {
-		const high = this.nextRandomBits();
-		const low = this.nextRandomBits();
-		return DELIVERY_ID_PREFIX + encodeCrockford((high << 64n) | low, 26);
+		for (let attempt = 0; attempt < MAX_DELIVERY_ID_DRAWS; attempt += 1) {
+			const high = this.nextRandomBits();
+			const low = this.nextRandomBits();
+			const candidate =
+				DELIVERY_ID_PREFIX + encodeCrockford((high << 64n) | low, 26);
+			if (isRedactionSafeDeliveryId(candidate)) return candidate;
+		}
+		throw new Error(
+			`SeededStreams.nextDeliveryId: ${MAX_DELIVERY_ID_DRAWS} consecutive draws ` +
+				"were all redaction-unsafe, which is far beyond chance -- the encoding " +
+				"or the predicate has changed and one of them is wrong.",
+		);
 	}
 }
 

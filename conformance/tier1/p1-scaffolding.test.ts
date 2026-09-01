@@ -97,11 +97,34 @@ describe("P1-SCAFFOLDING: two domain-separated seeded streams", () => {
 	});
 
 	it("generates delivery ids that survive transport readback redaction", () => {
-		const streams = new SeededStreams(3);
-		for (let i = 0; i < 256; i += 1) {
-			const id = streams.nextDeliveryId();
-			assert.ok(id.startsWith(DELIVERY_ID_PREFIX));
-			assert.ok(isRedactionSafeDeliveryId(id), `${id} would be mangled on readback`);
+		// A property, over enough draws to cross the failure rate the naive
+		// encoding had. Before the generator redrew, roughly 1 in 5,700 ids was
+		// rejected by this very predicate -- the `CG-D-` prefix ends in a hyphen,
+		// so a random part merely starting with nine digits already forms a
+		// ten-character run that the transport's readback replaces wholesale.
+		// A few hundred draws would have missed it; 10,000 across many seeds
+		// would not.
+		let drawn = 0;
+		for (let seed = 0; seed < 500; seed += 1) {
+			const streams = new SeededStreams(seed);
+			for (let i = 0; i < 20; i += 1) {
+				const id = streams.nextDeliveryId();
+				drawn += 1;
+				assert.ok(id.startsWith(DELIVERY_ID_PREFIX), id);
+				assert.ok(isRedactionSafeDeliveryId(id), `${id} would be mangled on readback`);
+			}
+		}
+		assert.equal(drawn, 10_000);
+	});
+
+	it("stays deterministic despite redrawing", () => {
+		// The redraw consumes entropy, so two streams on one seed must still
+		// agree -- otherwise the fix would have traded a rare invalid id for an
+		// irreproducible harness.
+		const a = new SeededStreams(4242);
+		const b = new SeededStreams(4242);
+		for (let i = 0; i < 64; i += 1) {
+			assert.equal(a.nextDeliveryId(), b.nextDeliveryId());
 		}
 	});
 

@@ -63,6 +63,3 @@ export class TestClock implements Clock {
 		return this.#current;
 	}
 }
-
-/** The production clock. Named so its use in a test is visible in review. */
-export const systemClock: Clock = { now: () => Date.now() };
