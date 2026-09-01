@@ -24,6 +24,19 @@ authors = ["Command Governor contributors"]
 # needs it, so this central list stays honest about what Phase 1 actually uses.
 thiserror = "2.0"
 
+# `governor-core` computes the deterministic, domain-separated browser
+# `delivery_key` (docs/adr/0003-chatgpt-browser-hybrid.md, "Delivery identity").
+# `sha2` is a pure computation crate: no clock, no entropy, no I/O, so it does
+# not breach the core crate's dependency boundary. `default-features = false`
+# keeps it `no_std`-shaped and drops the parts we do not use.
+sha2 = { version = "0.10.9", default-features = false }
+
+# Opaque generated public IDs are UUIDs (docs/data-model.md, "IDs and
+# ordering"). `governor-core` depends on the *type* only: UUIDv7 minting needs a
+# clock and entropy, so it happens behind the injectable `IdSource` port in an
+# outer crate, which enables the `v7` feature there.
+uuid = { version = "1.26.0", default-features = false, features = ["std"] }
+
 # Internal crates are addressed through the workspace so paths and versions have
 # a single source of truth. Member crates opt in with `foo.workspace = true`.
 governor-core = { path = "crates/governor-core" }
