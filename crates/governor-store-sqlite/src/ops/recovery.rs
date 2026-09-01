@@ -21,6 +21,23 @@
 //!
 //! Nothing here dispatches, retries, or resolves anything. Every outcome is a
 //! recorded uncertainty for a human or an explicit reconciliation procedure.
+//!
+//! # Why quarantine is never partial
+//!
+//! Every orphan is drained in this one transaction. There is no "next pass":
+//! an attempt left `claimed` or `activation_armed` still satisfies
+//! [`governor_core::outbound::Delivery::io_permit`], so a quarantine that
+//! stopped early would authorise browser I/O for exactly the attempts whose
+//! fate the restart lost — invariant 12, inverted.
+//!
+//! The identity pool is therefore sized from the work itself.
+//! [`quarantine_workload`] counts the orphans before the transaction opens
+//! (which is where the identity port is reachable) and `prepare` mints exactly
+//! that many. If the pool is nonetheless exhausted — only reachable if another
+//! writer created orphans between the count and this transaction, which
+//! single-daemon election already forbids — the transaction rolls back with
+//! [`StoreError::QuarantineIncomplete`] and the daemon refuses to serve. It
+//! fails closed; it never returns `Ok` with orphans still live.
 
 use governor_core::effect::{EffectAmbiguityReason, ExternalAttemptEvent};
 use governor_core::fence::DaemonEpoch;
@@ -28,13 +45,13 @@ use governor_core::health::{HealthConditionKind, HealthConditionState};
 use governor_core::id::{EventId, HealthConditionId};
 use governor_core::outbound::DeliveryEvent;
 use governor_core::time::Timestamp;
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::codec::{
     encode_ambiguity, encode_attempt_state, encode_effect_ambiguity, encode_health_kind,
     encode_health_state, id_text, parse_delivery_id, store_time, store_u64,
 };
-use crate::error::StoreResult;
+use crate::error::{CorruptReason, CorruptValue, StoreError, StoreResult};
 use crate::event::{self, EventKind, EventScope, NewEvent};
 use crate::load;
 use crate::ops::delivery::set_delivery_state;
@@ -48,6 +65,13 @@ use crate::tx::{Failpoint, Tx, WriteOp};
 pub(crate) struct RecoverStartupRequest {
     /// The epoch this process is running under.
     pub(crate) daemon_epoch: DaemonEpoch,
+    /// How many quarantine identities this pass must mint.
+    ///
+    /// Measured by [`quarantine_workload`] before the transaction opens,
+    /// because `prepare` is the only phase that can reach the identity port and
+    /// it cannot read the database. Sizing it from the actual work is what
+    /// makes the drain complete rather than truncated.
+    pub(crate) quarantine_capacity: usize,
 }
 
 /// What startup recovery found and quarantined.
@@ -72,13 +96,6 @@ pub(crate) struct RecoverStartup {
     identities: Vec<(EventId, HealthConditionId)>,
 }
 
-/// How many quarantine identities one recovery pass may need.
-///
-/// Recovery is bounded on purpose: a state root with more outstanding
-/// ambiguity than this has a bigger problem than a slow startup, and the
-/// remainder is picked up by the next pass rather than blocking this one.
-const MAX_QUARANTINED_PER_PASS: usize = 256;
-
 impl WriteOp for RecoverStartup {
     type Request = RecoverStartupRequest;
     type Committed = StartupRecovery;
@@ -87,7 +104,7 @@ impl WriteOp for RecoverStartup {
     const NAME: &'static str = "recover_startup";
 
     fn prepare(request: Self::Request, ports: &mut StorePorts) -> StoreResult<Self> {
-        let identities = (0..MAX_QUARANTINED_PER_PASS)
+        let identities = (0..request.quarantine_capacity)
             .map(|_| (ports.next_id(), ports.next_id()))
             .collect();
         Ok(Self {
@@ -105,7 +122,7 @@ impl WriteOp for RecoverStartup {
         //    attempt whose outcome was lost is frozen.
         for delivery_hex in live_delivery_ids(tx)? {
             let Some((event_id, _)) = minted.next() else {
-                break;
+                return Err(self.exhausted());
             };
             let delivery_id = parse_delivery_id(&delivery_hex, "delivery_attempts", "delivery_id")?;
             let loaded = load::wake_by_delivery_id(tx, &delivery_id)?;
@@ -174,7 +191,7 @@ impl WriteOp for RecoverStartup {
         //    automatic I/O follows.
         for attempt in effect::unresolved_before(tx, self.request.daemon_epoch)? {
             let Some((event_id, condition_id)) = minted.next() else {
-                break;
+                return Err(self.exhausted());
             };
             let next = attempt
                 .apply(&ExternalAttemptEvent::OutcomeUnknown {
@@ -243,6 +260,53 @@ impl WriteOp for RecoverStartup {
     fn finish(self, committed: Self::Committed) -> Self::Output {
         committed
     }
+}
+
+impl RecoverStartup {
+    /// The refusal for a pool that could not cover the work it found.
+    ///
+    /// Returning this rolls the whole transaction back, so the state root is
+    /// left exactly as the previous process left it and the next start
+    /// re-counts. The one thing it never does is report success with orphans
+    /// still holding an I/O permit.
+    fn exhausted(&self) -> StoreError {
+        StoreError::QuarantineIncomplete {
+            minted: self.identities.len(),
+        }
+    }
+}
+
+/// How many quarantine identities one recovery pass needs.
+///
+/// Read outside the transaction, on the writer's own connection, immediately
+/// before `RecoverStartup` runs. One identity per delivery whose attempts are
+/// still live, and one per external attempt whose outcome was never proven; the
+/// mutation journal needs none, because marking a command uncertain appends no
+/// event.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error when a count does not fit.
+pub(crate) fn quarantine_workload(conn: &Connection, epoch: DaemonEpoch) -> StoreResult<usize> {
+    let deliveries: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT delivery_id) FROM delivery_attempts
+          WHERE state IN ('claimed', 'activation_armed')",
+        [],
+        |row| row.get(0),
+    )?;
+    let attempts: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM external_attempts
+          WHERE state = 'intent_recorded' AND daemon_epoch < ?1",
+        params![store_u64(epoch.get(), "external_attempts", "daemon_epoch")?],
+        |row| row.get(0),
+    )?;
+    Ok(count(deliveries, "delivery_attempts")? + count(attempts, "external_attempts")?)
+}
+
+/// Narrows a `COUNT(*)` to a `usize`, refusing rather than saturating.
+fn count(value: i64, table: &'static str) -> StoreResult<usize> {
+    usize::try_from(value)
+        .map_err(|_| CorruptValue::new(table, "count", CorruptReason::IntegerOutOfRange).into())
 }
 
 /// Every delivery with at least one attempt still owning an external effect.

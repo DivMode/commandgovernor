@@ -155,12 +155,18 @@ impl OpenStore {
         // The epoch advances exactly once per process, in its own transaction,
         // before recovery reads it. Everything recovery quarantines is defined
         // relative to it.
-        let (daemon_epoch, previously_verified_through) = {
+        // The quarantine workload is counted here too, under the same write
+        // lock that fixed the epoch it is relative to: `RecoverStartup::prepare`
+        // must mint one identity per orphan, and `prepare` cannot read the
+        // database. A count that turns out to be short fails the recovery
+        // transaction closed rather than truncating it.
+        let (daemon_epoch, previously_verified_through, quarantine_capacity) = {
             let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let watermark = crate::meta::last_verified_projection_seq(&transaction)?;
             let epoch = crate::meta::advance_daemon_epoch(&transaction)?;
+            let workload = crate::ops::recovery::quarantine_workload(&transaction, epoch)?;
             transaction.commit()?;
-            (epoch, watermark)
+            (epoch, watermark, workload)
         };
 
         let writer = WriterHandle::spawn(conn, ports, failpoints);
@@ -170,7 +176,10 @@ impl OpenStore {
         // projections must not go on to make external decisions from them.
         let projections = writer.query(Command::VerifyProjections)?;
         let recovery = writer.call::<RecoverStartup, _>(
-            RecoverStartupRequest { daemon_epoch },
+            RecoverStartupRequest {
+                daemon_epoch,
+                quarantine_capacity,
+            },
             Command::RecoverStartup,
         )?;
 

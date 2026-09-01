@@ -75,6 +75,18 @@ pub enum StoreError {
     #[error("{0}")]
     RepairNeeded(#[from] RepairNeeded),
 
+    /// Startup quarantine found more orphaned effects than it prepared for.
+    ///
+    /// `docs/state-machines.md` invariant 12: an attempt left `claimed` or
+    /// `activation_armed` still carries an I/O permit, so a quarantine that
+    /// could not drain must refuse rather than report a partial success. The
+    /// transaction rolled back and the next start re-counts.
+    #[error("startup quarantine prepared {minted} identities and needed more")]
+    QuarantineIncomplete {
+        /// Identities the pass had minted before it ran out.
+        minted: usize,
+    },
+
     /// The writer actor is not running.
     #[error("store writer actor is not running")]
     WriterGone,
@@ -118,6 +130,7 @@ impl StoreError {
                 | Self::ConnectionPolicy(_)
                 | Self::Corrupt(_)
                 | Self::RepairNeeded(_)
+                | Self::QuarantineIncomplete { .. }
         )
     }
 }

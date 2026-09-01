@@ -544,6 +544,7 @@ const fn store_error_class(error: &governor_store_sqlite::StoreError) -> &'stati
         StoreError::ConnectionPolicy(_) => "connection_policy",
         StoreError::Corrupt(_) => "corrupt_value",
         StoreError::RepairNeeded(_) => "repair_needed",
+        StoreError::QuarantineIncomplete { .. } => "quarantine_incomplete",
         StoreError::WriterGone => "writer_gone",
         StoreError::Sqlite(_) => "sqlite",
         _ => "unclassified",

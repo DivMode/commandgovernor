@@ -388,6 +388,7 @@ const fn store_error_code(error: &StoreError) -> &'static str {
         StoreError::ConnectionPolicy(_) => "connection_policy",
         StoreError::Corrupt(_) => "corrupt_value",
         StoreError::RepairNeeded(_) => "repair_needed",
+        StoreError::QuarantineIncomplete { .. } => "quarantine_incomplete",
         StoreError::WriterGone => "writer_gone",
         // Includes the read-only open of a database whose write-ahead log has
         // not been checkpointed: the honest answer is that its owner must

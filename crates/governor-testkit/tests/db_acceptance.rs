@@ -1040,6 +1040,110 @@ fn db_006_startup_quarantines_every_ambiguous_effect_first() {
     store.verify_projections().expect("replay after recovery");
 }
 
+/// The identity pool startup quarantine used to be capped at.
+///
+/// Past it, both loops broke out, committed, and reported success — leaving
+/// attempts in `claimed` or `activation_armed`, which is exactly the state
+/// `Delivery::io_permit` authorises browser I/O from.
+const FORMER_QUARANTINE_CAP: usize = 256;
+
+#[test]
+fn db_006_startup_quarantine_drains_past_the_former_bound() {
+    let orphans = FORMER_QUARANTINE_CAP + 17;
+
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let generation = bind(&store, "conv-A");
+
+    // More live browser attempts, and more unproven external intents, than one
+    // pass ever used to be able to freeze. No artifacts: a verified failure
+    // makes an obligation wake-worthy just as a published result does, and
+    // publishing 273 of them would only make the test slow.
+    for index in 0..orphans {
+        let turn = open_turn(&store);
+        let run = format!("run-{index}");
+        start_worker(&store, turn.obligation, &run);
+        record_failure(&store, turn.obligation, &run).expect("a verified worker failure");
+        let wake = schedule_wake(&store, turn.obligation, generation, DeliveryRevision::FIRST)
+            .expect("scheduling");
+        arm_send(&store, &wake, generation).expect("arming the send fence");
+
+        let granted = store
+            .record_external_intent(RecordExternalIntentRequest {
+                class: ExternalEffectClass::IdempotentWrite {
+                    contract: governor_core::effect::IdempotencyContract::DeduplicatedByKey {
+                        window: DurationMs::from_millis(60_000),
+                    },
+                    key: IdempotencyKey::new(token(&format!("k-{index}"))),
+                },
+                destination: destination(),
+                source: source("worker.resume", &format!("cmd-{index}"), "rev-1"),
+                daemon_epoch: store.daemon_epoch(),
+            })
+            .expect("a durable intent");
+        store
+            .mark_external_dispatched(MarkExternalDispatchedRequest {
+                attempt: granted.attempt,
+            })
+            .expect("the dispatch fence");
+    }
+    drop(store);
+
+    let conn = harness.inspect();
+    assert_eq!(live_attempts(&conn), orphans, "the seed must be live");
+    assert_eq!(unproven_external_attempts(&conn), orphans);
+    drop(conn);
+
+    let store = harness.open().expect("reopen");
+    let recovery = &store.startup().recovery;
+    assert_eq!(
+        recovery.quarantined_deliveries, orphans,
+        "every orphaned wake must be frozen, not the first {FORMER_QUARANTINE_CAP}"
+    );
+    assert_eq!(recovery.ambiguous_attempts, orphans);
+    assert_eq!(recovery.reconciliation_conditions, orphans);
+
+    // The property the count is a proxy for: nothing is left holding a permit.
+    let conn = harness.inspect();
+    assert_eq!(
+        live_attempts(&conn),
+        0,
+        "an attempt left claimed or armed would still satisfy `io_permit`"
+    );
+    assert_eq!(unproven_external_attempts(&conn), 0);
+    drop(conn);
+
+    // And the browser was still never touched, at 273 orphans as at one.
+    let browser = FakeBrowser::attach(&harness.database_path(), BrowserWorld::healthy("conv-A"));
+    browser.assert_untouched("DB-006");
+    store
+        .verify_projections()
+        .expect("replay after a full drain");
+}
+
+/// Delivery attempts still owning an external effect.
+fn live_attempts(conn: &rusqlite::Connection) -> usize {
+    conn.query_row(
+        "SELECT COUNT(*) FROM delivery_attempts
+          WHERE state IN ('claimed', 'activation_armed')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| usize::try_from(value).expect("a count fits"))
+    .expect("counting live attempts")
+}
+
+/// External attempts whose outcome was never proven.
+fn unproven_external_attempts(conn: &rusqlite::Connection) -> usize {
+    conn.query_row(
+        "SELECT COUNT(*) FROM external_attempts WHERE state = 'intent_recorded'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| usize::try_from(value).expect("a count fits"))
+    .expect("counting unproven attempts")
+}
+
 // --- DB-007: uniqueness across a hundred restarts ------------------------------
 
 #[test]
