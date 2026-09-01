@@ -55,6 +55,7 @@ dependencies = [
  "governor-daemon",
  "governor-store-sqlite",
  "governor-testkit",
+ "rusqlite",
  "tempfile",
  "thiserror",
 ]
