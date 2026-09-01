@@ -13,17 +13,18 @@
 //! | [`an_ack_pins_then_releases_its_artifact`] | invariant 2 |
 //! | [`the_claim_path_requires_the_random_correlation_id`] | invariant 17 |
 //! | [`duplicate_scheduling_converges_on_one_delivery_identity`] | data model |
+//! | [`a_bounded_retry_keeps_the_revision_and_its_correlation_id`] | data model |
 //! | [`projection_replay_equals_committed_state`] | DB-001, research test 11 |
 
 mod support;
 
 use governor_core::fence::{AttemptNo, DeliveryRevision, ObligationVersion};
 use governor_core::obligation::{Disposition, ObligationState};
-use governor_core::outbound::DeliveryState;
+use governor_core::outbound::{DeliveryState, FailureClass};
 use governor_core::time::DurationMs;
 use governor_store_sqlite::{
-    AcknowledgeRequest, CreateOrClaimDeliveryRequest, DeliverHandoffRequest, MintClaimRequest,
-    RecordWorkerStartedRequest, StoreError,
+    AcknowledgeRequest, CreateOrClaimDeliveryRequest, DeliverHandoffRequest, DeliveryOutcome,
+    MintClaimRequest, RecordDeliveryOutcomeRequest, RecordWorkerStartedRequest, StoreError,
 };
 use support::{
     Harness, accept_wake, bind, count, open_turn, publish_result, schedule_wake, source,
@@ -459,6 +460,66 @@ fn duplicate_scheduling_converges_on_one_delivery_identity() {
         "never a second physical revision identity"
     );
     assert_eq!(count(&conn, "delivery_attempts"), 1);
+}
+
+#[test]
+fn a_bounded_retry_keeps_the_revision_and_its_correlation_id() {
+    let harness = Harness::new();
+    let store = harness.open().expect("opening");
+    let turn = open_turn(&store);
+    let generation = bind(&store, "conv-A");
+    start_worker(&store, turn.obligation, "run-1");
+    publish_result(&store, turn.obligation, "run-1").expect("publication");
+    let snapshot = store.read_obligation(turn.obligation).expect("snapshot");
+
+    let first = schedule_wake(
+        &store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("first scheduling");
+    assert!(first.created);
+
+    // A proven pre-Send failure is the one case a bounded retry is safe.
+    store
+        .record_delivery_outcome(RecordDeliveryOutcomeRequest {
+            delivery_id: first.delivery_id.clone(),
+            attempt: first.attempt,
+            outcome: DeliveryOutcome::Failed {
+                failure: FailureClass::ComposerNotReady,
+            },
+        })
+        .expect("recording a proven pre-submit failure");
+
+    let second = schedule_wake(
+        &store,
+        turn.obligation,
+        generation,
+        snapshot.version,
+        snapshot.source.clone(),
+    )
+    .expect("a bounded retry claims the next attempt");
+    assert!(
+        !second.created,
+        "the revision already existed and was found by its deterministic key"
+    );
+    assert_eq!(
+        second.delivery_id, first.delivery_id,
+        "one revision keeps one correlation ID for its whole life"
+    );
+    assert_eq!(second.revision, first.revision);
+    assert_eq!(second.attempt, AttemptNo::new(2));
+
+    let conn = harness.inspect();
+    assert_eq!(
+        count(&conn, "browser_deliveries"),
+        1,
+        "never a second physical revision identity"
+    );
+    assert_eq!(count(&conn, "delivery_attempts"), 2);
+    assert!(store.verify_projections().is_ok());
 }
 
 #[test]
