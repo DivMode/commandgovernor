@@ -1,0 +1,3 @@
+Command Governor ships no custom theme yet. The directory exists because
+package.json's `pi.themes` names it, and a manifest that points at a missing
+path is a manifest that has drifted from the tree.

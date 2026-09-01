@@ -1,0 +1,33 @@
+{
+  "name": "@divmode/command-governor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Command Governor — a curated, pinned Pi-native harness distribution",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DivMode/commandgovernor.git"
+  },
+  "keywords": ["pi-package"],
+  "type": "module",
+  "pi": {
+    "extensions": ["./harness/extensions"],
+    "skills": ["./harness/skills"],
+    "prompts": ["./harness/prompts"],
+    "themes": ["./harness/themes"]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "bootstrap": "scripts/bootstrap.sh",
+    "test": "scripts/conformance.sh"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

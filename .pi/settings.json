@@ -1,0 +1,24 @@
+{
+  "$comment": [
+    "Command Governor dogfooding its own distribution.",
+    "",
+    "The package source is the relative path `..`, which resolves to this",
+    "repository root -- paths in a project .pi/settings.json resolve relative to",
+    "the .pi directory. Loading the distribution the same way a consumer would,",
+    "through the pi manifest in package.json rather than through direct",
+    "`extensions`/`skills`/`prompts` paths, is what makes the conformance suite's",
+    "load test evidence about the shipped package and not about a shortcut only",
+    "this repository takes.",
+    "",
+    "A consumer pins a commit instead of a path:",
+    "  \"packages\": [\"git:github.com/DivMode/commandgovernor@<40-char commit sha>\"]",
+    "",
+    "This file is only read when the project is trusted. Pi's headless modes",
+    "never prompt, and under the default `defaultProjectTrust` they ignore this",
+    "file silently and exit successfully with an empty loadout. bin/cg-pi passes",
+    "--approve for exactly that reason. `defaultProjectTrust` is deliberately",
+    "absent here: a project cannot grant itself the trust required to read it."
+  ],
+  "packages": [".."],
+  "quietStartup": false
+}
