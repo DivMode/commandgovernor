@@ -9,6 +9,8 @@
 //! | [`a_stale_lock_is_reclaimed_after_the_holder_is_killed`] | DB-005 | the kernel-held lock is released by process death, and the next start says it reclaimed |
 //! | [`a_clean_stop_releases_the_lock_and_removes_the_socket`] | — | `SIGTERM` shuts down cleanly |
 //! | [`an_unverifiable_artifact_scopes_its_obligation_and_not_the_daemon`] | DB-008 | one unprovable result raises a durable condition and takes *that* obligation out of service, not the daemon |
+//! | [`a_corrupt_committed_artifact_reference_refuses_startup`] | — | a committed `storage_ref` the daemon cannot interpret fails closed instead of vanishing from the orphan sweep's reference set |
+//! | [`an_impossible_socket_path_is_refused_before_any_durable_state`] | — | the socket-address preflight refuses before the durable authority exists, and `doctor` reports the same impossibility offline |
 //! | [`sec_001_the_command_line_and_the_log_carry_no_forbidden_bytes`] | SEC-001 | the sweep, extended to the two surfaces Phase 1 has just created, and to the correlation ID the run itself generates |
 //! | [`a_projection_mismatch_is_reported_without_the_correlation_id`] | SEC-001, invariant 17 | the refusal names the delivery *key*, never the possession fence |
 //! | [`sec_007_doctor_states_the_trust_model_without_overclaiming`] | SEC-007 | the trust model is reported as data, and claims no same-user containment |
@@ -429,6 +431,78 @@ fn an_unverifiable_artifact_scopes_its_obligation_and_not_the_daemon() {
     assert!(
         matches!(error, governor_artifacts::ArtifactError::Missing { .. }),
         "{error:?}"
+    );
+}
+
+#[test]
+fn a_corrupt_committed_artifact_reference_refuses_startup() {
+    // The orphan sweep classifies files against the set of committed
+    // references. A committed row whose storage_ref cannot be parsed must be
+    // an explicit refusal, never a silent omission that lets the sweep
+    // reclassify bytes the ledger still references as an orphan.
+    let harness = seeded_root();
+    let root = harness.state_root();
+
+    // `.hidden` is inside the redaction-safe token charset, so it passes the
+    // generic column validation everywhere — only the storage-key rules
+    // refuse it. That makes it exactly the shape the orphan sweep's reference
+    // set used to drop silently.
+    let conn = rusqlite::Connection::open(harness.database_path()).expect("write connection");
+    let changed = conn
+        .execute("UPDATE result_artifacts SET storage_ref = '.hidden'", [])
+        .expect("tampering with the committed reference");
+    assert_eq!(changed, 1, "the seed commits exactly one artifact");
+    drop(conn);
+
+    let refused = DaemonProcess::start_expecting_refusal(root);
+    assert_eq!(
+        code_of(&refused),
+        EXIT_REFUSED,
+        "a reference the daemon cannot interpret fails closed: {}",
+        combined(&refused)
+    );
+
+    // The bytes are untouched, in place, and unquarantined.
+    assert_eq!(
+        harness.files_in("objects").len(),
+        1,
+        "the published bytes stay exactly where they were"
+    );
+    assert!(
+        harness.files_in("quarantine").is_empty(),
+        "a refusal reclassifies nothing"
+    );
+}
+
+#[test]
+fn an_impossible_socket_path_is_refused_before_any_durable_state() {
+    // A pathname the socket address buffer cannot hold used to surface only
+    // at bind time, after the daemon epoch had advanced and recovery had run.
+    // It is knowable up front, so it must refuse before the durable authority
+    // even exists.
+    let harness = Harness::new();
+    let deep = harness.state_root().join("a".repeat(120));
+    std::fs::create_dir_all(&deep).expect("nesting a deep state root");
+
+    let refused = DaemonProcess::start_expecting_refusal(&deep);
+    assert_eq!(code_of(&refused), EXIT_REFUSED, "{}", combined(&refused));
+    let text = combined(&refused);
+    assert!(has_line(&text, "error class=ipc_unavailable"), "{text}");
+    assert!(
+        !deep.join("governor.sqlite3").exists(),
+        "no durable authority may exist after a preflight refusal"
+    );
+
+    // The offline doctor sees the same impossibility.
+    let doctor = run(&deep, &["doctor"]);
+    assert_eq!(code_of(&doctor), EXIT_UNHEALTHY, "{}", combined(&doctor));
+    assert!(
+        has_field(
+            &stdout_of(&doctor),
+            "check name=control_socket_path result=path_too_long_for_socket_address"
+        ),
+        "{}",
+        stdout_of(&doctor)
     );
 }
 

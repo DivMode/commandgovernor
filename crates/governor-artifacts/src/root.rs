@@ -28,11 +28,14 @@ use crate::fs_secure;
 use crate::key::StorageKey;
 
 /// Directory holding published, immutable artifacts.
-pub(crate) const OBJECTS_DIR: &str = "objects";
+///
+/// Public together with its two siblings so a read-only diagnosis can name
+/// the layout without opening — and therefore repairing — the root.
+pub const OBJECTS_DIR: &str = "objects";
 /// Directory holding pre-publication staging files.
-pub(crate) const INCOMING_DIR: &str = "incoming";
+pub const INCOMING_DIR: &str = "incoming";
 /// Directory holding set-aside orphans.
-pub(crate) const QUARANTINE_DIR: &str = "quarantine";
+pub const QUARANTINE_DIR: &str = "quarantine";
 
 /// A verified, owner-only artifact root.
 #[derive(Debug)]

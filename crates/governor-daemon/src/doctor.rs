@@ -194,6 +194,17 @@ pub fn diagnose(root: &StateRoot) -> Diagnosis {
         checks.push(check);
     }
 
+    checks.extend(artifact_layout_checks(root, owner_uid));
+
+    // The socket *address* is diagnosable without touching the socket: a
+    // state root whose pathname cannot fit a Unix socket address will refuse
+    // to serve however healthy everything else looks, and a daemon start now
+    // preflights the same check before it advances any durable state.
+    checks.push(match ipc::check_socket_path(&root.socket_path()) {
+        Ok(()) => Check::ok("control_socket_path"),
+        Err(_) => Check::fail("control_socket_path", "path_too_long_for_socket_address"),
+    });
+
     match owner_uid {
         None => checks.push(Check::note("control_socket", "not_checked")),
         Some(uid) => match ipc::audit(root, uid).into_iter().next() {
@@ -243,6 +254,51 @@ fn lock_check(status: LockStatus) -> Check {
         // operator removes the file, so it is a failure of the check.
         LockStatus::Unreadable => Check::fail("instance_lock", "unreadable_record"),
     }
+}
+
+/// Inspects the artifact root's fixed layout without opening or repairing it.
+///
+/// `ArtifactRoot::open` *repairs* modes on adoption, which a diagnosis must
+/// never do, so this walks the three layout directories with the same
+/// read-only audit the state-root directories get. Quarantine additionally
+/// reports how many names it holds: set-aside orphans are evidence an
+/// operator should see even when nothing is running.
+fn artifact_layout_checks(root: &StateRoot, owner_uid: Option<u32>) -> Vec<Check> {
+    let Some(uid) = owner_uid else {
+        return Vec::new();
+    };
+    let artifact_root = root.artifact_root();
+    if !artifact_root.exists() {
+        return Vec::new();
+    }
+
+    let mut checks = Vec::new();
+    for (dir, name) in [
+        (governor_artifacts::OBJECTS_DIR, "artifact_objects_layout"),
+        (governor_artifacts::INCOMING_DIR, "artifact_incoming_layout"),
+        (
+            governor_artifacts::QUARANTINE_DIR,
+            "artifact_quarantine_layout",
+        ),
+    ] {
+        let path = artifact_root.join(dir);
+        checks.push(match layout::audit_dir(&path, uid) {
+            Ok(()) => Check::ok(name),
+            Err(PathDefect::Uncreatable) if !path.exists() => Check::note(name, "absent"),
+            Err(defect) => Check::fail(name, defect_code(defect)),
+        });
+    }
+
+    if let Ok(entries) = std::fs::read_dir(artifact_root.join(governor_artifacts::QUARANTINE_DIR)) {
+        let held = entries.filter_map(Result::ok).count();
+        if held > 0 {
+            checks.push(
+                Check::note("artifact_quarantine", "holds_evidence")
+                    .with(format!("entries_{held}")),
+            );
+        }
+    }
+    checks
 }
 
 /// Checks that the durable authority's files are owner-only.

@@ -108,7 +108,7 @@ pub use gc::{
     decide,
 };
 pub use key::{InvalidStorageKey, MAX_STORAGE_KEY_LEN, StorageKey, StorageKeySource};
-pub use root::ArtifactRoot;
+pub use root::{ArtifactRoot, INCOMING_DIR, OBJECTS_DIR, QUARANTINE_DIR};
 pub use store::{
     ArtifactConfig, ArtifactStore, DEFAULT_MAX_ARTIFACT_BYTES, DEFAULT_ORPHAN_GRACE,
     DEFAULT_RETENTION_GRACE, OpenArtifactStore, PublishRequest, PublishedArtifact,

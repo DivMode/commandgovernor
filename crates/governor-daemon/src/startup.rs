@@ -173,6 +173,12 @@ impl Daemon {
         // file itself.
         let owner_uid = validate_filesystem(&root)?;
 
+        // The control socket's address must fit the platform's socket address
+        // buffer. Binding happens last, so without this preflight an
+        // impossible pathname would advance the daemon epoch and run recovery
+        // before failing on a condition that was knowable up front.
+        ipc::check_socket_path(&root.socket_path())?;
+
         let log = SafeLog::open(&root.log_root()).map_err(|_| DaemonError::Logging)?;
         let clock = SystemClock;
         log.record(
@@ -250,12 +256,22 @@ impl Daemon {
         }
 
         // Unreferenced files are set aside, never deleted: a publication that
-        // crashed and one that is merely slow look identical.
-        let committed: BTreeSet<StorageKey> = store
-            .list_committed_artifacts()?
-            .iter()
-            .filter_map(|artifact| StorageKey::new(artifact.storage_ref().clone()).ok())
-            .collect();
+        // crashed and one that is merely slow look identical. The reference
+        // set must be complete before any file is reclassified: a committed
+        // row whose storage_ref does not parse would silently drop out of the
+        // set and let the sweep quarantine bytes the ledger still references,
+        // so an unparseable reference is a corrupt-value refusal instead.
+        let mut committed = BTreeSet::new();
+        for artifact in store.list_committed_artifacts()? {
+            let key = StorageKey::new(artifact.storage_ref().clone()).map_err(|_| {
+                governor_store_sqlite::StoreError::from(governor_store_sqlite::CorruptValue::new(
+                    "result_artifacts",
+                    "storage_ref",
+                    governor_store_sqlite::CorruptReason::MalformedIdentity,
+                ))
+            })?;
+            committed.insert(key);
+        }
         let scan = artifacts.scan_orphans(&committed, clock.now())?;
         if !scan.quarantined.is_empty() {
             log.record(
