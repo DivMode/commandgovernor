@@ -1,9 +1,17 @@
 # V1 durable data model
 
 This document specifies the initial SQLite authority, managed-run staging, and
-private result-artifact boundary. The SQL is intentionally close to a future
-migration, but remains an architecture schema until the Rust store implementation
-and migrations are reviewed together.
+private result-artifact boundary.
+
+The SQL below is now **implemented**, as migration `0001_initial` in
+`crates/governor-store-sqlite/src/migrations/`. Where the implementation differs
+from the architecture sketch this document originally carried, the difference is
+recorded inline as **Deviation** and marked `DEVIATION:` in the migration itself.
+Two conventions apply throughout and are not repeated per table:
+
+- every table is `STRICT`, and every state column carries a `CHECK` against its
+  closed label set, so a value the code cannot decode cannot be written;
+- opaque identities are canonical UUID text, and correctness never parses one.
 
 ## Principles
 
@@ -71,8 +79,15 @@ CREATE TABLE schema_migrations (
 );
 ```
 
-Meta may contain schema epoch, database instance ID, and last verified projection
-sequence. It must not contain credentials or browser session material.
+Meta may contain schema epoch, database instance ID, last verified projection
+sequence, and the daemon epoch. It must not contain credentials or browser
+session material. The keys are a closed set declared in the store; there is no
+API that writes an arbitrary one.
+
+`daemon_epoch` is the lifetime counter of the owning daemon process. Startup
+advances it exactly once, and every mutation-command row, external-effect intent
+and resource lease records the epoch it was written under — which is what makes
+"this row is from a previous process" a fact rather than a guess.
 
 ## Immutable event ledger
 
@@ -102,6 +117,11 @@ CREATE TABLE events (
     UNIQUE(source_namespace, source_event_id, source_event_fence)
 );
 ```
+
+**Deviation (additive):** the implementation adds
+`CREATE INDEX events_by_obligation_seq ON events(obligation_id, seq)`. A fenced
+compare-then-mutate folds one obligation's ledger slice inside the write
+transaction; without the index that is a full scan of `events`.
 
 Every accepted event has a non-null source identity. A provider that lacks one
 must derive it deterministically from stable **non-secret** facts such as Command
@@ -261,13 +281,20 @@ CREATE TABLE obligations (
     obligation_kind         TEXT NOT NULL,
     state                   TEXT NOT NULL,
     priority                INTEGER NOT NULL,
+    created_event_seq       INTEGER NOT NULL REFERENCES events(seq),
     source_event_seq        INTEGER NOT NULL REFERENCES events(seq),
     current_version         INTEGER NOT NULL,
     current_binding_generation INTEGER,
     current_claim_id        TEXT,
+    incarnation_generation  INTEGER NOT NULL,
+    input_request_id        TEXT,
     latest_event_seq        INTEGER NOT NULL REFERENCES events(seq),
     closed_event_seq        INTEGER REFERENCES events(seq)
 );
+
+CREATE INDEX obligations_open_by_task
+    ON obligations(task_id)
+    WHERE closed_event_seq IS NULL;
 
 CREATE TABLE obligation_events (
     seq                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,9 +311,25 @@ CREATE TABLE obligation_events (
 );
 ```
 
+**Deviations.** The document's single `source_event_seq` is split: the event that
+*created* the obligation and the event carrying the source fact it currently
+stands on are different facts, and a wake snapshot and an ACK fence compare
+against the latter. `incarnation_generation` and `input_request_id` are two more
+fields the pure `Obligation` projection carries that the sketch had nowhere to
+put. `obligations_open_by_task` is an additive index. `input_request_id` has no
+foreign key: `input_requests.obligation_id` already points the other way, and
+SQLite cannot resolve the cycle without deferred constraints.
+
 `current_version` is compare-and-swap state. A terminal source event duplicate
 hits the event-ledger unique fence and returns the existing result/obligation
 rather than creating a second one.
+
+**How the row relates to the ledger.** This table is a *materialised* copy. A
+fenced transition does not read its state from here: it folds the obligation's
+ledger slice through the `governor-core` state machine inside the write
+transaction, applies the next event to that value, and writes the result here in
+the same transaction. Replay verification then proves the copy still agrees with
+the ledger, which is `docs/testing.md` DB-001.
 
 ## Foreman bindings
 
@@ -334,6 +377,7 @@ CREATE TABLE browser_deliveries (
     foreman_binding_id      TEXT NOT NULL REFERENCES foreman_bindings(foreman_binding_id),
     binding_generation      INTEGER NOT NULL,
     delivery_revision       INTEGER NOT NULL,
+    attempt_budget          INTEGER NOT NULL,
     wake_protocol           TEXT NOT NULL,
     wake_payload_digest     TEXT NOT NULL,
     state                   TEXT NOT NULL,
@@ -358,6 +402,15 @@ CREATE TABLE delivery_attempts (
     UNIQUE(delivery_id, attempt_no)
 );
 ```
+
+**Deviation.** `browser_deliveries.attempt_budget` is part of the revision's
+durable identity. Without it the attempt machine cannot be rebuilt: replay would
+have to guess the bounded budget the revision was created with.
+
+`wake_payload_digest` is computed by the store from the already-created random
+`delivery_id` plus the scheduling tuple and the protocol label. Computing it
+rather than accepting it means no caller can put worker output in that column
+even by accident.
 
 Creation computes deterministic non-secret:
 
@@ -489,6 +542,7 @@ CREATE TABLE worker_commands (
     answer_event_seq        INTEGER REFERENCES events(seq),
     command_kind            TEXT NOT NULL,
     command_revision        INTEGER NOT NULL,
+    attempt_budget          INTEGER NOT NULL,
     state                   TEXT NOT NULL,
     created_event_seq       INTEGER NOT NULL REFERENCES events(seq),
     terminal_event_seq      INTEGER REFERENCES events(seq),
@@ -501,11 +555,26 @@ CREATE TABLE worker_command_attempts (
     attempt_no              INTEGER NOT NULL,
     state                   TEXT NOT NULL,
     claimed_event_seq       INTEGER NOT NULL REFERENCES events(seq),
-    ambiguity_armed_event_seq INTEGER,
-    terminal_event_seq      INTEGER,
+    ambiguity_armed_event_seq INTEGER REFERENCES events(seq),
+    terminal_event_seq      INTEGER REFERENCES events(seq),
+    started_at_ms           INTEGER NOT NULL,
+    finished_at_ms          INTEGER,
+    failure_class           TEXT,
+    evidence_class          TEXT,
     UNIQUE(worker_command_id, attempt_no)
 );
 ```
+
+**Deviations.** `attempt_budget` for the same reason as the browser delivery;
+foreign keys on the two `*_event_seq` columns the sketch left bare, because every
+other sequence column has one and a dangling reference here would break replay
+silently; and the same timing/outcome columns `delivery_attempts` carries, since
+both tables project the same attempt machine.
+
+**Phase 1 status.** These two tables exist and are locked down, but no store
+operation writes them yet: worker continuation delivery arrives with the Phase 2
+worker adapter. Startup quarantine consequently covers browser deliveries only.
+`docs/testing.md` DB-006's worker-command half is therefore still open.
 
 The answer itself is a bounded structured Command Governor event/artifact only to
 the extent required by the explicit input protocol; raw original tool arguments
@@ -542,10 +611,26 @@ CREATE TABLE health_conditions (
     task_id                 TEXT,
     turn_id                 TEXT,
     obligation_id           TEXT,
+    external_attempt_id     TEXT REFERENCES external_attempts(external_attempt_id),
     opened_event_seq        INTEGER NOT NULL REFERENCES events(seq),
     resolved_event_seq      INTEGER REFERENCES events(seq)
 );
+
+CREATE UNIQUE INDEX health_conditions_one_open_per_scope
+    ON health_conditions(
+        kind,
+        COALESCE(task_id, ''),
+        COALESCE(turn_id, ''),
+        COALESCE(obligation_id, ''),
+        COALESCE(external_attempt_id, '')
+    )
+    WHERE state = 'open';
 ```
+
+**Deviations.** `external_attempt_id` is a fourth scope column, matching the new
+`HealthScope` field: scope is part of a condition's identity, so without it two
+ambiguous external attempts would collapse onto one condition. The partial unique
+index is the durable half of that deduplication.
 
 Initial kinds include:
 
@@ -558,8 +643,172 @@ Initial kinds include:
 - `runtime_state_conflict`
 - `input_detail_unavailable`
 - `worker_defer_shape_unsupported`
+- `reconciliation_required`
+
+`reconciliation_required` is raised for an external attempt whose intent is
+durable but whose outcome was never proven — the crash window `ambiguous`
+describes. Like every other kind it is attention: it authorises no replay, and
+resolving it is an explicit human or reconciliation decision.
 
 A health condition never pretends to be worker completion.
+
+## Mutation-command journal
+
+**Deviation: whole table.** It is the SQLite form of the Prime-Agent-style
+command journal in
+`docs/research/2026-08-31-durable-orchestration-pattern-review.md`, which this
+document predates. One authority: the journal lives here, never in a second log
+file.
+
+```sql
+CREATE TABLE mutation_commands (
+    actor_id                TEXT NOT NULL,
+    command_id              TEXT NOT NULL,
+    fingerprint             TEXT NOT NULL,
+    command_kind            TEXT NOT NULL,
+    status                  TEXT NOT NULL,
+    safe_result_kind        TEXT,
+    safe_result_ref         TEXT,
+    safe_result_conflict    TEXT,
+    daemon_epoch            INTEGER NOT NULL,
+    created_at_ms           INTEGER NOT NULL,
+    completed_at_ms         INTEGER,
+    uncertain_at_ms         INTEGER,
+    acked_at_ms             INTEGER,
+    PRIMARY KEY(actor_id, command_id)
+);
+```
+
+The transaction protocol is:
+
+```text
+BEGIN IMMEDIATE
+  insert unique (actor_id, command_id, received)
+COMMIT
+-> only now may the caller dispatch consequential I/O
+-> commit the completed safe result before replying
+```
+
+An exact retry of a `completed` identity returns the recorded result with zero
+dispatch. A retry of `received` or `uncertain` returns typed
+`mutation_result_uncertain` and is **never** redispatched; startup turns any
+previous-epoch `received` row into `uncertain`. An `uncertain` row may still
+reach `completed`, but only through late *proven* evidence that the mutation did
+commit — that is a record, not a retry, and nothing dispatches.
+
+`fingerprint` goes beyond the research doc's conceptual table. "Exact retry" has
+to mean exact: without it, a client reusing a command id for a different
+operation would silently receive the first operation's recorded result. A
+mismatch is typed `mutation_command_mismatch`. It is a digest of the fenced
+parameters, never the parameters.
+
+The result is three narrow columns rather than one blob. A column that could
+hold an arbitrary response body would be a place for prompts, tool output and
+credentials to accumulate.
+
+Receipt ACK is **layer 1 of three** and reaches nothing else: it marks a row
+`acked`, which combined with policy age makes it eligible for compaction. It
+cannot close an obligation.
+
+## Consequential external effects
+
+**Deviation: whole table**, from the same research doc: "external attempts remain
+a separate domain table because command delivery and the external side effect are
+different facts".
+
+```sql
+CREATE TABLE external_attempts (
+    external_attempt_id     TEXT PRIMARY KEY,
+    effect_class            TEXT NOT NULL,
+    idempotency_contract    TEXT,
+    idempotency_window_ms   INTEGER,
+    idempotency_key         TEXT,
+    destination_namespace   TEXT NOT NULL,
+    destination_endpoint    TEXT NOT NULL,
+    destination_fence       TEXT NOT NULL,
+    source_namespace        TEXT NOT NULL,
+    source_event_id         TEXT NOT NULL,
+    source_event_fence      TEXT NOT NULL,
+    daemon_epoch            INTEGER NOT NULL,
+    state                   TEXT NOT NULL,
+    dispatched              INTEGER NOT NULL,
+    completion_ref          TEXT,
+    no_effect_class         TEXT,
+    ambiguity_reason        TEXT,
+    recorded_at_ms          INTEGER NOT NULL,
+    dispatched_at_ms        INTEGER,
+    finished_at_ms          INTEGER
+);
+```
+
+The source fence is the `SourceRef` triple rather than an `events(seq)`: an
+intent is committed in its own transaction *before* any I/O, and the fact that
+justified it is not necessarily an event this ledger holds.
+
+The protocol is `BEGIN IMMEDIATE` → insert unique intent row → `COMMIT` → and
+only then may an execution permit exist. The primary key is what makes it unique:
+the insert is a plain `INSERT`, so a crash-and-retry reusing an attempt identity
+hits the constraint rather than minting a second permit for one logical
+operation.
+
+`dispatched` is committed immediately before the adapter issues its call. A crash
+after it, with no proven outcome, is `ambiguous` — never success, never failure —
+and startup opens a `reconciliation_required` condition scoped to the attempt.
+There is no automatic escape: progress requires a *new* attempt, which the domain
+admits only for a read, a proven-absent effect, or an idempotent write whose
+recorded contract and exact key the new attempt reproduces.
+
+## Resource leases
+
+**Deviation: whole table**, from the research doc's "resource ownership". It is
+deliberately small. The global daemon/state-root lock is *not* a lease — "for V1
+the global daemon/state-root lock remains simpler than a distributed lease" — and
+stays a file lock owned by the daemon. This table exists only for resources where
+a second process legitimately participates.
+
+```sql
+CREATE TABLE resource_leases (
+    resource_namespace      TEXT NOT NULL,
+    resource_digest         TEXT NOT NULL,
+    resource_lease_id       TEXT NOT NULL UNIQUE,
+    lease_token             BLOB NOT NULL,
+    holder_actor_id         TEXT NOT NULL,
+    process_slot            INTEGER NOT NULL,
+    process_start_ref       TEXT NOT NULL,
+    daemon_epoch            INTEGER NOT NULL,
+    state                   TEXT NOT NULL,
+    acquired_at_ms          INTEGER NOT NULL,
+    renewed_at_ms           INTEGER NOT NULL,
+    expires_at_ms           INTEGER NOT NULL,
+    released_at_ms          INTEGER,
+    PRIMARY KEY(resource_namespace, resource_digest)
+);
+```
+
+One row per resource, holding the most recent lease and keeping it after release
+so a superseded holder can still be told precisely why it lost.
+
+The canonical resource *name* is never stored: a path, a socket location or a
+profile directory is forbidden durable control-plane data, so the identity is a
+namespace plus the digest of that name. The possession token is raw bytes with no
+text form, so it cannot reach a log line through a formatter. Renew and release
+check all three fences — token, process incarnation and daemon epoch — so a
+recycled process number, a superseded daemon lifetime, or a token from a lease
+that was taken over all fail closed across a restart.
+
+## What is derived from the ledger, and what is not
+
+Obligations, browser deliveries and their attempts are **projections**: rebuilt by
+folding `events` through the pure state machines, and proven equivalent by replay
+verification.
+
+The three tables above are **not** ledger-derived. Each is a self-contained row
+whose own transaction protocol is the durability contract — an intent row must
+commit alone and first, before any consequential I/O, so coupling it to an event
+append would couple it to a fact the ledger may not hold. They are still
+re-proved on every read: each loader folds the row's own recorded history through
+the domain machine and refuses a row that no legal sequence of transitions can
+reach.
 
 ## Critical transaction boundaries
 
@@ -609,6 +858,22 @@ One transaction verifies obligation version, source event, binding generation,
 claim, and disposition; appends explicit disposition event; closes projection; and
 marks pinned artifacts retention-eligible only as policy permits. No external I/O
 occurs inside ACK.
+
+### How "no external I/O inside a transaction" is enforced
+
+Not by review. Everything ambient the store crate can reach — the clock, the
+CSPRNG, identity minting — lives behind one `StorePorts` value, which is lent
+only to the phase of a write that runs *before* `BEGIN IMMEDIATE`. The
+transaction body's signature takes no ports, so inside a transaction there is
+nothing to call: no clock, no entropy, no adapter. The crate itself performs no
+filesystem, network or process I/O at all — `rusqlite` owns the only file handle
+— and a test scans the crate's own source to keep it that way.
+
+A third phase runs strictly after `COMMIT` returns. It exists for exactly one
+thing: surrendering the durable-intent acceptance that authorises an external
+execution permit. Putting that in a phase the runner reaches only after a
+successful commit makes "intent before I/O" a property of the code's shape
+rather than a rule somebody has to remember.
 
 ## Forbidden-persistence fixture
 
