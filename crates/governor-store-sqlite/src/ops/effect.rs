@@ -122,33 +122,14 @@ impl WriteOp for RecordExternalIntent {
     }
 
     fn commit(&self, tx: &Tx<'_>) -> StoreResult<Self::Committed> {
-        let projection = self.recorded.attempt();
-        let class = encode_effect_class(&self.request.class)?;
-        // A plain INSERT against the primary key: reusing an attempt identity
-        // is a constraint violation, not an upsert. That is obligation 2.
-        tx.conn().execute(
-            "INSERT INTO external_attempts (external_attempt_id, effect_class,
-                    idempotency_contract, idempotency_window_ms, idempotency_key,
-                    destination_namespace, destination_endpoint, destination_fence,
-                    source_namespace, source_event_id, source_event_fence,
-                    daemon_epoch, state, dispatched, recorded_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14)",
-            params![
-                id_text(self.attempt),
-                class.class,
-                class.contract,
-                class.window_ms,
-                class.key,
-                self.request.destination.namespace().as_str(),
-                self.request.destination.endpoint().as_str(),
-                self.request.destination.fence().as_str(),
-                self.request.source.namespace().as_str(),
-                self.request.source.event().as_str(),
-                self.request.source.fence().as_str(),
-                store_u64(self.request.daemon_epoch.get(), TABLE, "daemon_epoch")?,
-                encode_attempt_effect_state(ExternalAttemptState::IntentRecorded),
-                store_time(projection.recorded_at()),
-            ],
+        insert_intent(
+            tx,
+            self.attempt,
+            &self.request.class,
+            &self.request.destination,
+            &self.request.source,
+            self.request.daemon_epoch,
+            self.recorded.attempt().recorded_at(),
         )?;
         tx.reach(Failpoint::AfterIntentInsert)?;
         tx.reach(Failpoint::BeforeCommit)?;
@@ -159,20 +140,74 @@ impl WriteOp for RecordExternalIntent {
         // Reached only after `Transaction::commit()` returned `Ok`. This one
         // line is where the store asserts the durability `governor-core` cannot
         // check for itself.
-        let (attempt, acceptance) = self.recorded.accept_committed();
-        let decision = attempt
-            .decide(Some(acceptance), |evidence: &AttemptEvidence| {
-                evidence.clone()
-            })
-            .expect("a freshly committed, undispatched intent always decides to execute");
-        let EffectDecision::Execute(permit) = decision else {
-            unreachable!("a freshly committed intent has no recorded outcome to replay")
-        };
-        GrantedPermit {
-            attempt: self.attempt,
-            permit,
-        }
+        grant(self.attempt, self.recorded)
     }
+}
+
+/// Writes the one intent row that must commit before any consequential call.
+///
+/// A plain `INSERT` against the primary key: reusing an attempt identity is a
+/// constraint violation, not an upsert. That is obligation 2 of
+/// [`governor_core::effect::DurableIntentAccepted`], and it is shared rather
+/// than copied because every operation that hands out a permit has to uphold
+/// it identically — [`RecordExternalIntent`] and
+/// [`crate::ops::session::AuthorizeWorkerSpawn`] both write through here, so
+/// there is one statement and one set of columns to review.
+pub(crate) fn insert_intent(
+    tx: &Tx<'_>,
+    attempt: ExternalAttemptId,
+    class: &ExternalEffectClass,
+    destination: &DestinationRef,
+    source: &SourceRef,
+    daemon_epoch: DaemonEpoch,
+    recorded_at: Timestamp,
+) -> StoreResult<()> {
+    let encoded = encode_effect_class(class)?;
+    tx.conn().execute(
+        "INSERT INTO external_attempts (external_attempt_id, effect_class,
+                idempotency_contract, idempotency_window_ms, idempotency_key,
+                destination_namespace, destination_endpoint, destination_fence,
+                source_namespace, source_event_id, source_event_fence,
+                daemon_epoch, state, dispatched, recorded_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14)",
+        params![
+            id_text(attempt),
+            encoded.class,
+            encoded.contract,
+            encoded.window_ms,
+            encoded.key,
+            destination.namespace().as_str(),
+            destination.endpoint().as_str(),
+            destination.fence().as_str(),
+            source.namespace().as_str(),
+            source.event().as_str(),
+            source.fence().as_str(),
+            store_u64(daemon_epoch.get(), TABLE, "daemon_epoch")?,
+            encode_attempt_effect_state(ExternalAttemptState::IntentRecorded),
+            store_time(recorded_at),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Turns a freshly committed intent into the single permit it authorises.
+///
+/// Callable only from a [`WriteOp::finish`], which the runner in
+/// [`crate::writer`] reaches only after `Transaction::commit()` returned `Ok`.
+/// `recorded` is taken by value, so the acceptance — and therefore the permit —
+/// moves out exactly once.
+pub(crate) fn grant(
+    attempt: ExternalAttemptId,
+    recorded: RecordedIntent<AttemptEvidence>,
+) -> GrantedPermit {
+    let (projection, acceptance) = recorded.accept_committed();
+    let decision = projection
+        .decide(Some(acceptance), AttemptEvidence::clone)
+        .expect("a freshly committed, undispatched intent always decides to execute");
+    let EffectDecision::Execute(permit) = decision else {
+        unreachable!("a freshly committed intent has no recorded outcome to replay")
+    };
+    GrantedPermit { attempt, permit }
 }
 
 /// Committing the dispatch fence immediately before the adapter issues a call.

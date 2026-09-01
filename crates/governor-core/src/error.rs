@@ -17,7 +17,7 @@ use crate::fence::{
 use crate::foreman_turn::ForemanTurnState;
 use crate::id::{
     ActorId, ClaimId, ExternalAttemptId, ManagedConfigArtifactId, MutationCommandId, ObligationId,
-    ResourceLeaseId, WorkerLoadoutId,
+    ResourceLeaseId, SessionId, SessionIncarnationId, TurnId, WorkerLoadoutId,
 };
 use crate::input::InputRequestState;
 use crate::lease::{IncarnationMismatch, LeaseState};
@@ -135,6 +135,18 @@ pub enum ConflictKind {
     LoadoutDigestMismatch,
     /// The managed configuration artifact could not be re-proved at resume time.
     ManagedConfigUnverifiable,
+
+    // -- session lineage (durable half, `governor-store-sqlite`) -------------
+    /// The proposed lineage edge would close a cycle at some hop count.
+    SessionLineageCycle,
+    /// The proposed lineage edge's ancestor chain exceeds the bounded depth.
+    SessionLineageTooDeep,
+    /// The presented parent turn does not belong to the presented parent session.
+    ParentTurnNotOwnedByParentSession,
+    /// The session incarnation already has a launch loadout bound to it.
+    SessionIncarnationAlreadyBound,
+    /// The session incarnation has no launch loadout to resume against.
+    NoSessionLoadout,
 }
 
 impl ConflictKind {
@@ -189,6 +201,11 @@ impl ConflictKind {
             Self::LoadoutIdentityMismatch => "loadout_identity_mismatch",
             Self::LoadoutDigestMismatch => "loadout_digest_mismatch",
             Self::ManagedConfigUnverifiable => "managed_config_unverifiable",
+            Self::SessionLineageCycle => "session_lineage_cycle",
+            Self::SessionLineageTooDeep => "session_lineage_too_deep",
+            Self::ParentTurnNotOwnedByParentSession => "parent_turn_not_owned_by_parent_session",
+            Self::SessionIncarnationAlreadyBound => "session_incarnation_already_bound",
+            Self::NoSessionLoadout => "no_session_loadout",
         }
     }
 }
@@ -594,6 +611,64 @@ pub enum Conflict {
         /// Configuration artifact the launch snapshot requires.
         expected: ManagedConfigArtifactId,
     },
+
+    /// The proposed lineage edge would close a cycle at some hop count.
+    ///
+    /// `SessionEdge::new` refuses the one-hop case; this is the multi-hop one,
+    /// which no pure constructor can see because it is a property of the whole
+    /// durable graph. A lineage with no root would make every ancestor walk —
+    /// resume admission, usage rollup, the deterministic control capsule —
+    /// follow it forever.
+    #[error("a lineage edge from {parent} to {child} would close a cycle")]
+    SessionLineageCycle {
+        /// Proposed parent session.
+        parent: SessionId,
+        /// Proposed child session.
+        child: SessionId,
+    },
+
+    /// The ancestor chain of a proposed lineage edge exceeds the bounded depth.
+    ///
+    /// A refusal, never a truncation: a walk that stopped early would report
+    /// "no cycle" about a graph it did not finish looking at.
+    #[error("lineage depth {depth} exceeds the bound {bound}")]
+    SessionLineageTooDeep {
+        /// Depth the walk reached.
+        depth: u32,
+        /// Bound it was not allowed to exceed.
+        bound: u32,
+    },
+
+    /// The presented parent turn does not belong to the presented parent session.
+    ///
+    /// Deliberately undifferentiated from "no such turn", following the
+    /// [`Self::UnknownDeliveryId`] precedent: probing turn identities against a
+    /// session must not reveal which of the two facts was wrong.
+    #[error("the presented parent turn is not a turn of session {session}")]
+    ParentTurnNotOwnedByParentSession {
+        /// Session presented as the parent.
+        session: SessionId,
+        /// Turn presented as the delegating turn.
+        turn: TurnId,
+    },
+
+    /// The session incarnation already has a launch loadout bound to it.
+    ///
+    /// One loadout per incarnation, forever. Rebinding is not an update; a new
+    /// loadout revision requires a new incarnation, which is what stops a
+    /// resume from widening the sandbox a session was launched with.
+    #[error("session incarnation {incarnation} already has a launch loadout")]
+    SessionIncarnationAlreadyBound {
+        /// Incarnation that is already bound.
+        incarnation: SessionIncarnationId,
+    },
+
+    /// The session incarnation has no launch loadout to resume against.
+    #[error("session incarnation {incarnation} has no launch loadout")]
+    NoSessionLoadout {
+        /// Incarnation with no binding.
+        incarnation: SessionIncarnationId,
+    },
 }
 
 impl Conflict {
@@ -650,6 +725,15 @@ impl Conflict {
             Self::LoadoutIdentityMismatch { .. } => ConflictKind::LoadoutIdentityMismatch,
             Self::LoadoutDigestMismatch { .. } => ConflictKind::LoadoutDigestMismatch,
             Self::ManagedConfigUnverifiable { .. } => ConflictKind::ManagedConfigUnverifiable,
+            Self::SessionLineageCycle { .. } => ConflictKind::SessionLineageCycle,
+            Self::SessionLineageTooDeep { .. } => ConflictKind::SessionLineageTooDeep,
+            Self::ParentTurnNotOwnedByParentSession { .. } => {
+                ConflictKind::ParentTurnNotOwnedByParentSession
+            }
+            Self::SessionIncarnationAlreadyBound { .. } => {
+                ConflictKind::SessionIncarnationAlreadyBound
+            }
+            Self::NoSessionLoadout { .. } => ConflictKind::NoSessionLoadout,
         }
     }
 

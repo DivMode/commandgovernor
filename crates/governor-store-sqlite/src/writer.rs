@@ -42,7 +42,7 @@ use governor_core::id::{ExternalAttemptId, ObligationId};
 use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{StoreError, StoreResult};
-use crate::load::{OpenCondition, OpenObligation};
+use crate::load::{ManagedConfigRecord, OpenCondition, OpenObligation, SessionLoadoutRecord};
 use crate::ops::AttemptEvidence;
 use crate::ops::bootstrap::{BindForeman, OpenWorkerTurn};
 use crate::ops::claim::{
@@ -53,12 +53,18 @@ use crate::ops::delivery::{
 };
 use crate::ops::effect::{MarkExternalDispatched, RecordExternalIntent, RecordExternalOutcome};
 use crate::ops::health::{
-    RaiseForemanUnreachable, RaiseResultArtifactMissing, RecordTerminalEvidenceConflict,
+    RaiseForemanUnreachable, RaiseLineageBroken, RaiseLoadoutUnverifiable,
+    RaiseManagedConfigMissing, RaiseResultArtifactMissing, RecordTerminalEvidenceConflict,
+    ResolveLineageBroken, ResolveLoadoutUnverifiable, ResolveManagedConfigMissing,
     ResolveResultArtifactMissing,
 };
 use crate::ops::lease::{AcquireLease, ReleaseLease, RenewLease};
 use crate::ops::mutation::{AckMutationReceipt, BeginMutation, CompleteMutation};
 use crate::ops::recovery::RecoverStartup;
+use crate::ops::session::{
+    AuthorizeWorkerSpawn, BindSessionLoadout, RecordManagedConfig, RecordSessionLineage,
+    ResolveWorkerLoadout,
+};
 use crate::ops::worker::{
     CancelObligation, PublishWorkerResult, RecordWorkerFailure, RecordWorkerStarted,
 };
@@ -119,8 +125,23 @@ pub(crate) enum Command {
     RaiseResultArtifactMissing(Job<RaiseResultArtifactMissing>),
     ResolveResultArtifactMissing(Job<ResolveResultArtifactMissing>),
     RecordTerminalEvidenceConflict(Job<RecordTerminalEvidenceConflict>),
+    RecordManagedConfig(Job<RecordManagedConfig>),
+    ResolveWorkerLoadout(Job<ResolveWorkerLoadout>),
+    BindSessionLoadout(Job<BindSessionLoadout>),
+    RecordSessionLineage(Job<RecordSessionLineage>),
+    AuthorizeWorkerSpawn(Job<AuthorizeWorkerSpawn>),
+    RaiseLoadoutUnverifiable(Job<RaiseLoadoutUnverifiable>),
+    ResolveLoadoutUnverifiable(Job<ResolveLoadoutUnverifiable>),
+    RaiseManagedConfigMissing(Job<RaiseManagedConfigMissing>),
+    ResolveManagedConfigMissing(Job<ResolveManagedConfigMissing>),
+    RaiseLineageBroken(Job<RaiseLineageBroken>),
+    ResolveLineageBroken(Job<ResolveLineageBroken>),
     RecoverStartup(Job<RecoverStartup>),
     VerifyProjections(Query<VerifiedProjections>),
+    ListCommittedManagedConfigs(Query<Vec<ManagedConfigRecord>>),
+    ListBoundSessionLoadouts(Query<Vec<SessionLoadoutRecord>>),
+    ListBrokenLineage(Query<Vec<governor_core::id::SessionId>>),
+    ReadSessionLoadout(Ask<governor_core::id::SessionIncarnationId, Option<SessionLoadoutRecord>>),
     OpenHealthConditions(Query<Vec<OpenCondition>>),
     ListOpenObligations(Query<Vec<OpenObligation>>),
     ListCommittedArtifacts(Query<Vec<ResultArtifact>>),
@@ -199,6 +220,17 @@ fn dispatch(
         Command::RaiseResultArtifactMissing(job) => run(conn, ports, hook, job),
         Command::ResolveResultArtifactMissing(job) => run(conn, ports, hook, job),
         Command::RecordTerminalEvidenceConflict(job) => run(conn, ports, hook, job),
+        Command::RecordManagedConfig(job) => run(conn, ports, hook, job),
+        Command::ResolveWorkerLoadout(job) => run(conn, ports, hook, job),
+        Command::BindSessionLoadout(job) => run(conn, ports, hook, job),
+        Command::RecordSessionLineage(job) => run(conn, ports, hook, job),
+        Command::AuthorizeWorkerSpawn(job) => run(conn, ports, hook, job),
+        Command::RaiseLoadoutUnverifiable(job) => run(conn, ports, hook, job),
+        Command::ResolveLoadoutUnverifiable(job) => run(conn, ports, hook, job),
+        Command::RaiseManagedConfigMissing(job) => run(conn, ports, hook, job),
+        Command::ResolveManagedConfigMissing(job) => run(conn, ports, hook, job),
+        Command::RaiseLineageBroken(job) => run(conn, ports, hook, job),
+        Command::ResolveLineageBroken(job) => run(conn, ports, hook, job),
         Command::RecoverStartup(job) => run(conn, ports, hook, job),
         Command::VerifyProjections(query) => {
             // Writes the watermark, so it takes the write lock like any other
@@ -232,6 +264,36 @@ fn dispatch(
                 crate::load::committed_artifacts,
             );
             let _ = query.reply.send(answer);
+        }
+        Command::ListCommittedManagedConfigs(query) => {
+            let answer = in_read_transaction(
+                conn,
+                hook,
+                "list_committed_managed_configs",
+                crate::load::committed_managed_configs,
+            );
+            let _ = query.reply.send(answer);
+        }
+        Command::ListBoundSessionLoadouts(query) => {
+            let answer = in_read_transaction(
+                conn,
+                hook,
+                "list_bound_session_loadouts",
+                crate::load::bound_session_loadouts,
+            );
+            let _ = query.reply.send(answer);
+        }
+        Command::ListBrokenLineage(query) => {
+            let answer = in_read_transaction(conn, hook, "list_broken_lineage", |tx| {
+                crate::load::broken_lineage(tx, crate::ops::session::MAX_LINEAGE_DEPTH)
+            });
+            let _ = query.reply.send(answer);
+        }
+        Command::ReadSessionLoadout(ask) => {
+            let answer = in_read_transaction(conn, hook, "read_session_loadout", |tx| {
+                crate::load::session_loadout(tx, ask.argument)
+            });
+            let _ = ask.reply.send(answer);
         }
         Command::ReadObligation(ask) => {
             let answer = in_read_transaction(conn, hook, "read_obligation", |tx| {

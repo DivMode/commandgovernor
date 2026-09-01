@@ -25,6 +25,7 @@ use governor_core::lease::LeaseState;
 use governor_core::mutation::{MutationCommandStatus, SafeMutationResult};
 use governor_core::obligation::{Disposition, ObligationKind, ObligationState};
 use governor_core::outbound::{AmbiguityReason, AttemptState, DeliveryState, FailureClass};
+use governor_core::session::{ResumePolicy, SessionRelation};
 use governor_core::time::{DurationMs, Timestamp};
 use governor_core::worker_evidence::WorkerFailureClass;
 
@@ -364,6 +365,31 @@ code_labels! {
     ]
 }
 
+// `governor-core` publishes `SessionRelation::code()` but deliberately no
+// `from_code`: a durable label set belongs to the layer that owns the column.
+// So the row decode is written here, exactly like `EventKind::parse`, and the
+// seven variants are listed rather than derived — a variant added upstream and
+// not listed is a fail-closed `UnknownLabel`, never a silent default.
+code_labels! {
+    SessionRelation, "relation_kind",
+    encode = encode_session_relation, decode = decode_session_relation,
+    all = [
+        SessionRelation::DelegatedWorker,
+        SessionRelation::Scout,
+        SessionRelation::Researcher,
+        SessionRelation::Reviewer,
+        SessionRelation::Observer,
+        SessionRelation::Consolidator,
+        SessionRelation::ProviderFork,
+    ]
+}
+
+code_labels! {
+    ResumePolicy, "resume_policy",
+    encode = encode_resume_policy, decode = decode_resume_policy,
+    all = [ResumePolicy::ExactLoadout]
+}
+
 code_labels! {
     MutationCommandStatus, "status",
     encode = encode_mutation_status, decode = decode_mutation_status,
@@ -462,6 +488,14 @@ code_labels! {
         ConflictKind::ResourceAlreadyLeased,
         ConflictKind::NoCurrentLease,
         ConflictKind::IllegalLeaseTransition,
+        ConflictKind::LoadoutIdentityMismatch,
+        ConflictKind::LoadoutDigestMismatch,
+        ConflictKind::ManagedConfigUnverifiable,
+        ConflictKind::SessionLineageCycle,
+        ConflictKind::SessionLineageTooDeep,
+        ConflictKind::ParentTurnNotOwnedByParentSession,
+        ConflictKind::SessionIncarnationAlreadyBound,
+        ConflictKind::NoSessionLoadout,
     ]
 }
 

@@ -18,6 +18,7 @@
 //! | [`effect`] | the durable-intent/permit protocol for external effects |
 //! | [`lease`] | exclusive resource ownership |
 //! | [`health`] | durable attention records, and nothing else |
+//! | [`session`] | immutable loadouts, their session bindings, lineage, and spawn authorization |
 //! | [`recovery`] | startup quarantine, before any new external I/O |
 
 pub(crate) mod bootstrap;
@@ -28,6 +29,7 @@ pub(crate) mod health;
 pub(crate) mod lease;
 pub(crate) mod mutation;
 pub(crate) mod recovery;
+pub(crate) mod session;
 pub(crate) mod worker;
 
 use governor_core::fence::{SafeToken, SourceRef};

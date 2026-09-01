@@ -104,6 +104,20 @@ pub enum EventKind {
     HealthConditionOpened,
     /// A health condition was resolved by later verified evidence.
     HealthConditionResolved,
+    /// An immutable capability-profile snapshot was recorded.
+    CapabilityProfileRecorded,
+    /// An immutable recursive-delegation-policy snapshot was recorded.
+    DelegationPolicyRecorded,
+    /// An immutable model-policy snapshot was recorded.
+    ModelPolicyRecorded,
+    /// A private immutable managed-configuration artifact was recorded.
+    ManagedConfigRecorded,
+    /// A fully resolved immutable worker loadout was recorded.
+    WorkerLoadoutResolved,
+    /// One session incarnation was bound to its launch loadout.
+    SessionLoadoutBound,
+    /// A durable parent/child logical session lineage edge was recorded.
+    SessionLineageRecorded,
 }
 
 impl EventKind {
@@ -139,6 +153,13 @@ impl EventKind {
             Self::ExternalAttemptQuarantined => "external_attempt_quarantined",
             Self::HealthConditionOpened => "health_condition_opened",
             Self::HealthConditionResolved => "health_condition_resolved",
+            Self::CapabilityProfileRecorded => "capability_profile_recorded",
+            Self::DelegationPolicyRecorded => "delegation_policy_recorded",
+            Self::ModelPolicyRecorded => "model_policy_recorded",
+            Self::ManagedConfigRecorded => "managed_config_recorded",
+            Self::WorkerLoadoutResolved => "worker_loadout_resolved",
+            Self::SessionLoadoutBound => "session_loadout_bound",
+            Self::SessionLineageRecorded => "session_lineage_recorded",
         }
     }
 
@@ -177,6 +198,13 @@ impl EventKind {
             EventKind::ExternalAttemptQuarantined,
             EventKind::HealthConditionOpened,
             EventKind::HealthConditionResolved,
+            EventKind::CapabilityProfileRecorded,
+            EventKind::DelegationPolicyRecorded,
+            EventKind::ModelPolicyRecorded,
+            EventKind::ManagedConfigRecorded,
+            EventKind::WorkerLoadoutResolved,
+            EventKind::SessionLoadoutBound,
+            EventKind::SessionLineageRecorded,
         ];
         ALL.iter()
             .copied()
@@ -239,6 +267,40 @@ impl EventKind {
             // two are never duplicated, and there is therefore nothing that can
             // disagree with the projection row.
             Self::HealthConditionOpened | Self::HealthConditionResolved => &["health_kind"],
+            // Immutable snapshots. `events` has no column for a profile, a
+            // policy, a configuration or a loadout identity, and adding six
+            // would put a scope on every event that has none. So the identity
+            // and its contents digest travel as allowlisted metadata instead.
+            //
+            // The digest is *not* the row's own `digest_hex` read back: it is
+            // the value the resolver derived, recorded beside the identity so
+            // an operator can tell which snapshot an event is about without
+            // consulting the projection it is meant to check.
+            Self::CapabilityProfileRecorded => &["capability_profile", "digest", "entry_count"],
+            Self::DelegationPolicyRecorded => &["delegation_policy", "digest", "entry_count"],
+            Self::ModelPolicyRecorded => &["model_policy", "digest"],
+            Self::ManagedConfigRecorded => &["managed_config", "digest", "hook_contract_epoch"],
+            // Identities and the loadout digest only. `role`, `worker_kind` and
+            // `runtime_kind` are deliberately absent: each is an opaque token
+            // that belongs in exactly one column, and a second copy here would
+            // be a second place for it to leak from.
+            Self::WorkerLoadoutResolved => &[
+                "loadout_id",
+                "digest",
+                "capability_profile",
+                "delegation_policy",
+                "model_policy",
+                "managed_config",
+            ],
+            // The session and its incarnation are the event's own scope
+            // columns; only the loadout it was bound to needs saying.
+            Self::SessionLoadoutBound => &["loadout_id", "digest"],
+            // The event's `session` scope is the *child*. These three fields
+            // are what makes `replay::compare_lineage` a genuine ledger fold:
+            // without them the edge could not be rebuilt at all, and the
+            // comparison would degenerate into re-reading the row it is
+            // supposed to be checking.
+            Self::SessionLineageRecorded => &["parent_session", "parent_turn", "relation"],
         }
     }
 }

@@ -39,11 +39,20 @@ use governor_core::fence::{
 };
 use governor_core::foreman_turn::ProviderMessageRef;
 use governor_core::health::{HealthConditionKind, HealthConditionState, HealthLedger, HealthScope};
-use governor_core::id::{HealthConditionId, ObligationId, ResultArtifactId, TaskId, TurnId};
+use governor_core::id::{
+    HealthConditionId, ManagedConfigArtifactId, ObligationId, ResultArtifactId, SessionId,
+    SessionIncarnationId, TaskId, TurnId, WorkerLoadoutId,
+};
 use governor_core::obligation::{
     AckRequest, Obligation, ObligationEvent, ObligationKind, ObligationState,
 };
 use governor_core::outbound::{Delivery, DeliveryEvent};
+use governor_core::session::{
+    CapabilityProfileDigest, CapabilityProfileRef, DelegationPolicyDigest, DelegationPolicyRef,
+    HookContractEpoch, ManagedConfigDigest, ManagedConfigRef, ModelPolicyDigest, ModelPolicyRef,
+    PersistedWorkerLoadout, RuntimeKind, SessionRelation, WorkerKind, WorkerLoadoutDigest,
+    WorkerLoadoutSpec, WorkerRole,
+};
 use governor_core::time::Timestamp;
 use governor_core::worker_evidence::{
     ChildExitReceipt, ChildExitStatus, ConfirmedFinalResult, FinalResultReceipt,
@@ -54,9 +63,9 @@ use rusqlite::{OptionalExtension as _, params};
 
 use crate::codec::{
     RetentionLabel, decode_ambiguity, decode_disposition, decode_failure_class, decode_health_kind,
-    decode_health_state, decode_obligation_kind, decode_worker_failure, decode_write_capability,
-    encode_retention, id_text, parse_delivery_id, parse_id, parse_source, parse_token, parse_u32,
-    parse_u64, rederive_delivery_key,
+    decode_health_state, decode_obligation_kind, decode_resume_policy, decode_session_relation,
+    decode_worker_failure, decode_write_capability, encode_retention, id_text, parse_delivery_id,
+    parse_id, parse_source, parse_token, parse_u32, parse_u64, rederive_delivery_key,
 };
 use crate::error::{CorruptReason, CorruptValue, StoreError, StoreResult};
 use crate::event::{self, EventKind, LedgerEvent, parse_seq, store_seq};
@@ -949,6 +958,458 @@ pub(crate) fn open_conditions(tx: &Tx<'_>) -> StoreResult<Vec<OpenCondition>> {
                     .transpose()?,
             },
         });
+    }
+    Ok(out)
+}
+
+// --- Worker loadouts and managed configurations -----------------------------
+
+/// One private immutable managed-configuration artifact, as metadata.
+///
+/// The same shape as [`ResultArtifact`] and for the same reason: the caller
+/// that needs it is startup verification, and it needs the digest *and* the
+/// length to prove the bytes. A digest alone would accept a truncation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedConfigRecord {
+    /// Opaque configuration identity.
+    pub id: ManagedConfigArtifactId,
+    /// Daemon-allocated opaque storage key. A worker never supplies a path.
+    pub storage_ref: SafeToken,
+    /// Digest of the bytes as written.
+    pub digest: ManagedConfigDigest,
+    /// Length of the bytes as written.
+    pub byte_len: u64,
+    /// Opaque media-type label.
+    pub media_type: SafeToken,
+    /// Hook/configuration contract epoch these bytes implement.
+    pub hook_contract_epoch: HookContractEpoch,
+}
+
+impl ManagedConfigRecord {
+    /// The reference a loadout embeds, rebuilt from this row.
+    #[must_use]
+    pub const fn reference(&self) -> ManagedConfigRef {
+        ManagedConfigRef::new(self.id, self.digest, self.byte_len)
+    }
+}
+
+/// The launch snapshot one session incarnation is bound to.
+///
+/// `persisted` is deliberately the *parts*, not a re-proved value: proving them
+/// is [`governor_core::session::CommittedLoadout::rehydrate`]'s job, and this
+/// loader must not do it on the caller's behalf. A caller that wants to resume
+/// has to run the rehydration itself and deal with its refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLoadoutRecord {
+    /// Logical session.
+    pub session: SessionId,
+    /// The bound incarnation.
+    pub incarnation: SessionIncarnationId,
+    /// The persisted loadout row: safe fields plus the digest beside them.
+    pub persisted: PersistedWorkerLoadout,
+    /// The managed configuration that loadout embeds.
+    pub config: ManagedConfigRecord,
+}
+
+/// The columns one `worker_loadouts` row is rebuilt from.
+type LoadoutRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+);
+
+const LOADOUT_COLUMNS: &str = "worker_kind, runtime_kind, role, \
+     model_policy_id, model_policy_digest_hex, capability_profile_id, \
+     capability_profile_digest_hex, delegation_policy_id, delegation_policy_digest_hex, \
+     managed_config_artifact_id, managed_config_digest_hex, managed_config_byte_len, \
+     resume_policy";
+
+/// Rebuilds one loadout's safe fields from its row.
+///
+/// Every column is decoded through the closed codecs, so an unknown resume
+/// policy or a malformed digest is a corrupt row rather than a coerced value.
+fn loadout_spec(
+    id: WorkerLoadoutId,
+    row: LoadoutRow,
+    hook_contract_epoch: i64,
+) -> StoreResult<WorkerLoadoutSpec> {
+    const TABLE: &str = "worker_loadouts";
+    let (
+        worker_kind,
+        runtime_kind,
+        role,
+        model_policy_id,
+        model_policy_digest,
+        capability_profile_id,
+        capability_profile_digest,
+        delegation_policy_id,
+        delegation_policy_digest,
+        managed_config_id,
+        managed_config_digest,
+        managed_config_byte_len,
+        resume_policy,
+    ) = row;
+    Ok(WorkerLoadoutSpec {
+        id,
+        worker_kind: WorkerKind::new(parse_token(&worker_kind, TABLE, "worker_kind")?),
+        runtime_kind: RuntimeKind::new(parse_token(&runtime_kind, TABLE, "runtime_kind")?),
+        role: WorkerRole::new(parse_token(&role, TABLE, "role")?),
+        model_policy: ModelPolicyRef::new(
+            parse_id(&model_policy_id, TABLE, "model_policy_id")?,
+            ModelPolicyDigest::from_persisted(crate::codec::parse_hex32(
+                &model_policy_digest,
+                TABLE,
+                "model_policy_digest_hex",
+            )?),
+        ),
+        capability_profile: CapabilityProfileRef::new(
+            parse_id(&capability_profile_id, TABLE, "capability_profile_id")?,
+            CapabilityProfileDigest::from_persisted(crate::codec::parse_hex32(
+                &capability_profile_digest,
+                TABLE,
+                "capability_profile_digest_hex",
+            )?),
+        ),
+        delegation_policy: DelegationPolicyRef::new(
+            parse_id(&delegation_policy_id, TABLE, "delegation_policy_id")?,
+            DelegationPolicyDigest::from_persisted(crate::codec::parse_hex32(
+                &delegation_policy_digest,
+                TABLE,
+                "delegation_policy_digest_hex",
+            )?),
+        ),
+        managed_config: ManagedConfigRef::new(
+            parse_id(&managed_config_id, TABLE, "managed_config_artifact_id")?,
+            ManagedConfigDigest::from_persisted(crate::codec::parse_hex32(
+                &managed_config_digest,
+                TABLE,
+                "managed_config_digest_hex",
+            )?),
+            parse_u64(managed_config_byte_len, TABLE, "managed_config_byte_len")?,
+        ),
+        hook_contract_epoch: HookContractEpoch::new(parse_u64(
+            hook_contract_epoch,
+            TABLE,
+            "hook_contract_epoch",
+        )?),
+        resume_policy: decode_resume_policy(&resume_policy, TABLE)?,
+    })
+}
+
+/// Every recorded loadout snapshot, as `(spec, digest)` parts.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error for an undecodable column.
+pub(crate) fn worker_loadouts(tx: &Tx<'_>) -> StoreResult<Vec<PersistedWorkerLoadout>> {
+    const TABLE: &str = "worker_loadouts";
+    let mut statement = tx.conn().prepare(&format!(
+        "SELECT worker_loadout_id, digest_hex, {LOADOUT_COLUMNS}, hook_contract_epoch
+           FROM worker_loadouts ORDER BY worker_loadout_id, digest_hex"
+    ))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            decode_shifted(row)?,
+        ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, digest, (columns, epoch)) = row?;
+        out.push(PersistedWorkerLoadout {
+            spec: loadout_spec(parse_id(&id, TABLE, "worker_loadout_id")?, columns, epoch)?,
+            digest: WorkerLoadoutDigest::from_persisted(crate::codec::parse_hex32(
+                &digest,
+                TABLE,
+                "digest_hex",
+            )?),
+        });
+    }
+    Ok(out)
+}
+
+/// Reads the thirteen loadout columns that follow the identity and digest.
+fn decode_shifted(row: &rusqlite::Row<'_>) -> rusqlite::Result<(LoadoutRow, i64)> {
+    Ok((
+        (
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+            row.get(12)?,
+            row.get(13)?,
+            row.get(14)?,
+        ),
+        row.get(15)?,
+    ))
+}
+
+/// Reads one managed-configuration row.
+///
+/// # Errors
+///
+/// Returns a corrupt-row error when the row is missing or undecodable.
+pub(crate) fn managed_config(
+    tx: &Tx<'_>,
+    id: ManagedConfigArtifactId,
+) -> StoreResult<ManagedConfigRecord> {
+    const TABLE: &str = "managed_config_artifacts";
+    let row: Option<(String, String, i64, String, i64)> = tx
+        .conn()
+        .query_row(
+            "SELECT storage_ref, sha256_hex, byte_len, media_type, hook_contract_epoch
+               FROM managed_config_artifacts WHERE managed_config_artifact_id = ?1",
+            params![id_text(id)],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (storage_ref, digest, byte_len, media_type, epoch) =
+        row.ok_or_else(|| dangling(TABLE, "managed_config_artifact_id"))?;
+    Ok(ManagedConfigRecord {
+        id,
+        storage_ref: parse_token(&storage_ref, TABLE, "storage_ref")?,
+        digest: ManagedConfigDigest::from_persisted(crate::codec::parse_hex32(
+            &digest,
+            TABLE,
+            "sha256_hex",
+        )?),
+        byte_len: parse_u64(byte_len, TABLE, "byte_len")?,
+        media_type: parse_token(&media_type, TABLE, "media_type")?,
+        hook_contract_epoch: HookContractEpoch::new(parse_u64(
+            epoch,
+            TABLE,
+            "hook_contract_epoch",
+        )?),
+    })
+}
+
+/// Every recorded managed configuration.
+///
+/// The daemon's orphan sweep needs these keys in its reference set *before* it
+/// reclassifies anything: a configuration missing from the set would be swept
+/// into quarantine while a bound session still requires it.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error for an undecodable row.
+pub(crate) fn committed_managed_configs(tx: &Tx<'_>) -> StoreResult<Vec<ManagedConfigRecord>> {
+    const TABLE: &str = "managed_config_artifacts";
+    let mut statement = tx.conn().prepare(
+        "SELECT managed_config_artifact_id FROM managed_config_artifacts
+          ORDER BY managed_config_artifact_id",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(parse_id(&row?, TABLE, "managed_config_artifact_id")?);
+    }
+    ids.into_iter().map(|id| managed_config(tx, id)).collect()
+}
+
+/// The launch snapshot one incarnation is bound to, if any.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error for an undecodable row.
+pub(crate) fn session_loadout(
+    tx: &Tx<'_>,
+    incarnation: SessionIncarnationId,
+) -> StoreResult<Option<SessionLoadoutRecord>> {
+    let mut found = bound_session_loadouts_where(
+        tx,
+        "WHERE b.session_incarnation_id = ?1",
+        params![id_text(incarnation)],
+    )?;
+    Ok(found.pop())
+}
+
+/// Every session incarnation with a bound launch loadout.
+///
+/// # Errors
+///
+/// As [`session_loadout`].
+pub(crate) fn bound_session_loadouts(tx: &Tx<'_>) -> StoreResult<Vec<SessionLoadoutRecord>> {
+    bound_session_loadouts_where(tx, "", params![])
+}
+
+fn bound_session_loadouts_where(
+    tx: &Tx<'_>,
+    filter: &str,
+    arguments: &[&dyn rusqlite::ToSql],
+) -> StoreResult<Vec<SessionLoadoutRecord>> {
+    const TABLE: &str = "session_loadouts";
+    let mut statement = tx.conn().prepare(&format!(
+        "SELECT b.session_id, b.session_incarnation_id, b.worker_loadout_id, b.digest_hex,
+                l.{LOADOUT_COLUMNS}, l.hook_contract_epoch
+           FROM session_loadouts b
+           JOIN worker_loadouts l
+             ON l.worker_loadout_id = b.worker_loadout_id AND l.digest_hex = b.digest_hex
+         {filter}
+          ORDER BY b.bound_event_seq"
+    ))?;
+    let rows = statement.query_map(arguments, |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            decode_bound_loadout(row)?,
+        ))
+    })?;
+
+    let mut listed = Vec::new();
+    for row in rows {
+        listed.push(row?);
+    }
+
+    let mut out = Vec::with_capacity(listed.len());
+    for (session, incarnation, loadout, digest, (columns, epoch)) in listed {
+        let spec = loadout_spec(
+            parse_id(&loadout, TABLE, "worker_loadout_id")?,
+            columns,
+            epoch,
+        )?;
+        let config = managed_config(tx, spec.managed_config.id())?;
+        out.push(SessionLoadoutRecord {
+            session: parse_id(&session, TABLE, "session_id")?,
+            incarnation: parse_id(&incarnation, TABLE, "session_incarnation_id")?,
+            persisted: PersistedWorkerLoadout {
+                spec,
+                digest: WorkerLoadoutDigest::from_persisted(crate::codec::parse_hex32(
+                    &digest,
+                    TABLE,
+                    "digest_hex",
+                )?),
+            },
+            config,
+        });
+    }
+    Ok(out)
+}
+
+fn decode_bound_loadout(row: &rusqlite::Row<'_>) -> rusqlite::Result<(LoadoutRow, i64)> {
+    Ok((
+        (
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+            row.get(12)?,
+            row.get(13)?,
+            row.get(14)?,
+            row.get(15)?,
+            row.get(16)?,
+        ),
+        row.get(17)?,
+    ))
+}
+
+// --- Session lineage --------------------------------------------------------
+
+/// One durable lineage edge, as the row holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LineageEdge {
+    /// Logical parent session.
+    pub parent_session: SessionId,
+    /// Logical child session.
+    pub child_session: SessionId,
+    /// Parent turn that created the delegation or fork.
+    pub parent_turn: TurnId,
+    /// Semantic child relationship.
+    pub relation: SessionRelation,
+}
+
+/// Every recorded lineage edge, ordered by child.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error for an unknown relation
+/// label or a malformed identity.
+pub(crate) fn session_edges(tx: &Tx<'_>) -> StoreResult<Vec<LineageEdge>> {
+    const TABLE: &str = "session_edges";
+    let mut statement = tx.conn().prepare(
+        "SELECT parent_session_id, child_session_id, parent_turn_id, relation_kind
+           FROM session_edges ORDER BY child_session_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (parent, child, turn, relation) = row?;
+        out.push(LineageEdge {
+            parent_session: parse_id(&parent, TABLE, "parent_session_id")?,
+            child_session: parse_id(&child, TABLE, "child_session_id")?,
+            parent_turn: parse_id(&turn, TABLE, "parent_turn_id")?,
+            // Decoded through the closed label set, so a relation this binary
+            // does not implement is a corrupt row rather than a silent default.
+            relation: decode_session_relation(&relation, TABLE)?,
+        });
+    }
+    Ok(out)
+}
+
+/// Every session whose ancestor chain does not terminate within the bound.
+///
+/// A healthy graph cannot produce one: the edge-insert transaction refuses a
+/// cycle before it commits. This exists for the graph a restore or an edit
+/// produced, which the insert path never saw.
+///
+/// # Errors
+///
+/// Returns a SQLite error, or a corrupt-row error for a malformed identity.
+pub(crate) fn broken_lineage(tx: &Tx<'_>, bound: u32) -> StoreResult<Vec<SessionId>> {
+    const TABLE: &str = "session_edges";
+    let mut statement = tx.conn().prepare(
+        "WITH RECURSIVE ancestry(root, session_id, depth) AS (
+             SELECT child_session_id, child_session_id, 0 FROM session_edges
+             UNION ALL
+             SELECT a.root, e.parent_session_id, a.depth + 1
+               FROM session_edges e
+               JOIN ancestry a ON e.child_session_id = a.session_id
+              WHERE a.depth < ?1
+         )
+         SELECT DISTINCT root FROM ancestry WHERE depth >= ?1 ORDER BY root",
+    )?;
+    let rows = statement.query_map(params![i64::from(bound)], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(parse_id(&row?, TABLE, "child_session_id")?);
     }
     Ok(out)
 }

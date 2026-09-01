@@ -26,7 +26,7 @@ use rusqlite::TransactionBehavior;
 use uuid::Uuid;
 
 use crate::error::StoreResult;
-use crate::load::{OpenCondition, OpenObligation};
+use crate::load::{ManagedConfigRecord, OpenCondition, OpenObligation, SessionLoadoutRecord};
 use crate::migrate::{self, MigrationReport};
 use crate::open::{self, PolicyReport, StoreConfig};
 use crate::ops::AttemptEvidence;
@@ -50,8 +50,10 @@ use crate::ops::effect::{
 };
 use crate::ops::health::{
     HealthConditionRecorded, RaiseForemanUnreachable, RaiseForemanUnreachableRequest,
-    RaiseResultArtifactMissing, RecordTerminalEvidenceConflict, ResolveResultArtifactMissing,
-    ResultArtifactMissingRequest, TerminalEvidenceConflictRequest,
+    RaiseLineageBroken, RaiseLoadoutUnverifiable, RaiseManagedConfigMissing,
+    RaiseResultArtifactMissing, RecordTerminalEvidenceConflict, ResolveLineageBroken,
+    ResolveLoadoutUnverifiable, ResolveManagedConfigMissing, ResolveResultArtifactMissing,
+    ResultArtifactMissingRequest, SessionHealthRequest, TerminalEvidenceConflictRequest,
 };
 use crate::ops::lease::{
     AcquireLease, AcquireLeaseRequest, GrantedLease, LeaseHolderRequest, ReleaseLease, RenewLease,
@@ -61,6 +63,12 @@ use crate::ops::mutation::{
     CompleteMutation, CompleteMutationRequest, MutationAdmission,
 };
 use crate::ops::recovery::{RecoverStartup, RecoverStartupRequest, StartupRecovery};
+use crate::ops::session::{
+    AuthorizeWorkerSpawn, AuthorizeWorkerSpawnRequest, BindSessionLoadout,
+    BindSessionLoadoutRequest, BoundSessionLoadout, RecordManagedConfig,
+    RecordManagedConfigRequest, RecordSessionLineage, RecordSessionLineageRequest, RecordedLineage,
+    RecordedManagedConfig, ResolveWorkerLoadout, ResolveWorkerLoadoutRequest, ResolvedLoadout,
+};
 use crate::ops::worker::{
     CancelObligation, CancelObligationRequest, ObligationAdvanced, PublishWorkerResult,
     PublishWorkerResultRequest, PublishedResult, RecordWorkerFailure, RecordWorkerFailureRequest,
@@ -651,5 +659,230 @@ impl Store {
         attempt: ExternalAttemptId,
     ) -> StoreResult<EffectDecision<AttemptEvidence>> {
         self.writer.ask(attempt, Command::ResolveExternalAttempt)
+    }
+
+    // --- Session loadouts and lineage ---------------------------------------
+
+    /// Records one managed-configuration artifact whose bytes are durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::StoreError`] from the transaction.
+    pub fn record_managed_config(
+        &self,
+        request: RecordManagedConfigRequest,
+    ) -> StoreResult<RecordedManagedConfig> {
+        self.writer
+            .call::<RecordManagedConfig, _>(request, Command::RecordManagedConfig)
+    }
+
+    /// Commits one immutable resolved loadout and the snapshots it embeds.
+    ///
+    /// Recording the same snapshot twice converges: every row is keyed on
+    /// `(identity, digest)` and there is no `UPDATE` for any of them, so an
+    /// edited profile becomes a second row and the loadouts that embedded the
+    /// first one still resolve to the first one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::StoreError`] from the transaction.
+    pub fn resolve_worker_loadout(
+        &self,
+        request: ResolveWorkerLoadoutRequest,
+    ) -> StoreResult<ResolvedLoadout> {
+        self.writer
+            .call::<ResolveWorkerLoadout, _>(request, Command::ResolveWorkerLoadout)
+    }
+
+    /// Binds one session incarnation to its launch loadout, forever.
+    ///
+    /// # Errors
+    ///
+    /// - [`governor_core::error::Conflict::SessionIncarnationAlreadyBound`]
+    ///   when the incarnation is already bound to a *different* snapshot;
+    /// - [`governor_core::error::Conflict::LoadoutDigestMismatch`] when the
+    ///   presented `(identity, digest)` pair names no recorded snapshot.
+    pub fn bind_session_loadout(
+        &self,
+        request: BindSessionLoadoutRequest,
+    ) -> StoreResult<BoundSessionLoadout> {
+        self.writer
+            .call::<BindSessionLoadout, _>(request, Command::BindSessionLoadout)
+    }
+
+    /// Records one durable parent/child lineage edge.
+    ///
+    /// # Errors
+    ///
+    /// - [`governor_core::error::Conflict::ParentTurnNotOwnedByParentSession`]
+    ///   when the presented turn is not the parent session's — the store
+    ///   derives the turn's session through `turns → session_incarnations` and
+    ///   never trusts the pair it was handed;
+    /// - [`governor_core::error::Conflict::SessionLineageCycle`] when the edge
+    ///   would close a cycle at any hop count;
+    /// - [`governor_core::error::Conflict::SessionLineageTooDeep`] when the
+    ///   ancestor walk did not terminate within its bound.
+    pub fn record_session_lineage(
+        &self,
+        request: RecordSessionLineageRequest,
+    ) -> StoreResult<RecordedLineage> {
+        self.writer
+            .call::<RecordSessionLineage, _>(request, Command::RecordSessionLineage)
+    }
+
+    /// Commits one worker-spawn intent, then surrenders one permit.
+    ///
+    /// The caller must already have verified the loadout and re-read the
+    /// managed configuration's bytes *outside* any transaction; this operation
+    /// re-checks both under the write lock and refuses on any difference. The
+    /// permit is produced strictly after that transaction commits.
+    ///
+    /// # Errors
+    ///
+    /// - [`governor_core::error::Conflict::NoSessionLoadout`] when the
+    ///   incarnation has no binding, or is not this session's;
+    /// - [`governor_core::error::Conflict::LoadoutIdentityMismatch`] and
+    ///   [`governor_core::error::Conflict::LoadoutDigestMismatch`] when the
+    ///   binding moved between the verification and the commit;
+    /// - [`governor_core::error::Conflict::ManagedConfigUnverifiable`] when the
+    ///   recorded configuration is not the one the caller proved.
+    pub fn authorize_worker_spawn(
+        &self,
+        request: AuthorizeWorkerSpawnRequest,
+    ) -> StoreResult<GrantedPermit> {
+        self.writer
+            .call::<AuthorizeWorkerSpawn, _>(request, Command::AuthorizeWorkerSpawn)
+    }
+
+    /// Reads back the launch snapshot one incarnation is bound to.
+    ///
+    /// The *parts*, not a re-proved value: proving them is
+    /// [`governor_core::session::CommittedLoadout::rehydrate`]'s job, and doing
+    /// it here on the caller's behalf would launder a tampered row into a
+    /// loadout that agrees with itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row error for an undecodable row.
+    pub fn read_session_loadout(
+        &self,
+        incarnation: governor_core::id::SessionIncarnationId,
+    ) -> StoreResult<Option<SessionLoadoutRecord>> {
+        self.writer.ask(incarnation, Command::ReadSessionLoadout)
+    }
+
+    /// Reads every session incarnation with a bound launch loadout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row error for an undecodable row.
+    pub fn list_bound_session_loadouts(&self) -> StoreResult<Vec<SessionLoadoutRecord>> {
+        self.writer.query(Command::ListBoundSessionLoadouts)
+    }
+
+    /// Reads every committed managed-configuration record.
+    ///
+    /// The artifact root's orphan sweep needs these keys in its reference set
+    /// before it reclassifies anything; a configuration missing from that set
+    /// would be quarantined while a bound session still requires it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row error for an undecodable row.
+    pub fn list_committed_managed_configs(&self) -> StoreResult<Vec<ManagedConfigRecord>> {
+        self.writer.query(Command::ListCommittedManagedConfigs)
+    }
+
+    /// Every session whose durable ancestor walk does not terminate.
+    ///
+    /// Always empty for a graph this store built: the edge-insert transaction
+    /// refuses a cycle before it commits. A non-empty answer means the durable
+    /// state came from somewhere else.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row error for a malformed identity.
+    pub fn list_broken_lineage(&self) -> StoreResult<Vec<governor_core::id::SessionId>> {
+        self.writer.query(Command::ListBrokenLineage)
+    }
+
+    /// Opens `loadout_unverifiable` for a session whose launch row will not
+    /// re-derive its own digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row error when the session does not exist.
+    pub fn raise_loadout_unverifiable(
+        &self,
+        request: SessionHealthRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<RaiseLoadoutUnverifiable, _>(request, Command::RaiseLoadoutUnverifiable)
+    }
+
+    /// Closes `loadout_unverifiable` after the launch row proved itself again.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::raise_loadout_unverifiable`].
+    pub fn resolve_loadout_unverifiable(
+        &self,
+        request: SessionHealthRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<ResolveLoadoutUnverifiable, _>(request, Command::ResolveLoadoutUnverifiable)
+    }
+
+    /// Opens `managed_config_missing` for a session whose configuration bytes
+    /// could not be proved.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::raise_loadout_unverifiable`].
+    pub fn raise_managed_config_missing(
+        &self,
+        request: SessionHealthRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<RaiseManagedConfigMissing, _>(request, Command::RaiseManagedConfigMissing)
+    }
+
+    /// Closes `managed_config_missing` after a successful verify.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::raise_loadout_unverifiable`].
+    pub fn resolve_managed_config_missing(
+        &self,
+        request: SessionHealthRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<ResolveManagedConfigMissing, _>(request, Command::ResolveManagedConfigMissing)
+    }
+
+    /// Opens `lineage_broken` for a session whose ancestor walk does not end.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::raise_loadout_unverifiable`].
+    pub fn raise_lineage_broken(
+        &self,
+        request: SessionHealthRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<RaiseLineageBroken, _>(request, Command::RaiseLineageBroken)
+    }
+
+    /// Closes `lineage_broken` after the walk terminated again.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::raise_loadout_unverifiable`].
+    pub fn resolve_lineage_broken(
+        &self,
+        request: SessionHealthRequest,
+    ) -> StoreResult<HealthConditionRecorded> {
+        self.writer
+            .call::<ResolveLineageBroken, _>(request, Command::ResolveLineageBroken)
     }
 }

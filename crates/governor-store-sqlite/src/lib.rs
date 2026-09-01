@@ -68,7 +68,9 @@ pub use error::{
 };
 pub use event::EventKind;
 pub use inspect::ReadOnlyDiagnosis;
-pub use load::{OpenCondition, OpenObligation};
+pub use load::{
+    LineageEdge, ManagedConfigRecord, OpenCondition, OpenObligation, SessionLoadoutRecord,
+};
 pub use migrate::{MigrationReport, SUPPORTED_SCHEMA_EPOCH};
 pub use open::{DEFAULT_BUSY_TIMEOUT_MS, PolicyReport, StoreConfig};
 pub use ops::AttemptEvidence;
@@ -90,13 +92,18 @@ pub use ops::effect::{
 };
 pub use ops::health::{
     HealthConditionRecorded, RaiseForemanUnreachableRequest, ResultArtifactMissingRequest,
-    TerminalEvidenceConflictRequest,
+    SessionHealthRequest, TerminalEvidenceConflictRequest,
 };
 pub use ops::lease::{AcquireLeaseRequest, GrantedLease, LeaseHolderRequest, ResourceRef};
 pub use ops::mutation::{
     AckMutationReceiptRequest, BeginMutationRequest, CompleteMutationRequest, MutationAdmission,
 };
 pub use ops::recovery::StartupRecovery;
+pub use ops::session::{
+    AuthorizeWorkerSpawnRequest, BindSessionLoadoutRequest, BoundSessionLoadout,
+    RecordManagedConfigRequest, RecordSessionLineageRequest, RecordedLineage,
+    RecordedManagedConfig, ResolveWorkerLoadoutRequest, ResolvedLoadout,
+};
 pub use ops::worker::{
     CancelObligationRequest, CompletionReceipts, DurableArtifact, ObligationAdvanced,
     PublishWorkerResultRequest, PublishedResult, RecordWorkerFailureRequest,

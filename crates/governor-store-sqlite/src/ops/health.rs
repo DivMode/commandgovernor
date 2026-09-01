@@ -35,10 +35,10 @@
 
 use governor_core::error::Conflict;
 use governor_core::health::{HealthConditionKind, HealthConditionState, HealthScope};
-use governor_core::id::{EventId, HealthConditionId, ObligationId, ResultArtifactId};
+use governor_core::id::{EventId, HealthConditionId, ObligationId, ResultArtifactId, SessionId};
 use governor_core::time::Timestamp;
 use governor_core::worker_evidence::WorkerOutcome;
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 
 use crate::codec::{encode_health_kind, encode_health_state, id_text};
 use crate::error::{CorruptReason, CorruptValue, StoreResult};
@@ -307,6 +307,169 @@ impl WriteOp for RecordTerminalEvidenceConflict {
 
     fn finish(self, committed: Self::Committed) -> Self::Output {
         committed
+    }
+}
+
+// --- Session-scoped attention ------------------------------------------------
+
+/// A logical session that needs attention before it can be resumed.
+///
+/// One request type for all three session-scoped kinds: they differ in *which*
+/// evidence failed, never in what is recorded, and giving each its own
+/// near-identical struct would be three places to keep in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionHealthRequest {
+    /// Session whose launch state could not be proved.
+    pub session: SessionId,
+}
+
+/// Generates the raise/resolve pair for one session-scoped condition kind.
+///
+/// Both halves are the same four lines around a different [`HealthConditionKind`],
+/// and writing them out six times would be six chances to scope one to the
+/// wrong thing.
+macro_rules! session_condition {
+    (
+        $kind:path,
+        raise = $raise:ident as $raise_name:literal,
+        resolve = $resolve:ident as $resolve_name:literal,
+        $(#[$raise_doc:meta])*
+    ) => {
+        $(#[$raise_doc])*
+        pub(crate) struct $raise {
+            request: SessionHealthRequest,
+            condition: HealthConditionId,
+            event: EventId,
+            now: Timestamp,
+        }
+
+        impl WriteOp for $raise {
+            type Request = SessionHealthRequest;
+            type Committed = HealthConditionRecorded;
+            type Output = HealthConditionRecorded;
+
+            const NAME: &'static str = $raise_name;
+
+            fn prepare(request: Self::Request, ports: &mut StorePorts) -> StoreResult<Self> {
+                Ok(Self {
+                    request,
+                    condition: ports.next_id(),
+                    event: ports.next_id(),
+                    now: ports.now(),
+                })
+            }
+
+            fn commit(&self, tx: &Tx<'_>) -> StoreResult<Self::Committed> {
+                require_session(tx, self.request.session)?;
+                let recorded = raise(
+                    tx,
+                    self.condition,
+                    $kind,
+                    HealthScope::session(self.request.session),
+                    self.event,
+                    self.now,
+                )?;
+                tx.reach(Failpoint::AfterProjectionUpdate)?;
+                tx.reach(Failpoint::BeforeCommit)?;
+                Ok(recorded)
+            }
+
+            fn finish(self, committed: Self::Committed) -> Self::Output {
+                committed
+            }
+        }
+
+        /// Closes the matching condition after the evidence verified again.
+        pub(crate) struct $resolve {
+            request: SessionHealthRequest,
+            event: EventId,
+            now: Timestamp,
+        }
+
+        impl WriteOp for $resolve {
+            type Request = SessionHealthRequest;
+            type Committed = HealthConditionRecorded;
+            type Output = HealthConditionRecorded;
+
+            const NAME: &'static str = $resolve_name;
+
+            fn prepare(request: Self::Request, ports: &mut StorePorts) -> StoreResult<Self> {
+                Ok(Self {
+                    request,
+                    event: ports.next_id(),
+                    now: ports.now(),
+                })
+            }
+
+            fn commit(&self, tx: &Tx<'_>) -> StoreResult<Self::Committed> {
+                require_session(tx, self.request.session)?;
+                let recorded = resolve(
+                    tx,
+                    $kind,
+                    HealthScope::session(self.request.session),
+                    self.event,
+                    self.now,
+                )?;
+                tx.reach(Failpoint::AfterProjectionUpdate)?;
+                tx.reach(Failpoint::BeforeCommit)?;
+                Ok(recorded)
+            }
+
+            fn finish(self, committed: Self::Committed) -> Self::Output {
+                committed
+            }
+        }
+    };
+}
+
+session_condition! {
+    HealthConditionKind::LoadoutUnverifiable,
+    raise = RaiseLoadoutUnverifiable as "raise_loadout_unverifiable",
+    resolve = ResolveLoadoutUnverifiable as "resolve_loadout_unverifiable",
+    /// Opens `loadout_unverifiable` for a session whose launch row will not
+    /// re-derive its own digest.
+    ///
+    /// Attention, not repair: the session stays exactly as it is, and resume is
+    /// refused independently by `CommittedLoadout::rehydrate`.
+}
+
+session_condition! {
+    HealthConditionKind::ManagedConfigMissing,
+    raise = RaiseManagedConfigMissing as "raise_managed_config_missing",
+    resolve = ResolveManagedConfigMissing as "resolve_managed_config_missing",
+    /// Opens `managed_config_missing` for a session whose configuration bytes
+    /// are gone, truncated or rewritten.
+    ///
+    /// The durable equivalent of `result_artifact_missing`, and scoped the same
+    /// way: to the one thing that cannot proceed, never to the whole daemon.
+}
+
+session_condition! {
+    HealthConditionKind::LineageBroken,
+    raise = RaiseLineageBroken as "raise_lineage_broken",
+    resolve = ResolveLineageBroken as "resolve_lineage_broken",
+    /// Opens `lineage_broken` for a session whose ancestor walk does not
+    /// terminate.
+    ///
+    /// Unreachable from any legal sequence of store operations — the
+    /// edge-insert transaction refuses a cycle before it commits — so this
+    /// exists for the graph a restore or a hand edit produced.
+}
+
+/// The session must exist before attention can be recorded about it.
+fn require_session(tx: &Tx<'_>, session: SessionId) -> StoreResult<()> {
+    let found: Option<i64> = tx
+        .conn()
+        .query_row(
+            "SELECT 1 FROM sessions WHERE session_id = ?1",
+            rusqlite::params![id_text(session)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if found.is_some() {
+        Ok(())
+    } else {
+        Err(CorruptValue::new("sessions", "session_id", CorruptReason::DanglingReference).into())
     }
 }
 

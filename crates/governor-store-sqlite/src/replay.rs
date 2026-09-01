@@ -63,19 +63,21 @@ use governor_core::artifact::{ArtifactDigest, ResultArtifact, RetentionState};
 use governor_core::binding::WriteCapabilityState;
 use governor_core::fence::EventSeq;
 use governor_core::health::{HealthConditionKind, HealthConditionState, HealthScope};
-use governor_core::id::{ClaimId, ObligationId};
+use governor_core::id::{ClaimId, ObligationId, SessionId};
+use governor_core::session::{CommittedLoadout, LoadoutIntegrityError};
 use governor_core::time::Timestamp;
 use rusqlite::params;
 
 use crate::codec::{
     ClaimLifecycle, RetentionLabel, TurnLifecycle, decode_attempt_state, decode_claim_state,
     decode_delivery_state, decode_health_kind, decode_health_state, decode_obligation_state,
-    decode_retention, decode_turn_lifecycle, decode_write_capability, encode_attempt_state,
-    encode_claim_state, encode_delivery_state, encode_health_kind, encode_health_state,
-    encode_obligation_state, encode_retention, encode_turn_lifecycle, encode_write_capability,
-    id_text, parse_delivery_id, parse_hex32, parse_id, parse_token, parse_u32, parse_u64,
+    decode_retention, decode_session_relation, decode_turn_lifecycle, decode_write_capability,
+    encode_attempt_state, encode_claim_state, encode_delivery_state, encode_health_kind,
+    encode_health_state, encode_obligation_state, encode_retention, encode_session_relation,
+    encode_turn_lifecycle, encode_write_capability, hex32, id_text, parse_delivery_id, parse_hex32,
+    parse_id, parse_token, parse_u32, parse_u64,
 };
-use crate::error::{ProjectionMismatch, RepairNeeded, StoreResult};
+use crate::error::{CorruptReason, ProjectionMismatch, RepairNeeded, StoreResult};
 use crate::event::{self, EventKind, LedgerEvent};
 use crate::load;
 use crate::tx::Tx;
@@ -87,6 +89,10 @@ pub struct VerifiedProjections {
     pub obligations: usize,
     /// Wake revisions rebuilt and compared.
     pub deliveries: usize,
+    /// Immutable loadout snapshots re-proved against their own digests.
+    pub loadouts: usize,
+    /// Lineage edges rebuilt from the ledger and compared.
+    pub lineage_edges: usize,
     /// Highest ledger sequence covered, recorded as the watermark.
     pub verified_through: Option<EventSeq>,
 }
@@ -125,6 +131,9 @@ pub(crate) fn verify(tx: &Tx<'_>) -> StoreResult<VerifiedProjections> {
     compare_bindings(tx, &events, &mut mismatches)?;
     compare_claims(tx, &events, &mut mismatches)?;
     let deliveries = compare_deliveries(tx, &mut mismatches)?;
+    let loadouts = compare_loadouts(tx, &mut mismatches)?;
+    compare_config_retention(tx, &mut mismatches)?;
+    let lineage_edges = compare_lineage(tx, &events, &mut mismatches)?;
 
     if !mismatches.is_empty() {
         return Err(RepairNeeded { mismatches }.into());
@@ -137,8 +146,204 @@ pub(crate) fn verify(tx: &Tx<'_>) -> StoreResult<VerifiedProjections> {
     Ok(VerifiedProjections {
         obligations,
         deliveries,
+        loadouts,
+        lineage_edges,
         verified_through,
     })
+}
+
+/// Re-proves every immutable loadout snapshot against its own recorded digest.
+///
+/// **This is a self-consistency check, not a ledger fold**, and the difference
+/// is worth naming. A loadout's safe fields and its digest are written in one
+/// transaction and are two halves of one fact; what this catches is the two
+/// halves disagreeing — a row edited in place, a restore that mixed generations,
+/// a widened profile written under an old loadout's digest. It does not, and
+/// cannot, prove the row is one this store wrote: authenticity is the schema's
+/// job, through the composite foreign keys, and the resume path's, through the
+/// `ManagedConfigVerified` witness that comes from bytes the row does not
+/// control.
+///
+/// The blast radius is deliberately the whole open: a launch snapshot that
+/// disagrees with itself means the durable authority disagrees with itself, and
+/// `verify` runs before anything is scheduled.
+fn compare_loadouts(tx: &Tx<'_>, mismatches: &mut Vec<ProjectionMismatch>) -> StoreResult<usize> {
+    const TABLE: &str = "worker_loadouts";
+    let mut count = 0;
+    for persisted in load::worker_loadouts(tx)? {
+        count += 1;
+        let row = persisted.spec.id.to_string();
+        let recorded = hex32(persisted.digest.as_bytes());
+        // `rehydrate` is the *only* path from persisted parts to a value that
+        // can admit a resume, and it re-derives the digest rather than trusting
+        // it. Calling it here is therefore the same check the resume path makes.
+        // `LoadoutIntegrityError` is `#[non_exhaustive]`: a future variant is a
+        // reason the row did not prove itself, and reporting it as a mismatch
+        // is the fail-closed answer for every one of them.
+        match CommittedLoadout::rehydrate(persisted) {
+            Ok(committed) => debug_assert_eq!(hex32(committed.digest().as_bytes()), recorded),
+            Err(LoadoutIntegrityError::DigestMismatch) => mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row,
+                column: "digest_hex",
+                stored: recorded,
+                replayed: "<does not match the safe fields beside it>".to_owned(),
+            }),
+            Err(_) => mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row,
+                column: "digest_hex",
+                stored: recorded,
+                replayed: "<failed its own integrity check>".to_owned(),
+            }),
+        }
+    }
+    Ok(count)
+}
+
+/// Checks that every managed configuration is still pinned.
+///
+/// Epoch 2 defines no releaser for a managed configuration: it is pinned by any
+/// loadout any session was ever launched under, and there is no operation that
+/// decides that relation has ended. So the rule is "always pinned, never a
+/// deletion instant", and asserting it here is what keeps it a checked property
+/// rather than an undocumented habit of the writer. The table's own CHECK
+/// constraints say the same thing; this is the half that would catch a future
+/// migration relaxing them without a releaser to go with it.
+fn compare_config_retention(
+    tx: &Tx<'_>,
+    mismatches: &mut Vec<ProjectionMismatch>,
+) -> StoreResult<()> {
+    const TABLE: &str = "managed_config_artifacts";
+    let mut statement = tx.conn().prepare(
+        "SELECT managed_config_artifact_id, retention_state, eligible_for_delete_at_ms
+           FROM managed_config_artifacts ORDER BY managed_config_artifact_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    let mut listed = Vec::new();
+    for row in rows {
+        listed.push(row?);
+    }
+    for (id, state, deletable_at) in listed {
+        let stored = decode_retention(&state, TABLE)?;
+        if stored != RetentionLabel::Pinned {
+            mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row: id.clone(),
+                column: "retention_state",
+                stored: encode_retention(stored).to_owned(),
+                replayed: encode_retention(RetentionLabel::Pinned).to_owned(),
+            });
+        }
+        if deletable_at.is_some() {
+            mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row: id,
+                column: "eligible_for_delete_at_ms",
+                stored: "set".to_owned(),
+                replayed: "null".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rebuilds every lineage edge from the ledger and compares it with the rows.
+///
+/// A genuine fold, unlike [`compare_loadouts`]: `session_lineage_recorded`
+/// carries the parent session, the parent turn and the relation in allowlisted
+/// metadata, and the child is the event's own `session` scope. Every field of
+/// `session_edges` is therefore ledger-derivable, so the comparison checks the
+/// projection rather than restating it. Remove any one of those three metadata
+/// fields and this stops being able to rebuild the edge at all.
+fn compare_lineage(
+    tx: &Tx<'_>,
+    events: &[LedgerEvent],
+    mismatches: &mut Vec<ProjectionMismatch>,
+) -> StoreResult<usize> {
+    const TABLE: &str = "session_edges";
+    let mut replayed: BTreeMap<SessionId, load::LineageEdge> = BTreeMap::new();
+    for event in events {
+        if event.kind != EventKind::SessionLineageRecorded {
+            continue;
+        }
+        let child = event.scope.session.ok_or_else(|| {
+            crate::error::CorruptValue::new(
+                "events",
+                "session_id",
+                CorruptReason::UnprovableEvidence,
+            )
+        })?;
+        replayed.insert(
+            child,
+            load::LineageEdge {
+                parent_session: event.metadata.id("parent_session")?,
+                child_session: child,
+                parent_turn: event.metadata.id("parent_turn")?,
+                relation: decode_session_relation(event.metadata.label("relation")?, "events")?,
+            },
+        );
+    }
+
+    let stored: BTreeMap<SessionId, load::LineageEdge> = load::session_edges(tx)?
+        .into_iter()
+        .map(|edge| (edge.child_session, edge))
+        .collect();
+
+    let mut count = 0;
+    for child in stored
+        .keys()
+        .chain(replayed.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+    {
+        count += 1;
+        let row = child.to_string();
+        match (stored.get(&child), replayed.get(&child)) {
+            (Some(left), Some(right)) => {
+                let mut record = |column, stored: String, expected: String| {
+                    if stored != expected {
+                        mismatches.push(ProjectionMismatch {
+                            table: TABLE,
+                            row: row.clone(),
+                            column,
+                            stored,
+                            replayed: expected,
+                        });
+                    }
+                };
+                record(
+                    "parent_session_id",
+                    id_text(left.parent_session),
+                    id_text(right.parent_session),
+                );
+                record(
+                    "parent_turn_id",
+                    id_text(left.parent_turn),
+                    id_text(right.parent_turn),
+                );
+                record(
+                    "relation_kind",
+                    encode_session_relation(left.relation).to_owned(),
+                    encode_session_relation(right.relation).to_owned(),
+                );
+            }
+            (left, right) => mismatches.push(ProjectionMismatch {
+                table: TABLE,
+                row,
+                column: "child_session_id",
+                stored: presence(left.is_some()).to_owned(),
+                replayed: presence(right.is_some()).to_owned(),
+            }),
+        }
+    }
+    Ok(count)
 }
 
 fn obligation_of(tx: &Tx<'_>, event: &LedgerEvent) -> StoreResult<Option<ObligationId>> {
