@@ -8,7 +8,7 @@
 //! [`docs/data-model.md`]: https://github.com/DivMode/commandgovernor/blob/main/docs/data-model.md
 
 use crate::error::{Outcome, Transition};
-use crate::id::{HealthConditionId, ObligationId, TaskId, TurnId};
+use crate::id::{ExternalAttemptId, HealthConditionId, ObligationId, TaskId, TurnId};
 use crate::time::Timestamp;
 
 /// The initial condition kinds from the data model.
@@ -33,6 +33,16 @@ pub enum HealthConditionKind {
     InputDetailUnavailable,
     /// A defer shape the provider cannot durably pause, such as multi-tool.
     WorkerDeferShapeUnsupported,
+    /// A consequential external effect has an unknown fate.
+    ///
+    /// Raised for an [`crate::effect::ExternalAttempt`] whose intent is durable
+    /// but whose outcome was never proven — the crash window
+    /// [`crate::effect::ExternalAttemptState::Ambiguous`] describes. It is
+    /// attention, exactly like every other kind here: it authorises no replay,
+    /// and resolving it is an explicit human or reconciliation decision. Its
+    /// scope carries [`HealthScope::external_attempt`] so the resolver can find
+    /// the exact recorded attempt, class, destination and idempotency key.
+    ReconciliationRequired,
 }
 
 impl HealthConditionKind {
@@ -49,6 +59,7 @@ impl HealthConditionKind {
             Self::RuntimeStateConflict => "runtime_state_conflict",
             Self::InputDetailUnavailable => "input_detail_unavailable",
             Self::WorkerDeferShapeUnsupported => "worker_defer_shape_unsupported",
+            Self::ReconciliationRequired => "reconciliation_required",
         }
     }
 }
@@ -63,6 +74,12 @@ pub enum HealthConditionState {
 }
 
 /// What a condition is about. All fields are optional and opaque.
+///
+/// Scope is part of a condition's identity: [`HealthLedger::raise`] deduplicates
+/// on `(kind, scope)`, so two ambiguous external attempts raise two conditions
+/// rather than collapsing into one. That is why
+/// [`HealthConditionKind::ReconciliationRequired`] needed its own scope field
+/// instead of borrowing the obligation one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HealthScope {
     /// Task the condition concerns, if any.
@@ -71,16 +88,28 @@ pub struct HealthScope {
     pub turn: Option<TurnId>,
     /// Obligation the condition concerns, if any.
     pub obligation: Option<ObligationId>,
+    /// Consequential external attempt the condition concerns, if any.
+    pub external_attempt: Option<ExternalAttemptId>,
 }
 
 impl HealthScope {
+    /// Scopes a condition to nothing in particular.
+    #[must_use]
+    pub const fn global() -> Self {
+        Self {
+            task: None,
+            turn: None,
+            obligation: None,
+            external_attempt: None,
+        }
+    }
+
     /// Scopes a condition to one obligation.
     #[must_use]
     pub const fn obligation(id: ObligationId) -> Self {
         Self {
-            task: None,
-            turn: None,
             obligation: Some(id),
+            ..Self::global()
         }
     }
 
@@ -88,9 +117,17 @@ impl HealthScope {
     #[must_use]
     pub const fn turn(id: TurnId) -> Self {
         Self {
-            task: None,
             turn: Some(id),
-            obligation: None,
+            ..Self::global()
+        }
+    }
+
+    /// Scopes a condition to one consequential external attempt.
+    #[must_use]
+    pub const fn external_attempt(id: ExternalAttemptId) -> Self {
+        Self {
+            external_attempt: Some(id),
+            ..Self::global()
         }
     }
 }
@@ -262,11 +299,47 @@ mod tests {
             HealthConditionKind::RuntimeStateConflict,
             HealthConditionKind::InputDetailUnavailable,
             HealthConditionKind::WorkerDeferShapeUnsupported,
+            HealthConditionKind::ReconciliationRequired,
         ];
         let mut codes: Vec<&str> = kinds.iter().map(|kind| kind.code()).collect();
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), kinds.len(), "codes must be unique");
+    }
+
+    #[test]
+    fn each_ambiguous_attempt_gets_its_own_reconciliation_condition() {
+        let first = HealthScope::external_attempt(ExternalAttemptId::from_uuid(Uuid::from_u128(1)));
+        let second = HealthScope::external_attempt(ExternalAttemptId::from_uuid(Uuid::from_u128(2)));
+        assert_ne!(first, second);
+
+        let ledger = HealthLedger::new()
+            .raise(
+                condition_id(1),
+                HealthConditionKind::ReconciliationRequired,
+                first,
+                at(1),
+            )
+            .unwrap()
+            .advanced()
+            .unwrap()
+            .raise(
+                condition_id(2),
+                HealthConditionKind::ReconciliationRequired,
+                second,
+                at(2),
+            )
+            .unwrap()
+            .advanced()
+            .unwrap();
+        assert_eq!(ledger.open().count(), 2);
+
+        // The attempt scope does not collide with an obligation scope.
+        assert!(!ledger.is_open(
+            HealthConditionKind::ReconciliationRequired,
+            obligation_scope()
+        ));
+        assert!(ledger.is_open(HealthConditionKind::ReconciliationRequired, first));
     }
 
     #[test]
