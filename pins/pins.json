@@ -1,0 +1,44 @@
+{
+  "$comment": [
+    "Command Governor pin record. This file is the single source of truth for",
+    "which Pi runtime the distribution targets; nothing else may hardcode a",
+    "version string. See docs/pi-distribution.md for the re-pin ritual.",
+    "",
+    "Third-party Pi package policy: Pi keeps no lockfile for the packages it",
+    "installs, and its `pinned` flag is satisfied by any git ref -- including a",
+    "mutable tag or branch. A pin recorded here is therefore only meaningful if",
+    "it is immutable, so `packages[]` entries MUST carry either an exact npm",
+    "version (`exactVersion`, e.g. \"0.62.0\") or a 40-character git commit SHA",
+    "(`resolvedSha`). A bare name, a branch, or a tag is not a pin and the",
+    "conformance suite rejects it."
+  ],
+  "schemaVersion": 1,
+  "pi": {
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "0.84.4",
+    "tag": "v0.84.4",
+    "repository": "https://github.com/earendil-works/pi",
+    "commit": "b79e4cc834970cca69daebffab7df1da7d1e52c4",
+    "commitNote": "v0.84.4 is a lightweight tag pointing directly at this commit, so the tag and the SHA are the same pin. Verified via GET /repos/earendil-works/pi/git/ref/tags/v0.84.4 -> object.type == \"commit\".",
+    "npmIntegrity": "sha512-jmOlrqUmvhh/siNWFRXjYLJzhKFIHNsAQaysRwzQPQFnPAaV/vhqHsLH/MBsIISA1Rjj7WTUFR3nJrpXoLx39w==",
+    "npmShasum": "3a2f04bfc5e463b4cfa36b174a586d11a0bdf9ad",
+    "engines": { "node": ">=22.19.0" },
+    "installRoot": "pins/pi-0.84.4",
+    "assets": [
+      {
+        "releaseName": "pi-coding-agent-install-package.json",
+        "path": "pins/pi-0.84.4/package.json",
+        "sha256": "053e1c9f456f4863098baa02379c83fa92ddd70c1c61616df48548924d0caf19"
+      },
+      {
+        "releaseName": "pi-coding-agent-install-package-lock.json",
+        "path": "pins/pi-0.84.4/package-lock.json",
+        "sha256": "a9f805a677f0860328059390b0f62adcc655299952f293127a8db8939818dff4"
+      }
+    ],
+    "reviewedAt": "2026-09-01",
+    "reviewedBy": "docs/research/2026-09-01-pi-substrate-review.md"
+  },
+  "packages": [],
+  "authorities": "harness/authorities.json"
+}

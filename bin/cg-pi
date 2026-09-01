@@ -1,0 +1,114 @@
+#!/bin/sh
+# cg-pi — launch the pinned Pi with the Command Governor loadout actually loaded.
+#
+# Three things happen here that cannot happen inside an extension, which is the
+# whole reason this wrapper exists rather than a shell alias.
+#
+# 1. THE VERSION PREFLIGHT IS FATAL HERE AND NOWHERE ELSE.
+#    harness/extensions/cg-version-guard.ts checks the same pin from inside the
+#    session, but `ctx.shutdown()` is deferred to idle in interactive and RPC
+#    modes and is a no-op in print mode. It is a request. Refusing before the
+#    process starts is the only refusal that is guaranteed.
+#
+# 2. `--approve` IS PASSED DELIBERATELY.
+#    Pi's non-interactive modes (-p, --mode json, --mode rpc) never prompt for
+#    project trust, and under the default `defaultProjectTrust: "ask"` they
+#    silently ignore every project-local resource: no extensions, no skills, no
+#    prompt templates, no project settings. Not an error -- an empty loadout and
+#    a successful exit. A distribution whose entire point is a curated
+#    project-level loadout cannot leave that to a default.
+#
+#    Read this narrowly. It is trust of THIS repository's own committed
+#    configuration, which is reviewed like any other code here. It is not a
+#    general trust bypass, it grants no permission Pi would otherwise withhold
+#    from the user, and it must not be extended to repositories whose `.pi`
+#    directory nobody has read. Pi has no sandbox: project trust governs which
+#    files are LOADED, not what the loaded code may do.
+#
+#    `--approve` is passed as the first argument, so a caller who supplies
+#    `--no-approve` afterwards is making a deliberate choice. (Which flag wins
+#    when both are present is Pi's business and was not characterized here.)
+#
+# 3. PI_SUBAGENTS_TEMP_ROOT IS POINTED SOMEWHERE DURABLE.
+#    The subagent package selected for Phase C hangs its async run status,
+#    results and artifacts off a temp root that defaults to `os.tmpdir()`, and
+#    that default is documented nowhere upstream -- not in its README, its docs,
+#    or its changelog. Left alone it means delegated work whose record dies on a
+#    reboot or a tmp sweep, which is the first line of the reliability contract.
+#    Setting it before the package is installed costs nothing and removes a
+#    footgun that would otherwise be found the hard way.
+#
+# Usage: bin/cg-pi [pi arguments...]
+set -eu
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
+pins_json="$repo_root/pins/pins.json"
+
+fail() {
+	printf 'cg-pi: %s\n' "$1" >&2
+	exit 1
+}
+
+[ -f "$pins_json" ] || fail "missing pin record: $pins_json"
+command -v node >/dev/null 2>&1 || fail 'node is not on PATH'
+
+read_pin() {
+	node -e '
+		const fs = require("node:fs");
+		const doc = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+		let value = doc;
+		for (const key of process.argv[2].split(".")) {
+			if (value === null || typeof value !== "object" || !(key in value)) process.exit(3);
+			value = value[key];
+		}
+		if (typeof value !== "string") process.exit(3);
+		process.stdout.write(value);
+	' "$pins_json" "$1"
+}
+
+pinned_version=$(read_pin pi.version) || fail 'pins.json has no string field pi.version'
+install_root_rel=$(read_pin pi.installRoot) || fail 'pins.json has no string field pi.installRoot'
+
+# --- resolve the interpreter ------------------------------------------------
+
+local_pi="$repo_root/$install_root_rel/node_modules/.bin/pi"
+pi_bin=''
+pi_origin=''
+
+if [ -x "$local_pi" ]; then
+	pi_bin="$local_pi"
+	pi_origin="repo-local pin ($install_root_rel)"
+elif command -v pi >/dev/null 2>&1; then
+	# A pi on PATH is accepted only when it is byte-for-byte the right version.
+	# This is a convenience for a machine that already manages pi declaratively,
+	# not a fallback that lets the pin slide.
+	pi_bin=$(command -v pi)
+	pi_origin="PATH ($pi_bin)"
+else
+	fail "no pinned pi found at $install_root_rel/node_modules/.bin/pi and no pi on PATH.
+  Run scripts/bootstrap.sh first."
+fi
+
+# --- preflight: the version, before anything else runs ----------------------
+
+found_version=$("$pi_bin" --version 2>/dev/null) || fail "$pi_bin --version failed"
+
+if [ "$found_version" != "$pinned_version" ]; then
+	fail "pi version drift.
+  required $pinned_version   (pins/pins.json)
+  found    $found_version    ($pi_origin)
+  Run scripts/bootstrap.sh to install the pinned runtime, or re-pin the
+  distribution deliberately -- see docs/pi-distribution.md."
+fi
+
+# --- durable state root for delegated work ----------------------------------
+
+cg_state_dir="${CG_STATE_DIR:-$HOME/.command-governor}"
+: "${PI_SUBAGENTS_TEMP_ROOT:=$cg_state_dir/subagents}"
+export PI_SUBAGENTS_TEMP_ROOT
+mkdir -p "$PI_SUBAGENTS_TEMP_ROOT" || fail "cannot create $PI_SUBAGENTS_TEMP_ROOT"
+
+# --- go ---------------------------------------------------------------------
+
+exec "$pi_bin" --approve "$@"
