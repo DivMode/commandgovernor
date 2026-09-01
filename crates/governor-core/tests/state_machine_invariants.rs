@@ -1492,6 +1492,27 @@ fn conflict_codes_are_stable_and_unique() {
         ConflictKind::IllegalInputTransition,
         ConflictKind::StaleCommandRevision,
         ConflictKind::InvalidDisposition,
+        // Durable-execution additions (`effect`, `mutation`, `lease`). They
+        // live in this one enumeration so no code can collide with an older
+        // one; the behaviour behind them is proven in
+        // `durable_execution_invariants.rs`.
+        ConflictKind::ExecuteRequiresDurableIntent,
+        ConflictKind::IllegalAttemptTransition,
+        ConflictKind::AttemptAlreadyCompleted,
+        ConflictKind::AttemptAlreadyDispatched,
+        ConflictKind::AttemptPermitMismatch,
+        ConflictKind::EffectNotProvenAbsent,
+        ConflictKind::RetryRequiresIdempotencyContract,
+        ConflictKind::MutationResultUncertain,
+        ConflictKind::MutationCommandMismatch,
+        ConflictKind::IllegalMutationTransition,
+        ConflictKind::MutationNotCompleted,
+        ConflictKind::StaleLeaseToken,
+        ConflictKind::StaleProcessIncarnation,
+        ConflictKind::StaleDaemonEpoch,
+        ConflictKind::ResourceAlreadyLeased,
+        ConflictKind::NoCurrentLease,
+        ConflictKind::IllegalLeaseTransition,
     ];
 
     let mut codes: Vec<&str> = kinds.iter().map(|kind| kind.code()).collect();

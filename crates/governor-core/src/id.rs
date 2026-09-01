@@ -193,6 +193,18 @@ id_families! {
     HealthCondition => HealthConditionId,
     /// A recorded verified-progress heartbeat.
     Progress => ProgressId,
+    /// A principal that issues mutations: a daemon, a CLI, an MCP connector.
+    ///
+    /// Semantic identity, deliberately not a process or a connection: a
+    /// transport reconnect keeps the same actor, which is what makes
+    /// `MutationCommandId` a stable retry identity in [`crate::mutation`].
+    Actor => ActorId,
+    /// One logical daemon/IPC/MCP write, stable across transport reconnect.
+    MutationCommand => MutationCommandId,
+    /// One attempt at one consequential external effect.
+    ExternalAttempt => ExternalAttemptId,
+    /// One lease over an exclusively-owned resource.
+    ResourceLease => ResourceLeaseId,
 }
 
 /// Injectable source of opaque identities.

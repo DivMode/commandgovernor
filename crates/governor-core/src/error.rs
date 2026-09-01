@@ -9,13 +9,18 @@
 //! 2. **Classifiable.** A caller (MCP tool, CLI, health projection) branches on
 //!    [`ConflictKind`], never on a formatted string.
 
+use crate::effect::{ExternalAttemptState, NoEffectClass};
 use crate::fence::{
-    AttemptNo, BindingGeneration, CommandRevision, DeliveryRevision, IncarnationGeneration,
-    ObligationVersion, SourceRef,
+    AttemptNo, BindingGeneration, CommandRevision, DaemonEpoch, DeliveryRevision,
+    IncarnationGeneration, ObligationVersion, SourceRef,
 };
 use crate::foreman_turn::ForemanTurnState;
-use crate::id::{ClaimId, ObligationId};
+use crate::id::{
+    ActorId, ClaimId, ExternalAttemptId, MutationCommandId, ObligationId, ResourceLeaseId,
+};
 use crate::input::InputRequestState;
+use crate::lease::{IncarnationMismatch, LeaseState};
+use crate::mutation::MutationCommandStatus;
 use crate::obligation::ObligationState;
 use crate::outbound::{AttemptState, DeliveryState};
 
@@ -77,6 +82,46 @@ pub enum ConflictKind {
     StaleCommandRevision,
     /// The proposed disposition cannot close this obligation.
     InvalidDisposition,
+
+    // -- consequential external effects ([`crate::effect`]) ------------------
+    /// An execution permit was requested without a durable-intent acceptance.
+    ExecuteRequiresDurableIntent,
+    /// The event is not legal from the external attempt's current state.
+    IllegalAttemptTransition,
+    /// The effect already landed; it must not be produced a second time.
+    AttemptAlreadyCompleted,
+    /// The dispatch fence is already committed, so a second permit is refused.
+    AttemptAlreadyDispatched,
+    /// A presented acceptance or permit belongs to a different attempt.
+    AttemptPermitMismatch,
+    /// `failed_before_effect` was claimed without proof of non-occurrence.
+    EffectNotProvenAbsent,
+    /// A retry was requested without the recorded contract and exact key.
+    RetryRequiresIdempotencyContract,
+
+    // -- mutation command receipts ([`crate::mutation`]) ---------------------
+    /// The command was received but no safe result is committed. Never replay.
+    MutationResultUncertain,
+    /// A command identity was presented for a different operation.
+    MutationCommandMismatch,
+    /// The event is not legal from the command's current journal status.
+    IllegalMutationTransition,
+    /// A receipt ACK was presented for a command with no committed result.
+    MutationNotCompleted,
+
+    // -- resource ownership ([`crate::lease`]) -------------------------------
+    /// The presented lease token is not the current lease's token.
+    StaleLeaseToken,
+    /// The presented process incarnation is not the one that holds the lease.
+    StaleProcessIncarnation,
+    /// The presented daemon epoch is older than the one that owns the record.
+    StaleDaemonEpoch,
+    /// A live lease already holds the resource exclusively.
+    ResourceAlreadyLeased,
+    /// The resource has no lease to renew or release.
+    NoCurrentLease,
+    /// The event is not legal from the lease's current state.
+    IllegalLeaseTransition,
 }
 
 impl ConflictKind {
@@ -109,6 +154,23 @@ impl ConflictKind {
             Self::IllegalInputTransition => "illegal_input_transition",
             Self::StaleCommandRevision => "stale_command_revision",
             Self::InvalidDisposition => "invalid_disposition",
+            Self::ExecuteRequiresDurableIntent => "execute_requires_durable_intent",
+            Self::IllegalAttemptTransition => "illegal_attempt_transition",
+            Self::AttemptAlreadyCompleted => "attempt_already_completed",
+            Self::AttemptAlreadyDispatched => "attempt_already_dispatched",
+            Self::AttemptPermitMismatch => "attempt_permit_mismatch",
+            Self::EffectNotProvenAbsent => "effect_not_proven_absent",
+            Self::RetryRequiresIdempotencyContract => "retry_requires_idempotency_contract",
+            Self::MutationResultUncertain => "mutation_result_uncertain",
+            Self::MutationCommandMismatch => "mutation_command_mismatch",
+            Self::IllegalMutationTransition => "illegal_mutation_transition",
+            Self::MutationNotCompleted => "mutation_not_completed",
+            Self::StaleLeaseToken => "stale_lease_token",
+            Self::StaleProcessIncarnation => "stale_process_incarnation",
+            Self::StaleDaemonEpoch => "stale_daemon_epoch",
+            Self::ResourceAlreadyLeased => "resource_already_leased",
+            Self::NoCurrentLease => "no_current_lease",
+            Self::IllegalLeaseTransition => "illegal_lease_transition",
         }
     }
 }
@@ -306,6 +368,157 @@ pub enum Conflict {
     /// The disposition cannot close this obligation.
     #[error("disposition is not valid for this obligation")]
     InvalidDisposition,
+
+    /// An execution permit was requested without a durable-intent acceptance.
+    ///
+    /// This is the type-level "intent before I/O" rule failing closed: the
+    /// intent row must be committed, and its acceptance presented, before any
+    /// consequential call is authorised.
+    #[error("attempt {attempt} has no accepted durable intent, so it cannot execute")]
+    ExecuteRequiresDurableIntent {
+        /// Attempt that was asked to execute.
+        attempt: ExternalAttemptId,
+    },
+
+    /// The event is not a legal external-attempt transition.
+    #[error("external attempt event {event} is not legal from state {from:?}")]
+    IllegalAttemptTransition {
+        /// State the attempt was in.
+        from: ExternalAttemptState,
+        /// Event class that was refused.
+        event: &'static str,
+    },
+
+    /// The effect already landed and must not be produced again.
+    #[error("attempt {attempt} already completed")]
+    AttemptAlreadyCompleted {
+        /// Attempt whose effect already landed.
+        attempt: ExternalAttemptId,
+    },
+
+    /// The dispatch fence is committed, so a second permit is refused.
+    #[error("attempt {attempt} already crossed the dispatch fence")]
+    AttemptAlreadyDispatched {
+        /// Attempt that already dispatched.
+        attempt: ExternalAttemptId,
+    },
+
+    /// A presented acceptance or permit belongs to a different attempt.
+    #[error("presented acceptance is for attempt {presented}, not {attempt}")]
+    AttemptPermitMismatch {
+        /// Attempt the acceptance vouches for.
+        presented: ExternalAttemptId,
+        /// Attempt it was presented against.
+        attempt: ExternalAttemptId,
+    },
+
+    /// `failed_before_effect` requires proof that the effect did not happen.
+    #[error(
+        "proof {proof:?} does not establish absence for attempt {attempt} (dispatched: {dispatched})"
+    )]
+    EffectNotProvenAbsent {
+        /// Attempt the claim was made about.
+        attempt: ExternalAttemptId,
+        /// Proof class that was offered.
+        proof: NoEffectClass,
+        /// Whether the dispatch fence had been committed.
+        dispatched: bool,
+    },
+
+    /// A retry was requested without the recorded contract and exact key.
+    ///
+    /// Also the answer for an ambiguous non-idempotent write, which has no
+    /// contract at all and therefore no admissible automatic retry.
+    #[error("attempt {attempt} may not be retried without its recorded idempotency contract")]
+    RetryRequiresIdempotencyContract {
+        /// Attempt whose fate is unknown.
+        attempt: ExternalAttemptId,
+    },
+
+    /// The command was received but no safe result is committed.
+    ///
+    /// The caller must surface the uncertainty. It must never redispatch.
+    #[error("mutation {command} for actor {actor} has no committed result")]
+    MutationResultUncertain {
+        /// Actor that issued the command.
+        actor: ActorId,
+        /// Command identity that is uncertain.
+        command: MutationCommandId,
+    },
+
+    /// A command identity was presented for a different operation.
+    #[error("mutation {command} for actor {actor} was minted for a different operation")]
+    MutationCommandMismatch {
+        /// Actor that was presented.
+        actor: ActorId,
+        /// Command identity that was presented.
+        command: MutationCommandId,
+    },
+
+    /// The event is not legal from the command's current journal status.
+    #[error("mutation event {event} is not legal from status {from:?}")]
+    IllegalMutationTransition {
+        /// Journal status the command was in.
+        from: MutationCommandStatus,
+        /// Event class that was refused.
+        event: &'static str,
+    },
+
+    /// A receipt ACK was presented for a command with no committed result.
+    #[error("mutation {command} for actor {actor} has no committed result to acknowledge")]
+    MutationNotCompleted {
+        /// Actor that was presented.
+        actor: ActorId,
+        /// Command identity that was presented.
+        command: MutationCommandId,
+    },
+
+    /// The presented lease token is not the current lease's token.
+    #[error("presented token is not the token of lease {lease}")]
+    StaleLeaseToken {
+        /// Lease that currently owns the resource.
+        lease: ResourceLeaseId,
+    },
+
+    /// The presented process incarnation is not the lease holder's.
+    #[error("lease {lease} is held by a different process incarnation ({mismatch:?})")]
+    StaleProcessIncarnation {
+        /// Lease that was addressed.
+        lease: ResourceLeaseId,
+        /// How the presented incarnation differed.
+        mismatch: IncarnationMismatch,
+    },
+
+    /// The presented daemon epoch is older than the record's.
+    #[error("stale daemon epoch {presented}, record is at epoch {current}")]
+    StaleDaemonEpoch {
+        /// Epoch the caller presented.
+        presented: DaemonEpoch,
+        /// Epoch the record was written under.
+        current: DaemonEpoch,
+    },
+
+    /// A live lease already holds the resource exclusively.
+    #[error("resource is already leased by {holder} under lease {lease}")]
+    ResourceAlreadyLeased {
+        /// Lease currently holding the resource.
+        lease: ResourceLeaseId,
+        /// Semantic holder of that lease.
+        holder: ActorId,
+    },
+
+    /// The resource has no lease to renew or release.
+    #[error("resource has no current lease")]
+    NoCurrentLease,
+
+    /// The event is not legal from the lease's current state.
+    #[error("lease event {event} is not legal from state {from:?}")]
+    IllegalLeaseTransition {
+        /// State the lease was in.
+        from: LeaseState,
+        /// Event class that was refused.
+        event: &'static str,
+    },
 }
 
 impl Conflict {
@@ -338,6 +551,25 @@ impl Conflict {
             Self::IllegalInputTransition { .. } => ConflictKind::IllegalInputTransition,
             Self::StaleCommandRevision { .. } => ConflictKind::StaleCommandRevision,
             Self::InvalidDisposition => ConflictKind::InvalidDisposition,
+            Self::ExecuteRequiresDurableIntent { .. } => ConflictKind::ExecuteRequiresDurableIntent,
+            Self::IllegalAttemptTransition { .. } => ConflictKind::IllegalAttemptTransition,
+            Self::AttemptAlreadyCompleted { .. } => ConflictKind::AttemptAlreadyCompleted,
+            Self::AttemptAlreadyDispatched { .. } => ConflictKind::AttemptAlreadyDispatched,
+            Self::AttemptPermitMismatch { .. } => ConflictKind::AttemptPermitMismatch,
+            Self::EffectNotProvenAbsent { .. } => ConflictKind::EffectNotProvenAbsent,
+            Self::RetryRequiresIdempotencyContract { .. } => {
+                ConflictKind::RetryRequiresIdempotencyContract
+            }
+            Self::MutationResultUncertain { .. } => ConflictKind::MutationResultUncertain,
+            Self::MutationCommandMismatch { .. } => ConflictKind::MutationCommandMismatch,
+            Self::IllegalMutationTransition { .. } => ConflictKind::IllegalMutationTransition,
+            Self::MutationNotCompleted { .. } => ConflictKind::MutationNotCompleted,
+            Self::StaleLeaseToken { .. } => ConflictKind::StaleLeaseToken,
+            Self::StaleProcessIncarnation { .. } => ConflictKind::StaleProcessIncarnation,
+            Self::StaleDaemonEpoch { .. } => ConflictKind::StaleDaemonEpoch,
+            Self::ResourceAlreadyLeased { .. } => ConflictKind::ResourceAlreadyLeased,
+            Self::NoCurrentLease => ConflictKind::NoCurrentLease,
+            Self::IllegalLeaseTransition { .. } => ConflictKind::IllegalLeaseTransition,
         }
     }
 

@@ -73,18 +73,49 @@
 //! `governor-store-sqlite` and `governor-daemon`. This crate supplies the rule;
 //! those crates supply the enforcement point at the I/O boundary.
 //!
+//! # Durable-execution primitives
+//!
+//! [`effect`], [`mutation`] and [`lease`] add the provider-independent half of
+//! the durable-execution patterns in
+//! [`docs/research/2026-08-31-durable-orchestration-pattern-review.md`]:
+//!
+//! | Rule | Enforced by |
+//! | --- | --- |
+//! | No consequential I/O before the intent is durable | [`effect::ExternalExecutionPermit`], reachable only from [`effect::DurableIntentAccepted`] |
+//! | Unknown fate never projects success | [`effect::ExternalAttemptState::Ambiguous`], terminal, with [`effect::ReconciliationRequired`] |
+//! | Retry needs a recorded contract, not a hopeful label | [`effect::ExternalAttempt::admit_retry`] |
+//! | An exact retry replays its recorded result | [`mutation::MutationJournal::resolve`] |
+//! | An uncertain retry never redispatches | [`mutation::MutationDisposition`] has no dispatch variant |
+//! | A receipt ACK only unlocks retention | [`mutation::ReceiptAck`] reaches no obligation transition |
+//! | A recycled process cannot impersonate a holder | [`lease::ProcessIncarnation`] |
+//! | A superseded daemon cannot mutate ownership | [`fence::DaemonEpoch`] |
+//!
+//! These are the *generic* forms. Browser wake delivery ([`outbound`],
+//! [`delivery`]) is the specialised, already-proven instance of the same
+//! external-effect discipline for the one transport V1 ships, and stays as it
+//! is; [`effect`] documents the correspondence.
+//!
+//! Their durable halves — the intent transaction, the
+//! `PRIMARY KEY(actor_id, command_id)` journal, kill-window failpoints and
+//! replay equivalence — belong to `governor-store-sqlite` and
+//! `governor-testkit`.
+//!
 //! [`docs/state-machines.md`]: https://github.com/DivMode/commandgovernor/blob/main/docs/state-machines.md
+//! [`docs/research/2026-08-31-durable-orchestration-pattern-review.md`]: https://github.com/DivMode/commandgovernor/blob/main/docs/research/2026-08-31-durable-orchestration-pattern-review.md
 
 pub mod artifact;
 pub mod binding;
 pub mod claim;
 pub mod delivery;
+pub mod effect;
 pub mod error;
 pub mod fence;
 pub mod foreman_turn;
 pub mod health;
 pub mod id;
 pub mod input;
+pub mod lease;
+pub mod mutation;
 pub mod obligation;
 pub mod outbound;
 pub mod random;

@@ -217,6 +217,14 @@ monotonic! {
 
     /// Daemon-assigned authoritative ordering of the durable event ledger.
     EventSeq(u64) starting 1,
+
+    /// Lifetime counter of the owning daemon process.
+    ///
+    /// Startup advances it once, and every mutation, external-effect intent and
+    /// resource lease records the epoch it was made under. A daemon from an
+    /// older epoch is superseded and cannot mutate current state, which is what
+    /// keeps a stranded process from acting on work the current daemon owns.
+    DaemonEpoch(u64) starting 1,
 }
 
 /// Pure index of source identities already applied.
