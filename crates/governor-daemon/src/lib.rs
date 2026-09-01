@@ -58,6 +58,7 @@ pub mod logging;
 pub mod ports;
 pub mod report;
 pub mod startup;
+pub mod worker;
 
 pub use doctor::{Check, Diagnosis, diagnose};
 pub use error::{DaemonError, LockDefect, PathDefect, ReclaimedLock};
@@ -67,3 +68,6 @@ pub use lock::{InstanceLock, LockStatus};
 pub use logging::{Fields, Level, SafeLog};
 pub use ports::{OsRandom, SystemClock, Uuidv7Ids, Uuidv7Keys, production_ports};
 pub use startup::{Daemon, DaemonConfig, ReadyReport};
+pub use worker::{
+    ResumeRefusal, ResumeWorkerRequest, WorkerSpawnAuthorization, authorize_worker_resume,
+};

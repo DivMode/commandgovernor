@@ -16,6 +16,7 @@
 //! | 4 | quarantine orphaned external effects | `OpenStore::start`, `RecoverStartup` |
 //! | 5 | replay/validate projections | `OpenStore::start`, `verify_projections` |
 //! | 8 | verify artifacts required by open obligations | [`verify_pinned_artifacts`] |
+//! | 8' | verify managed configurations bound to a session | [`verify_pinned_configs`] |
 //! | — | quarantine unreferenced artifacts | [`governor_artifacts::ArtifactStore::scan_orphans`] |
 //! | ready | bind the owner-local socket | [`crate::ipc::IpcServer::bind`] |
 //!
@@ -55,6 +56,11 @@
 //! `ArtifactStore::read` verifies the digest and length on every read and hands
 //! back **no bytes at all** on a mismatch (`docs/testing.md` ART-003, DB-008).
 //! Nothing can hand that result to a foreman for review.
+//!
+//! Step 8' repeats that judgement for the private managed configuration a bound
+//! session was launched under, and for the same reason: the session it names
+//! cannot be resumed anyway, because [`crate::worker::authorize_worker_resume`]
+//! re-reads and re-hashes those bytes before any permit exists.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -131,6 +137,20 @@ pub struct ReadyReport {
     pub artifacts_unverified: usize,
     /// Unreferenced artifact files moved aside by the orphan sweep.
     pub artifacts_quarantined: usize,
+    /// Managed configurations bound to a session that verified.
+    pub configs_verified: usize,
+    /// Managed configurations bound to a session that did **not** verify.
+    ///
+    /// Each one left an open `managed_config_missing` condition naming its
+    /// session. The daemon still serves: the damage is scoped to those
+    /// sessions, which cannot resume because the resume path re-reads and
+    /// re-hashes the bytes before any permit exists.
+    pub configs_unverified: usize,
+    /// Sessions whose durable ancestor walk did not terminate.
+    ///
+    /// Always zero for a graph this store built; a non-zero count means the
+    /// durable state came from a restore or a hand edit.
+    pub lineage_broken: usize,
 }
 
 /// A running Command Governor daemon.
@@ -255,22 +275,64 @@ impl Daemon {
             );
         }
 
+        // Step 8'. The same question for the private managed configurations a
+        // bound session was launched under. Scoped to the session for the same
+        // reason step 8 is scoped to the obligation, and not fatal: a session
+        // whose configuration will not verify cannot be resumed anyway, because
+        // `authorize_worker_resume` re-proves the bytes and refuses.
+        let configs = verify_pinned_configs(&store, &artifacts, clock.now(), &log)?;
+        if configs.unverified > 0 {
+            log.record(
+                clock.now(),
+                Level::Warn,
+                "configs.serving_with_unverified_pins",
+                &Fields::new()
+                    .count("unverified", configs.unverified)
+                    .count("verified", configs.verified),
+            );
+        }
+
+        // A lineage that cannot be walked to a root is not something this store
+        // can produce — the edge-insert transaction refuses a cycle before it
+        // commits — so a non-empty answer means the durable state came from
+        // somewhere else. Attention, scoped to the child session, not a refusal.
+        let mut broken_lineage = 0_usize;
+        for session in store.list_broken_lineage()? {
+            broken_lineage += 1;
+            log.record(
+                clock.now(),
+                Level::Error,
+                "lineage.walk_did_not_terminate",
+                &Fields::new().id("session", session),
+            );
+            store.raise_lineage_broken(governor_store_sqlite::SessionHealthRequest { session })?;
+        }
+
         // Unreferenced files are set aside, never deleted: a publication that
         // crashed and one that is merely slow look identical. The reference
         // set must be complete before any file is reclassified: a committed
         // row whose storage_ref does not parse would silently drop out of the
         // set and let the sweep quarantine bytes the ledger still references,
         // so an unparseable reference is a corrupt-value refusal instead.
+        //
+        // *Both* populations live in `objects/` and both must be in the set
+        // before the scan. A managed configuration missing from it would be
+        // quarantined on the next start, and every session bound to the loadout
+        // that embeds it would stop resuming — which is why this is built
+        // completely here rather than extended by whoever adds the next
+        // artifact family.
         let mut committed = BTreeSet::new();
         for artifact in store.list_committed_artifacts()? {
-            let key = StorageKey::new(artifact.storage_ref().clone()).map_err(|_| {
-                governor_store_sqlite::StoreError::from(governor_store_sqlite::CorruptValue::new(
-                    "result_artifacts",
-                    "storage_ref",
-                    governor_store_sqlite::CorruptReason::MalformedIdentity,
-                ))
-            })?;
-            committed.insert(key);
+            committed.insert(reference_key(
+                artifact.storage_ref().clone(),
+                "result_artifacts",
+            )?);
+        }
+        for config in store.list_committed_managed_configs()? {
+            committed.insert(reference_key(
+                config.storage_ref.clone(),
+                "managed_config_artifacts",
+            )?);
         }
         let scan = artifacts.scan_orphans(&committed, clock.now())?;
         if !scan.quarantined.is_empty() {
@@ -312,6 +374,9 @@ impl Daemon {
             artifacts_verified: pinned.verified,
             artifacts_unverified: pinned.unverified,
             artifacts_quarantined: scan.quarantined.len(),
+            configs_verified: configs.verified,
+            configs_unverified: configs.unverified,
+            lineage_broken: broken_lineage,
         };
 
         log.record(
@@ -321,7 +386,10 @@ impl Daemon {
             &Fields::new()
                 .count("artifacts_verified", ready.artifacts_verified)
                 .count("artifacts_unverified", ready.artifacts_unverified)
-                .count("artifacts_quarantined", ready.artifacts_quarantined),
+                .count("artifacts_quarantined", ready.artifacts_quarantined)
+                .count("configs_verified", ready.configs_verified)
+                .count("configs_unverified", ready.configs_unverified)
+                .count("lineage_broken", ready.lineage_broken),
         );
 
         Ok(Self {
@@ -438,9 +506,20 @@ impl Daemon {
                 "recovery.ambiguous_attempts={}",
                 self.ready.recovery.ambiguous_attempts
             ),
+            format!(
+                "store.projections.loadouts={}",
+                self.ready.projections.loadouts
+            ),
+            format!(
+                "store.projections.lineage_edges={}",
+                self.ready.projections.lineage_edges
+            ),
             format!("artifacts.verified={}", self.ready.artifacts_verified),
             format!("artifacts.unverified={}", self.ready.artifacts_unverified),
             format!("artifacts.quarantined={}", self.ready.artifacts_quarantined),
+            format!("configs.verified={}", self.ready.configs_verified),
+            format!("configs.unverified={}", self.ready.configs_unverified),
+            format!("lineage.broken={}", self.ready.lineage_broken),
         ];
 
         match self.store.list_open_obligations() {
@@ -473,6 +552,9 @@ impl Daemon {
             ),
             format!("artifacts.verified={}", self.ready.artifacts_verified),
             format!("artifacts.unverified={}", self.ready.artifacts_unverified),
+            format!("configs.verified={}", self.ready.configs_verified),
+            format!("configs.unverified={}", self.ready.configs_unverified),
+            format!("lineage.broken={}", self.ready.lineage_broken),
         ];
         // Attention the *running* authority holds, next to the offline
         // diagnosis the same command already renders from the database. An
@@ -592,6 +674,112 @@ fn verify_pinned_artifacts(
     Ok(PinnedArtifacts {
         verified,
         unverified: missing,
+    })
+}
+
+/// Step 8': prove the bytes behind every bound session's managed configuration.
+///
+/// Modelled on [`verify_pinned_artifacts`] and scoped the same way, for the
+/// same reason: an unverifiable configuration is damage to *one session*, and
+/// refusing the whole daemon over it would take every unrelated session down
+/// with it. The session it names cannot be resumed regardless, because
+/// [`crate::worker::authorize_worker_resume`] re-reads and re-hashes the bytes
+/// and refuses before any permit exists.
+///
+/// The launch loadout is re-proved here too. Replay already refuses a row that
+/// disagrees with its own digest — that fails the whole open — so reaching a
+/// refusal here means the loadout's *parts* are internally consistent but
+/// `rehydrate` still rejected them, which is a fail-closed answer either way.
+///
+/// # Errors
+///
+/// A [`DaemonError::Store`] when the durable condition cannot be recorded: an
+/// unrecorded finding is an invisible one.
+fn verify_pinned_configs(
+    store: &Store,
+    artifacts: &ArtifactStore,
+    now: Timestamp,
+    log: &SafeLog,
+) -> Result<PinnedArtifacts, DaemonError> {
+    let bound = store.list_bound_session_loadouts()?;
+    let mut verified = 0_usize;
+    let mut missing = 0_usize;
+
+    for record in &bound {
+        let request = governor_store_sqlite::SessionHealthRequest {
+            session: record.session,
+        };
+        match read_config(artifacts, record) {
+            Ok(()) => {
+                verified += 1;
+                // Idempotent: resolving a condition that is not open is a
+                // no-op, so this needs no prior read.
+                store.resolve_managed_config_missing(request)?;
+            }
+            Err(error) => {
+                missing += 1;
+                log.record(
+                    now,
+                    Level::Error,
+                    "configs.verification_failed",
+                    &Fields::new()
+                        .id("session", record.session)
+                        .id("config", record.config.id)
+                        .class("reason", artifact_failure_class(&error)),
+                );
+                store.raise_managed_config_missing(request)?;
+            }
+        }
+        match governor_core::session::CommittedLoadout::rehydrate(record.persisted.clone()) {
+            Ok(_) => store.resolve_loadout_unverifiable(request)?,
+            Err(_) => {
+                log.record(
+                    now,
+                    Level::Error,
+                    "loadout.verification_failed",
+                    &Fields::new().id("session", record.session),
+                );
+                store.raise_loadout_unverifiable(request)?
+            }
+        };
+    }
+
+    Ok(PinnedArtifacts {
+        verified,
+        unverified: missing,
+    })
+}
+
+/// Reads and verifies one managed configuration's bytes, discarding them.
+fn read_config(
+    artifacts: &ArtifactStore,
+    record: &governor_store_sqlite::SessionLoadoutRecord,
+) -> Result<(), governor_artifacts::ArtifactError> {
+    let key = StorageKey::new(record.config.storage_ref.clone())?;
+    artifacts.read_verified(
+        &key,
+        governor_core::artifact::ArtifactDigest::from_bytes(*record.config.digest.as_bytes()),
+        record.config.byte_len,
+    )?;
+    Ok(())
+}
+
+/// Re-validates one committed storage reference for the orphan sweep.
+///
+/// A reference that does not parse is a corrupt-value refusal, never a row that
+/// quietly drops out of the reference set: the sweep would then quarantine
+/// bytes the ledger still requires.
+fn reference_key(
+    storage_ref: governor_core::fence::SafeToken,
+    table: &'static str,
+) -> Result<StorageKey, DaemonError> {
+    StorageKey::new(storage_ref).map_err(|_| {
+        governor_store_sqlite::StoreError::from(governor_store_sqlite::CorruptValue::new(
+            table,
+            "storage_ref",
+            governor_store_sqlite::CorruptReason::MalformedIdentity,
+        ))
+        .into()
     })
 }
 
