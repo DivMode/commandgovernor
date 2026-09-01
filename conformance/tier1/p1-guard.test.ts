@@ -1,20 +1,35 @@
 /**
  * P1-GUARD — the version guard's behaviour, driven directly.
  *
- * The guard is exercised here against a fake context rather than through a live
+ * The guard is exercised here against real doubles rather than through a live
  * session, because the interesting cases are the ones a live session cannot
  * reach: a drifted runtime, and a runtime that cannot identify itself. Both are
  * states the pinned binary will never be in, so a test that only ran real
  * sessions would leave the entire refusal path unexercised.
+ *
+ * The doubles are typed, not cast. `GuardRegistrar` and `GuardContext` are the
+ * narrowed surfaces the guard declares, and the extension module carries a
+ * compile-time proof that Pi's real `ExtensionAPI` is assignable to the former
+ * -- so the doubles cannot drift into impersonating an interface Pi does not
+ * actually pass. A cast here would have silenced the compiler on exactly the
+ * question these tests exist to answer.
  */
 
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import {
+	VERSION,
+	type SessionStartEvent,
+	type ToolCallEventResult,
+} from "@earendil-works/pi-coding-agent";
 
-import guardFactory, {
+import guard, {
 	applyVerdict,
+	createVersionGuard,
 	defaultPinsJsonPath,
 	describeVerdict,
 	evaluateVersion,
@@ -25,15 +40,21 @@ import guardFactory, {
 	type GuardContext,
 	type GuardVerdict,
 } from "../../harness/extensions/cg-version-guard.ts";
-import { readPins } from "../lib/repo.ts";
+import { PINS_JSON, readPins } from "../lib/repo.ts";
+import { readFileSync } from "node:fs";
 
 const PINNED = readPins().pi.version;
 
-/** A context that records what the guard did to it. */
-function fakeContext(hasUI: boolean): GuardContext & {
-	notified: { message: string; type?: string }[];
-	shutdowns: number;
-} {
+// ---------------------------------------------------------------------------
+// Doubles
+// ---------------------------------------------------------------------------
+
+interface RecordingContext extends GuardContext {
+	readonly notified: readonly { message: string; type?: string }[];
+	readonly shutdowns: number;
+}
+
+function recordingContext(hasUI: boolean): RecordingContext {
 	const notified: { message: string; type?: string }[] = [];
 	let shutdowns = 0;
 	return {
@@ -52,36 +73,70 @@ function fakeContext(hasUI: boolean): GuardContext & {
 		get shutdowns() {
 			return shutdowns;
 		},
-	} as GuardContext & {
-		notified: { message: string; type?: string }[];
-		shutdowns: number;
 	};
 }
 
-/** A minimal ExtensionAPI double that captures registrations. */
-function fakeExtensionApi() {
-	const handlers = new Map<string, ((event: unknown, ctx: unknown) => unknown)[]>();
-	const commands = new Map<string, { description?: string; handler: unknown }>();
-	return {
-		api: {
-			on(event: string, handler: (e: unknown, c: unknown) => unknown) {
-				const list = handlers.get(event) ?? [];
-				list.push(handler);
-				handlers.set(event, list);
-			},
-			registerCommand(name: string, options: { description?: string; handler: unknown }) {
-				commands.set(name, options);
-			},
-		},
-		handlers,
-		commands,
-	};
+type SessionStartHandler = (
+	event: SessionStartEvent,
+	ctx: GuardContext,
+) => Promise<void>;
+type ToolCallHandler = () => Promise<ToolCallEventResult | undefined>;
+interface CommandOptions {
+	description: string;
+	handler: (args: string, ctx: GuardContext) => Promise<void>;
 }
+
+/**
+ * A `GuardRegistrar` that records what the factory registered.
+ *
+ * Written with real overload signatures rather than a permissive catch-all, so
+ * registering an event the guard is not supposed to touch would not typecheck.
+ */
+class RecordingRegistrar {
+	sessionStart: SessionStartHandler | undefined;
+	toolCall: ToolCallHandler | undefined;
+	readonly commands = new Map<string, CommandOptions>();
+
+	on(event: "session_start", handler: SessionStartHandler): void;
+	on(event: "tool_call", handler: ToolCallHandler): void;
+	on(
+		event: "session_start" | "tool_call",
+		handler: SessionStartHandler | ToolCallHandler,
+	): void {
+		if (event === "session_start") {
+			this.sessionStart = handler as SessionStartHandler;
+		} else {
+			this.toolCall = handler as ToolCallHandler;
+		}
+	}
+
+	registerCommand(name: string, options: CommandOptions): void {
+		this.commands.set(name, options);
+	}
+}
+
+/** A `session_start` event carrying only what the guard reads from it: nothing. */
+function sessionStartEvent(): SessionStartEvent {
+	return { type: "session_start", reason: "startup" } satisfies SessionStartEvent;
+}
+
+/** Write a pin record with a fabricated version into a throwaway directory. */
+function fabricatedPins(version: string): { path: string; dispose: () => void } {
+	const dir = mkdtempSync(join(tmpdir(), "cg-guard-pins-"));
+	const doc = JSON.parse(readFileSync(PINS_JSON, "utf8")) as {
+		pi: Record<string, unknown>;
+	};
+	doc.pi = { ...doc.pi, version };
+	const path = join(dir, "pins.json");
+	writeFileSync(path, JSON.stringify(doc, null, 2));
+	return { path, dispose: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+// ---------------------------------------------------------------------------
 
 describe("P1-GUARD: version comparison", () => {
 	it("accepts the exact pinned version", () => {
-		const verdict = evaluateVersion(PINNED, PINNED);
-		assert.equal(verdict.ok, true);
+		assert.equal(evaluateVersion(PINNED, PINNED).ok, true);
 	});
 
 	it("refuses a drifted version with a stable code", () => {
@@ -105,11 +160,6 @@ describe("P1-GUARD: version comparison", () => {
 		const verdict = evaluateVersion(UNKNOWN_VERSION, PINNED);
 		assert.equal(verdict.ok, false);
 		assert.equal(verdict.ok === false && verdict.code, "runtime-version-unknown");
-		assert.notEqual(
-			verdict.ok === false && verdict.code,
-			"runtime-version-drift",
-			"unknown and drifted must be distinguishable",
-		);
 	});
 
 	it("reads the required version from pins.json and nowhere else", () => {
@@ -125,15 +175,15 @@ describe("P1-GUARD: version comparison", () => {
 
 	it("agrees with the runtime it is actually running against", () => {
 		// Not a tautology: VERSION comes from the pinned pi package that
-		// node_modules/@earendil-works links to, and PINNED comes from
-		// pins.json. If bootstrap linked a different tree, this fails.
+		// node_modules links to, and PINNED comes from pins.json. If bootstrap
+		// linked a different tree, this fails.
 		assert.equal(evaluateVersion(VERSION, PINNED).ok, true);
 	});
 });
 
 describe("P1-GUARD: what a refusal does", () => {
 	it("reports to the UI and asks the session to stop when there is a UI", () => {
-		const ctx = fakeContext(true);
+		const ctx = recordingContext(true);
 		applyVerdict(evaluateVersion("0.84.3", PINNED), ctx);
 		assert.equal(ctx.shutdowns, 1);
 		assert.equal(ctx.notified.length, 1);
@@ -141,59 +191,116 @@ describe("P1-GUARD: what a refusal does", () => {
 	});
 
 	it("still asks the session to stop when there is no UI", () => {
-		// json and print modes have no UI, and their ui methods are no-ops. A
+		// json and print modes have no UI and their ui methods are no-ops. A
 		// guard that only notified would be silent in exactly the modes an
 		// orchestrator uses.
-		const ctx = fakeContext(false);
+		const ctx = recordingContext(false);
 		applyVerdict(evaluateVersion("0.84.3", PINNED), ctx);
 		assert.equal(ctx.shutdowns, 1);
 		assert.equal(ctx.notified.length, 0);
 	});
 
 	it("does nothing at all when the version matches", () => {
-		const ctx = fakeContext(true);
+		const ctx = recordingContext(true);
 		applyVerdict(evaluateVersion(PINNED, PINNED), ctx);
 		assert.equal(ctx.shutdowns, 0);
 		assert.equal(ctx.notified.length, 0);
 	});
 });
 
-describe("P1-GUARD: registration and tool blocking", () => {
+describe("P1-GUARD: registration", () => {
 	it("registers in the factory without starting anything in the background", () => {
-		const { api, handlers, commands } = fakeExtensionApi();
-		guardFactory(api as never);
+		const registrar = new RecordingRegistrar();
+		guard(registrar);
 
-		assert.ok(handlers.has("session_start"), "the check must run in session_start");
-		assert.ok(handlers.has("tool_call"), "a print-mode session must still be blocked");
-		assert.ok(commands.has(GUARD_COMMAND_NAME));
-		assert.equal(commands.get(GUARD_COMMAND_NAME)?.description, GUARD_COMMAND_DESCRIPTION);
+		assert.ok(registrar.sessionStart, "the check must run in session_start");
+		assert.ok(registrar.toolCall, "a print-mode session must still be blocked");
+		assert.equal(
+			registrar.commands.get(GUARD_COMMAND_NAME)?.description,
+			GUARD_COMMAND_DESCRIPTION,
+		);
 	});
+});
 
-	it("blocks tool calls before the check has run", async () => {
+describe("P1-GUARD: tool blocking", () => {
+	it("blocks before the check has run", async () => {
 		// ctx.shutdown() is a no-op in print mode, so this is the only thing
 		// standing between an unverified runtime and real side effects.
-		const { api, handlers } = fakeExtensionApi();
-		guardFactory(api as never);
+		const registrar = new RecordingRegistrar();
+		guard(registrar);
 
-		const result = (await handlers.get("tool_call")?.[0]({}, {})) as
-			| { block?: boolean; reason?: string }
-			| undefined;
+		const result = await registrar.toolCall?.();
 		assert.equal(result?.block, true);
 		assert.match(result?.reason ?? "", /unverified/);
 	});
 
-	it("blocks tool calls after a refusal, and allows them after a pass", async () => {
-		const { api, handlers } = fakeExtensionApi();
-		guardFactory(api as never);
+	it("allows tools once the pinned runtime is confirmed", async () => {
+		const registrar = new RecordingRegistrar();
+		guard(registrar);
 
-		const sessionStart = handlers.get("session_start")?.[0];
-		assert.ok(sessionStart);
+		await registrar.sessionStart?.(sessionStartEvent(), recordingContext(false));
+		assert.equal(
+			await registrar.toolCall?.(),
+			undefined,
+			"a matching runtime must not block tools",
+		);
+	});
 
-		// The real session_start reads the real pins.json against the real
-		// VERSION, which currently matches, so this drives the passing path.
-		await sessionStart({}, fakeContext(false));
-		const allowed = await handlers.get("tool_call")?.[0]({}, {});
-		assert.equal(allowed, undefined, "a matching runtime must not block tools");
+	it("blocks every tool call after a drift refusal", async () => {
+		// The branch that actually protects a print-mode session: shutdown is
+		// ignored there, so the tool gate is the whole defence. Driving it needs
+		// a pin record that disagrees with the running runtime, which is what
+		// the injectable pins path is for.
+		const { path, dispose } = fabricatedPins("0.99.99");
+		try {
+			const registrar = new RecordingRegistrar();
+			createVersionGuard(path)(registrar);
+
+			const ctx = recordingContext(true);
+			await registrar.sessionStart?.(sessionStartEvent(), ctx);
+
+			assert.equal(ctx.shutdowns, 1, "a drifted runtime must be asked to stop");
+			assert.equal(ctx.notified.length, 1);
+
+			const result = await registrar.toolCall?.();
+			assert.equal(result?.block, true, "a drifted runtime must block tools");
+			assert.match(result?.reason ?? "", /runtime-version-drift|requires pi 0\.99\.99/);
+			assert.match(result?.reason ?? "", /blocked/);
+		} finally {
+			dispose();
+		}
+	});
+
+	it("blocks every tool call when the pin record cannot be read", async () => {
+		// Fail closed: a guard that cannot find its pin does not know whether the
+		// runtime is right, and "I could not check" must not be treated as "fine".
+		const registrar = new RecordingRegistrar();
+		createVersionGuard("/nonexistent/pins.json")(registrar);
+
+		const ctx = recordingContext(false);
+		await registrar.sessionStart?.(sessionStartEvent(), ctx);
+
+		assert.equal(ctx.shutdowns, 1);
+		const result = await registrar.toolCall?.();
+		assert.equal(result?.block, true);
+		assert.match(result?.reason ?? "", /cannot read its own pin record/);
+	});
+
+	it("carries the refusal reason into the block, not a generic message", async () => {
+		// The reason reaches the model as the tool-call rejection. A generic
+		// "blocked" would leave an operator with no idea which runtime was wrong.
+		const { path, dispose } = fabricatedPins("0.77.7");
+		try {
+			const registrar = new RecordingRegistrar();
+			createVersionGuard(path)(registrar);
+			await registrar.sessionStart?.(sessionStartEvent(), recordingContext(false));
+
+			const result = await registrar.toolCall?.();
+			assert.ok(result?.reason?.includes("0.77.7"), result?.reason);
+			assert.ok(result?.reason?.includes(VERSION), result?.reason);
+		} finally {
+			dispose();
+		}
 	});
 });
 
@@ -208,5 +315,23 @@ describe("P1-GUARD: operator readout", () => {
 			message: "drifted",
 		};
 		assert.match(describeVerdict(refusal, "0.84.3"), /runtime-version-drift/);
+	});
+
+	it("reports the refusal through the command as well", async () => {
+		const { path, dispose } = fabricatedPins("0.99.99");
+		try {
+			const registrar = new RecordingRegistrar();
+			createVersionGuard(path)(registrar);
+			await registrar.sessionStart?.(sessionStartEvent(), recordingContext(false));
+
+			const ctx = recordingContext(true);
+			await registrar.commands.get(GUARD_COMMAND_NAME)?.handler("", ctx);
+
+			assert.equal(ctx.notified.length, 1);
+			assert.equal(ctx.notified[0].type, "error");
+			assert.match(ctx.notified[0].message, /runtime-version-drift/);
+		} finally {
+			dispose();
+		}
 	});
 });

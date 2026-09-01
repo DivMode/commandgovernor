@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import {
 	VERSION,
 	type ExtensionAPI,
-	type ExtensionContext,
+	type SessionStartEvent,
 	type ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 
@@ -186,61 +186,113 @@ export function describeVerdict(verdict: GuardVerdict | null, running: string): 
 	return `[cg-version-guard] ${verdict.code}: ${verdict.message}`;
 }
 
-export default function cgVersionGuard(pi: ExtensionAPI): void {
-	// No background resources here: no timers, no watchers, no sockets. The
-	// factory may run in an invocation that never starts a session.
-	let verdict: GuardVerdict | null = null;
-
-	// Registering a command is not a background resource, so the factory is the
-	// right place for it. It also gives the distribution something Pi otherwise
-	// does not: an observable statement of the resolved runtime. Pi 0.84.4
-	// prints no extension manifest at startup in print, json or rpc mode -- not
-	// even under `--verbose` -- and exposes no API for enumerating loaded
-	// extensions. `get_commands` over RPC does report the resolved command
-	// inventory with its source path and scope, so registering here is what
-	// lets the conformance suite read the loaded configuration back from the
-	// runtime rather than assuming the settings file was honoured.
-	pi.registerCommand(GUARD_COMMAND_NAME, {
-		description: GUARD_COMMAND_DESCRIPTION,
-		handler: async (_args, ctx) => {
-			const line = describeVerdict(verdict, VERSION);
-			console.log(line);
-			if (ctx.hasUI) {
-				ctx.ui.notify(line, verdict === null || verdict.ok ? "info" : "error");
-			}
+/**
+ * The registration surface this guard uses, and nothing more.
+ *
+ * Narrowed for the same reason as {@link GuardContext}: it lets the conformance
+ * suite hand the factory a real, fully typed double instead of casting a stub
+ * to `ExtensionAPI`. A cast there would silence the compiler on exactly the
+ * question the test exists to answer.
+ *
+ * {@link ExtensionApiSatisfiesRegistrar} below proves at compile time that Pi's
+ * real `ExtensionAPI` is assignable to this, so narrowing cannot drift away
+ * from the interface Pi actually passes.
+ */
+export interface GuardRegistrar {
+	on(
+		event: "session_start",
+		handler: (event: SessionStartEvent, ctx: GuardContext) => Promise<void>,
+	): void;
+	on(
+		event: "tool_call",
+		handler: () => Promise<ToolCallEventResult | undefined>,
+	): void;
+	registerCommand(
+		name: string,
+		options: {
+			description: string;
+			handler: (args: string, ctx: GuardContext) => Promise<void>;
 		},
-	});
-
-	pi.on("session_start", async (_event, ctx: ExtensionContext) => {
-		try {
-			const required = readPinnedVersion(defaultPinsJsonPath());
-			verdict = evaluateVersion(VERSION, required);
-		} catch (error) {
-			verdict = {
-				ok: false,
-				code: "pin-unreadable",
-				message:
-					`Command Governor cannot read its own pin record, so it cannot tell ` +
-					`whether pi ${VERSION} is the pinned runtime. ` +
-					`${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
-		applyVerdict(verdict, ctx);
-	});
-
-	// Registered unconditionally, because `ctx.shutdown()` cannot be relied on
-	// to stop anything. `verdict === null` means session_start has not run or
-	// did not complete, and that is a refusal too — the guard fails closed.
-	pi.on("tool_call", async (): Promise<ToolCallEventResult | undefined> => {
-		if (verdict === null) {
-			return {
-				block: true,
-				reason:
-					"[cg-version-guard] blocked: the pi version check has not completed, " +
-					"so the runtime is unverified.",
-			};
-		}
-		if (verdict.ok) return undefined;
-		return { block: true, reason: `[cg-version-guard] blocked: ${verdict.message}` };
-	});
+	): void;
 }
+
+/** Compile-time proof that {@link GuardRegistrar} is a subset of the real API. */
+type AssertAssignable<A extends B, B> = A extends B ? true : never;
+export type ExtensionApiSatisfiesRegistrar = AssertAssignable<
+	ExtensionAPI,
+	GuardRegistrar
+>;
+
+/**
+ * Build the guard around a specific pin record.
+ *
+ * The path is a parameter so the conformance suite can drive the refusal
+ * branches -- drifted version, unreadable pin -- which the real pinned runtime
+ * will never reach on its own. Reading the pin at `session_start` rather than
+ * here keeps the factory free of I/O that could fail in `pi list`.
+ */
+export function createVersionGuard(
+	pinsJsonPath: string = defaultPinsJsonPath(),
+): (pi: GuardRegistrar) => void {
+	return function cgVersionGuard(pi: GuardRegistrar): void {
+		// No background resources here: no timers, no watchers, no sockets. The
+		// factory may run in an invocation that never starts a session.
+		let verdict: GuardVerdict | null = null;
+
+		// Registering a command is not a background resource, so the factory is the
+		// right place for it. It also gives the distribution something Pi otherwise
+		// does not: an observable statement of the resolved runtime. Pi 0.84.4
+		// prints no extension manifest at startup in print, json or rpc mode -- not
+		// even under `--verbose` -- and exposes no API for enumerating loaded
+		// extensions. `get_commands` over RPC does report the resolved command
+		// inventory with its source path and scope, so registering here is what
+		// lets the conformance suite read the loaded configuration back from the
+		// runtime rather than assuming the settings file was honoured.
+		pi.registerCommand(GUARD_COMMAND_NAME, {
+			description: GUARD_COMMAND_DESCRIPTION,
+			handler: async (_args, ctx) => {
+				const line = describeVerdict(verdict, VERSION);
+				console.log(line);
+				if (ctx.hasUI) {
+					ctx.ui.notify(line, verdict === null || verdict.ok ? "info" : "error");
+				}
+			},
+		});
+
+		pi.on("session_start", async (_event, ctx) => {
+			try {
+				const required = readPinnedVersion(pinsJsonPath);
+				verdict = evaluateVersion(VERSION, required);
+			} catch (error) {
+				verdict = {
+					ok: false,
+					code: "pin-unreadable",
+					message:
+						`Command Governor cannot read its own pin record, so it cannot tell ` +
+						`whether pi ${VERSION} is the pinned runtime. ` +
+						`${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
+			applyVerdict(verdict, ctx);
+		});
+
+		// Registered unconditionally, because `ctx.shutdown()` cannot be relied on
+		// to stop anything. `verdict === null` means session_start has not run or
+		// did not complete, and that is a refusal too — the guard fails closed.
+		pi.on("tool_call", async (): Promise<ToolCallEventResult | undefined> => {
+			if (verdict === null) {
+				return {
+					block: true,
+					reason:
+						"[cg-version-guard] blocked: the pi version check has not completed, " +
+						"so the runtime is unverified.",
+				};
+			}
+			if (verdict.ok) return undefined;
+			return { block: true, reason: `[cg-version-guard] blocked: ${verdict.message}` };
+		});
+	};
+}
+
+/** What Pi loads: the guard bound to this distribution's own pin record. */
+export default createVersionGuard();
