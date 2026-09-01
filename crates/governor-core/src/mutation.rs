@@ -57,6 +57,7 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
+use crate::digest::absorb;
 use crate::error::{Conflict, ConflictKind, Outcome, Transition};
 use crate::fence::{DaemonEpoch, SafeToken};
 use crate::id::{ActorId, MutationCommandId};
@@ -118,12 +119,6 @@ impl MutationFingerprint {
     /// no two distinct parameter lists can encode to the same byte string.
     #[must_use]
     pub fn derive(kind: &MutationCommandKind, parameters: &[&SafeToken]) -> Self {
-        fn absorb(hasher: &mut Sha256, bytes: &[u8]) {
-            let len = u64::try_from(bytes.len()).expect("bounded token length fits in u64");
-            hasher.update(len.to_be_bytes());
-            hasher.update(bytes);
-        }
-
         let mut hasher = Sha256::new();
         absorb(&mut hasher, MUTATION_FINGERPRINT_DOMAIN.as_bytes());
         absorb(&mut hasher, kind.as_token().as_str().as_bytes());

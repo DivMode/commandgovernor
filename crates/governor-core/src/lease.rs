@@ -39,6 +39,7 @@ use core::fmt;
 
 use sha2::{Digest, Sha256};
 
+use crate::digest::absorb;
 use crate::error::{Conflict, Outcome, Transition};
 use crate::fence::{DaemonEpoch, SafeToken};
 use crate::id::{ActorId, ResourceLeaseId};
@@ -77,14 +78,9 @@ impl ResourceIdentity {
     #[must_use]
     pub fn canonical(namespace: ResourceNamespace, canonical_name: &str) -> Self {
         let mut hasher = Sha256::new();
-        let mut absorb = |bytes: &[u8]| {
-            let len = u64::try_from(bytes.len()).expect("bounded name length fits in u64");
-            hasher.update(len.to_be_bytes());
-            hasher.update(bytes);
-        };
-        absorb(RESOURCE_IDENTITY_DOMAIN.as_bytes());
-        absorb(namespace.as_token().as_str().as_bytes());
-        absorb(canonical_name.as_bytes());
+        absorb(&mut hasher, RESOURCE_IDENTITY_DOMAIN.as_bytes());
+        absorb(&mut hasher, namespace.as_token().as_str().as_bytes());
+        absorb(&mut hasher, canonical_name.as_bytes());
         Self {
             namespace,
             digest: hasher.finalize().into(),

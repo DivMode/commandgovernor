@@ -21,6 +21,7 @@ use core::fmt;
 use sha2::{Digest, Sha256};
 
 use crate::binding::ConversationRef;
+use crate::digest::{absorb, absorb_u32, absorb_u64, absorb_uuid};
 use crate::error::{Conflict, Outcome, Transition};
 use crate::fence::{BindingGeneration, DeliveryRevision, ObligationVersion, SourceRef};
 use crate::foreman_turn::ProviderMessageRef;
@@ -59,16 +60,10 @@ impl DeliveryKey {
         revision: DeliveryRevision,
     ) -> Self {
         let mut hasher = Sha256::new();
-        let domain = WAKE_KEY_DOMAIN.as_bytes();
-        let domain_len = u64::try_from(domain.len()).expect("domain label length fits in u64");
-        hasher.update(domain_len.to_be_bytes());
-        hasher.update(domain);
-        hasher.update(16u64.to_be_bytes());
-        hasher.update(obligation.as_uuid().as_bytes());
-        hasher.update(8u64.to_be_bytes());
-        hasher.update(generation.get().to_be_bytes());
-        hasher.update(4u64.to_be_bytes());
-        hasher.update(revision.get().to_be_bytes());
+        absorb(&mut hasher, WAKE_KEY_DOMAIN.as_bytes());
+        absorb_uuid(&mut hasher, obligation.as_uuid());
+        absorb_u64(&mut hasher, generation.get());
+        absorb_u32(&mut hasher, revision.get());
         Self(hasher.finalize().into())
     }
 

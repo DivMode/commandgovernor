@@ -100,13 +100,38 @@
 //! replay equivalence — belong to `governor-store-sqlite` and
 //! `governor-testkit`.
 //!
+//! # Session lineage and worker loadouts
+//!
+//! [`session`] adds the provider-independent half of
+//! [`docs/adr/0007-session-lineage-memory-and-analytics.md`] §4–6: a delegated
+//! worker's authority is whatever its launch snapshot recorded, never whatever
+//! today's configuration happens to resolve to.
+//!
+//! | Rule | Enforced by |
+//! | --- | --- |
+//! | Capabilities are whitelist-only; an omitted profile grants nothing | [`session::CapabilityProfile::allows`] over an explicit set, with no default branch |
+//! | Delegation is whitelist-only; an omitted child role is not spawnable | [`session::DelegationPolicy::allows`], likewise |
+//! | Resume needs the exact launch loadout, not today's | [`session::CommittedLoadout::admit_resume`], reachable only from [`session::CommittedLoadout::rehydrate`] |
+//! | A persisted loadout is re-derived, never trusted | [`session::CommittedLoadout::rehydrate`] returns [`session::LoadoutIntegrityError`] |
+//! | Resume re-verifies the managed config's bytes | [`session::ManagedConfigVerified`], whose only source is a freshly computed digest and length |
+//! | A session cannot be its own parent | [`session::SessionEdge::new`] |
+//!
+//! Their durable halves — the loadout row and its `created_event_seq`, the
+//! `session_edges` graph, and the private configuration artifact whose bytes the
+//! witness re-reads — belong to `governor-store-sqlite` and `governor-artifacts`.
+//!
 //! [`docs/state-machines.md`]: https://github.com/DivMode/commandgovernor/blob/main/docs/state-machines.md
 //! [`docs/research/2026-08-31-durable-orchestration-pattern-review.md`]: https://github.com/DivMode/commandgovernor/blob/main/docs/research/2026-08-31-durable-orchestration-pattern-review.md
+//! [`docs/adr/0007-session-lineage-memory-and-analytics.md`]: https://github.com/DivMode/commandgovernor/blob/main/docs/adr/0007-session-lineage-memory-and-analytics.md
 
 pub mod artifact;
 pub mod binding;
 pub mod claim;
 pub mod delivery;
+// Crate-internal: the one length-prefixed absorption rule every digest here
+// shares. Not part of the public surface — callers consume digests, never the
+// encoding that produced them.
+mod digest;
 pub mod effect;
 pub mod error;
 pub mod fence;

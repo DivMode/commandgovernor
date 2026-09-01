@@ -13,7 +13,22 @@
 //! - the fully resolved launch loadout has a deterministic integrity digest;
 //! - resume requires the exact loadout identity **and** digest that were bound at
 //!   spawn time, so editing today's role/config cannot silently broaden an old
-//!   session.
+//!   session;
+//! - resume additionally requires proof that the managed configuration artifact
+//!   was re-read and still hashes to what the launch snapshot recorded, so a
+//!   deleted or rewritten config fails closed instead of resuming under whatever
+//!   is on disk now.
+//!
+//! # Two constructors, deliberately not interchangeable
+//!
+//! Resolving a loadout and loading one back are different operations and have
+//! different types. [`WorkerLoadout::resolve`] is a *resolve-time* computation:
+//! it takes freshly resolved parts and derives the digest that will be written
+//! down. [`CommittedLoadout::rehydrate`] is the only path from a persisted row,
+//! and it re-derives the digest and refuses a row whose safe fields no longer
+//! agree with it. Only a [`CommittedLoadout`] can admit a resume, so a loadout
+//! assembled at run time cannot stand in for the one a session was launched
+//! under.
 //!
 //! The durable/store half lives in `governor-store-sqlite`: the store must commit
 //! the logical session, lineage, loadout and external-spawn intent before an
@@ -24,6 +39,9 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 
+use crate::artifact::{ArtifactDigest, ArtifactIntegrityError};
+use crate::digest::{absorb, absorb_u64, absorb_uuid};
+use crate::error::Conflict;
 use crate::fence::SafeToken;
 use crate::id::{
     CapabilityProfileId, DelegationPolicyId, ManagedConfigArtifactId, ModelPolicyId, SessionId,
@@ -187,6 +205,48 @@ impl WorkerRole {
     }
 
     /// Returns the role token for persistence/diagnostics.
+    #[must_use]
+    pub const fn as_token(&self) -> &SafeToken {
+        &self.0
+    }
+}
+
+/// Adapter class of the worker itself, e.g. `claude`.
+///
+/// A distinct type from [`RuntimeKind`] on purpose: the two are adjacent fields
+/// of the same shape in a loadout, and transposing them would resolve a real
+/// worker under the wrong adapter without any value looking wrong.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WorkerKind(SafeToken);
+
+impl WorkerKind {
+    /// Wraps a validated worker-adapter label.
+    #[must_use]
+    pub const fn new(token: SafeToken) -> Self {
+        Self(token)
+    }
+
+    /// Returns the label for persistence/diagnostics.
+    #[must_use]
+    pub const fn as_token(&self) -> &SafeToken {
+        &self.0
+    }
+}
+
+/// Adapter class of the runtime that hosts the worker, e.g. `herdr`.
+///
+/// See [`WorkerKind`] for why this is not a bare [`SafeToken`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeKind(SafeToken);
+
+impl RuntimeKind {
+    /// Wraps a validated runtime-adapter label.
+    #[must_use]
+    pub const fn new(token: SafeToken) -> Self {
+        Self(token)
+    }
+
+    /// Returns the label for persistence/diagnostics.
     #[must_use]
     pub const fn as_token(&self) -> &SafeToken {
         &self.0
@@ -366,18 +426,33 @@ impl ManagedConfigDigest {
     }
 }
 
-/// Identity and digest of the private immutable managed configuration artifact.
+/// Identity, digest and exact length of the private immutable managed
+/// configuration artifact.
+///
+/// The length is carried alongside the digest because a truncated read has a
+/// perfectly valid digest *of the truncation*; checking length first is what
+/// keeps that failure distinguishable. The rule itself is
+/// [`ArtifactIntegrityError::check`] and is not restated here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ManagedConfigRef {
     id: ManagedConfigArtifactId,
     digest: ManagedConfigDigest,
+    byte_len: u64,
 }
 
 impl ManagedConfigRef {
     /// Builds a reference after the artifact boundary has validated the config.
     #[must_use]
-    pub const fn new(id: ManagedConfigArtifactId, digest: ManagedConfigDigest) -> Self {
-        Self { id, digest }
+    pub const fn new(
+        id: ManagedConfigArtifactId,
+        digest: ManagedConfigDigest,
+        byte_len: u64,
+    ) -> Self {
+        Self {
+            id,
+            digest,
+            byte_len,
+        }
     }
 
     /// Configuration-artifact identity.
@@ -390,6 +465,75 @@ impl ManagedConfigRef {
     #[must_use]
     pub const fn digest(self) -> ManagedConfigDigest {
         self.digest
+    }
+
+    /// Exact configuration length in bytes.
+    #[must_use]
+    pub const fn byte_len(self) -> u64 {
+        self.byte_len
+    }
+}
+
+/// Proof that a managed configuration artifact was re-read and still matches the
+/// reference a loadout was launched under.
+///
+/// # There is no public constructor
+///
+/// The only source is [`Self::verify`], which takes a *freshly computed* digest
+/// and length and compares them against the recorded reference through
+/// [`ArtifactIntegrityError::check`]. There is no way to mint this value from a
+/// reference alone, so "the row still says the config is fine" cannot be
+/// mistaken for "the bytes are still there and still hash to this."
+///
+/// The value is neither `Clone` nor `Copy`: one re-verification authorises at
+/// most one [`ResumePermit`].
+///
+/// # What the artifacts layer must uphold
+///
+/// `governor-core` performs no I/O and cannot read the artifact itself. This
+/// type is the *place where the artifacts/daemon layer asserts it*, and the
+/// assertion has two parts:
+///
+/// 1. `observed_digest` and `observed_len` come from bytes read *now*, in full,
+///    from the private artifact store — not from a cached row, a manifest, or a
+///    previous verification.
+/// 2. Nothing between that read and [`CommittedLoadout::admit_resume`] may
+///    substitute different bytes for the ones that were hashed.
+///
+/// A caller that passes the reference's own digest straight back in has proved
+/// nothing; every guarantee below rests on those two lines.
+#[derive(Debug)]
+pub struct ManagedConfigVerified {
+    reference: ManagedConfigRef,
+}
+
+impl ManagedConfigVerified {
+    /// Re-proves a managed configuration artifact against freshly read bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactIntegrityError`] when the re-read bytes are a different
+    /// length or hash to something else. Callers must fail closed: an
+    /// unverifiable launch configuration is reconciliation work, never a resume
+    /// under whatever configuration exists now.
+    pub fn verify(
+        reference: ManagedConfigRef,
+        observed_digest: ManagedConfigDigest,
+        observed_len: u64,
+    ) -> Result<Self, ArtifactIntegrityError> {
+        ArtifactIntegrityError::check(
+            ArtifactDigest::from_bytes(*reference.digest().as_bytes()),
+            reference.byte_len(),
+            ArtifactDigest::from_bytes(*observed_digest.as_bytes()),
+            observed_len,
+        )?;
+        Ok(Self { reference })
+    }
+
+    /// The configuration reference these re-read bytes vouch for.
+    #[must_use]
+    pub const fn reference(&self) -> ManagedConfigRef {
+        self.reference
     }
 }
 
@@ -434,14 +578,34 @@ impl ResumePolicy {
 /// Raw prompts, cwd, tool arguments/results, credentials, and arbitrary config
 /// text do not belong here. Exact launch configuration is represented by an
 /// immutable private artifact reference + digest.
+///
+/// # Not in the digest, on purpose
+///
+/// ADR 0007 lists `created_event_seq` as part of the durable loadout record, and
+/// it is deliberately absent here. The sequence number is assigned by the store
+/// when the row commits — after the digest exists and is itself part of what is
+/// written — so a digest over it could never be computed by the resolver. Slice
+/// 2 carries it as a schema column on the loadout row, next to the digest rather
+/// than inside it.
+///
+/// # Field-wise, and what that costs
+///
+/// This is a parts record, not a capability: anyone can assemble one, exactly as
+/// anyone can assemble a [`crate::claim::PersistedClaim`]. Assembling a spec
+/// proves nothing on its own. Safety comes from what a spec can be turned *into*:
+/// [`WorkerLoadout::resolve`] only ever produces a loadout consistent with the
+/// parts it was handed, and [`CommittedLoadout::rehydrate`] — the sole path from
+/// a persisted row — refuses parts that disagree with the digest recorded beside
+/// them. A tampered spec therefore yields a different loadout identity/digest
+/// pair, which is precisely what [`CommittedLoadout::admit_resume`] refuses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerLoadoutSpec {
     /// Stable identity of this resolved loadout snapshot.
     pub id: WorkerLoadoutId,
     /// Worker adapter class, e.g. `claude`.
-    pub worker_kind: SafeToken,
+    pub worker_kind: WorkerKind,
     /// Runtime adapter class, e.g. `herdr`.
-    pub runtime_kind: SafeToken,
+    pub runtime_kind: RuntimeKind,
     /// Semantic role used for policy/analytics.
     pub role: WorkerRole,
     /// Immutable model-policy snapshot.
@@ -476,7 +640,12 @@ impl WorkerLoadoutDigest {
     }
 }
 
-/// Immutable resolved worker loadout.
+/// A resolved worker loadout as it exists *before* it is written down.
+///
+/// This is the spawn-time value: the store persists its spec and digest, and the
+/// pair becomes the launch snapshot every later resume is fenced against. It
+/// cannot admit a resume — that authority belongs to [`CommittedLoadout`], which
+/// is reachable only by loading a row back and re-proving it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerLoadout {
     spec: WorkerLoadoutSpec,
@@ -486,29 +655,17 @@ pub struct WorkerLoadout {
 impl WorkerLoadout {
     /// Resolves a loadout and computes the canonical digest that will fence
     /// future resume attempts.
+    ///
+    /// A resolve-time operation, not a loader: it derives the digest rather than
+    /// checking one, so it can never *disagree* with the parts it was given.
+    /// Reaching it with parts read from durable storage would therefore launder
+    /// a tampered row into a self-consistent loadout —
+    /// [`CommittedLoadout::rehydrate`] exists so that path does not have to be
+    /// taken.
     #[must_use]
-    pub fn new(spec: WorkerLoadoutSpec) -> Self {
+    pub fn resolve(spec: WorkerLoadoutSpec) -> Self {
         let digest = WorkerLoadoutDigest(hash_loadout(&spec));
         Self { spec, digest }
-    }
-
-    /// Rehydrates a persisted loadout and fails closed if its stored digest does
-    /// not match the canonical contents.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LoadoutIntegrityError`] when durable fields were corrupted or
-    /// changed without creating a new loadout revision.
-    pub fn from_persisted(
-        spec: WorkerLoadoutSpec,
-        persisted_digest: WorkerLoadoutDigest,
-    ) -> Result<Self, LoadoutIntegrityError> {
-        let loadout = Self::new(spec);
-        if loadout.digest == persisted_digest {
-            Ok(loadout)
-        } else {
-            Err(LoadoutIntegrityError::DigestMismatch)
-        }
     }
 
     /// Safe resolved fields of this immutable snapshot.
@@ -528,26 +685,137 @@ impl WorkerLoadout {
     pub const fn fence(&self) -> WorkerLoadoutFence {
         WorkerLoadoutFence::new(self.spec.id, self.digest)
     }
+}
 
-    /// Checks that a continuation targets this exact resolved loadout and returns
-    /// a proof value only on an exact match.
+/// One persisted worker-loadout row, as the store read it back.
+///
+/// The digest travels with the safe fields precisely so the two can be checked
+/// against each other; nothing here is trusted until [`CommittedLoadout::rehydrate`]
+/// has re-derived it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedWorkerLoadout {
+    /// Safe resolved fields recorded at launch.
+    pub spec: WorkerLoadoutSpec,
+    /// Integrity digest recorded beside them.
+    pub digest: WorkerLoadoutDigest,
+}
+
+/// The launch snapshot of a logical session, loaded back from durable state.
+///
+/// # Why this is a separate type
+///
+/// Resume is only meaningful against the loadout a session was *launched* under,
+/// and that value lives in the store. Making [`Self::admit_resume`] reachable
+/// only from [`Self::rehydrate`] means a loadout resolved from current
+/// configuration — today's role file, today's capability profile — has no method
+/// that can admit anything, so the broadening substitution that fence exists to
+/// prevent is not expressible rather than merely discouraged.
+///
+/// # Residual surface
+///
+/// `governor-core` performs no I/O and so cannot distinguish a genuine row from
+/// a fabricated one: a caller that invents both a spec and a matching digest gets
+/// a `CommittedLoadout`, because the two agree. That is the same boundary
+/// [`crate::claim::ForemanClaim::rehydrate`] sits on — the loader re-proves a row
+/// against itself, and authenticity of the row is the store's problem, enforced
+/// there by the durable schema and by nothing in this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedLoadout {
+    loadout: WorkerLoadout,
+}
+
+impl CommittedLoadout {
+    /// Rebuilds the launch snapshot the store previously persisted.
+    ///
+    /// A *validating* loader, not a field-wise constructor: it re-derives the
+    /// canonical digest from `parts.spec` and requires it to equal
+    /// `parts.digest`. This is the only path from a persisted row to a value that
+    /// can admit a resume.
     ///
     /// # Errors
     ///
-    /// A different loadout identity or digest is a typed refusal; the caller
-    /// must create reconciliation/new-session work rather than launching with a
-    /// broader current configuration.
+    /// Returns [`LoadoutIntegrityError`] when durable fields were corrupted or
+    /// changed without creating a new loadout revision.
+    pub fn rehydrate(parts: PersistedWorkerLoadout) -> Result<Self, LoadoutIntegrityError> {
+        let PersistedWorkerLoadout { spec, digest } = parts;
+        let loadout = WorkerLoadout::resolve(spec);
+        if loadout.digest == digest {
+            Ok(Self { loadout })
+        } else {
+            Err(LoadoutIntegrityError::DigestMismatch)
+        }
+    }
+
+    /// The re-proved launch snapshot.
+    #[must_use]
+    pub const fn loadout(&self) -> &WorkerLoadout {
+        &self.loadout
+    }
+
+    /// Safe resolved fields recorded at launch.
+    #[must_use]
+    pub const fn spec(&self) -> &WorkerLoadoutSpec {
+        self.loadout.spec()
+    }
+
+    /// Canonical integrity digest recorded at launch.
+    #[must_use]
+    pub const fn digest(&self) -> WorkerLoadoutDigest {
+        self.loadout.digest()
+    }
+
+    /// Exact identity+digest a resume caller must present.
+    #[must_use]
+    pub const fn fence(&self) -> WorkerLoadoutFence {
+        self.loadout.fence()
+    }
+
+    /// Checks that a continuation targets this exact launch snapshot *and* that
+    /// its managed configuration artifact still exists and still hashes to what
+    /// was recorded, returning a proof value only when all three hold.
+    ///
+    /// Identity and digest equality alone would admit a session whose private
+    /// launch configuration had since been deleted or rewritten, because the
+    /// durable row would still agree with itself. `config` is what closes that:
+    /// it can only have come from [`ManagedConfigVerified::verify`], which
+    /// requires a freshly computed digest and length.
+    ///
+    /// # Errors
+    ///
+    /// - [`Conflict::LoadoutIdentityMismatch`] — a different logical loadout.
+    /// - [`Conflict::LoadoutDigestMismatch`] — same identity, different resolved
+    ///   contents; the caller must create a new loadout revision rather than
+    ///   launch under a broader current configuration.
+    /// - [`Conflict::ManagedConfigUnverifiable`] — the presented proof does not
+    ///   vouch for this loadout's configuration artifact; the caller must raise
+    ///   reconciliation/input attention, never resume.
     pub fn admit_resume(
         &self,
         presented: WorkerLoadoutFence,
-    ) -> Result<ResumePermit, LoadoutMismatch> {
-        if presented.id != self.spec.id {
-            return Err(LoadoutMismatch::DifferentIdentity);
+        config: ManagedConfigVerified,
+    ) -> Result<ResumePermit, Conflict> {
+        let expected = self.spec();
+        if presented.id != expected.id {
+            return Err(Conflict::LoadoutIdentityMismatch {
+                presented: presented.id,
+                expected: expected.id,
+            });
         }
-        if presented.digest != self.digest {
-            return Err(LoadoutMismatch::DigestMismatch);
+        if presented.digest != self.digest() {
+            return Err(Conflict::LoadoutDigestMismatch {
+                loadout: expected.id,
+            });
         }
-        Ok(ResumePermit { fence: presented })
+        if config.reference() != expected.managed_config {
+            return Err(Conflict::ManagedConfigUnverifiable {
+                loadout: expected.id,
+                expected: expected.managed_config.id(),
+            });
+        }
+        Ok(ResumePermit {
+            fence: presented,
+            managed_config: config.reference(),
+        })
     }
 }
 
@@ -578,45 +846,51 @@ impl WorkerLoadoutFence {
     }
 }
 
-/// Proof that an exact immutable loadout fence admitted a resume.
+/// Proof that an exact immutable loadout fence and a re-verified managed
+/// configuration together admitted a resume.
 ///
-/// Fields are private so adapters cannot construct this proof without passing
-/// [`WorkerLoadout::admit_resume`]. The later store/adapter layer may require
-/// this value before constructing an external continuation permit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # There is no public constructor
+///
+/// The only source is [`CommittedLoadout::admit_resume`], and the value is
+/// neither `Clone` nor `Copy`, so one admission yields at most one permit. The
+/// later store/adapter layer may require this value before constructing an
+/// external continuation permit.
+#[derive(Debug, PartialEq, Eq)]
 pub struct ResumePermit {
     fence: WorkerLoadoutFence,
+    managed_config: ManagedConfigRef,
 }
 
 impl ResumePermit {
     /// Exact loadout fence that was verified.
     #[must_use]
-    pub const fn fence(self) -> WorkerLoadoutFence {
+    pub const fn fence(&self) -> WorkerLoadoutFence {
         self.fence
+    }
+
+    /// Managed configuration artifact whose bytes were re-proved.
+    #[must_use]
+    pub const fn managed_config(&self) -> ManagedConfigRef {
+        self.managed_config
     }
 }
 
 /// A persisted loadout failed its own integrity check.
+///
+/// Module-local rather than a [`Conflict`]: like
+/// [`crate::claim::ClaimProvenanceMismatch`], this is a corrupt durable row, not
+/// a caller presenting a stale fence, and the two must stay distinguishable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum LoadoutIntegrityError {
     /// Stored digest does not match the canonical safe fields.
     #[error("worker loadout digest mismatch")]
     DigestMismatch,
 }
 
-/// Why an existing logical session cannot be resumed under a presented loadout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum LoadoutMismatch {
-    /// Caller presented a different logical loadout identity.
-    #[error("worker loadout identity does not match the session launch snapshot")]
-    DifferentIdentity,
-    /// Identity matched but resolved contents/configuration digest did not.
-    #[error("worker loadout digest does not match the session launch snapshot")]
-    DigestMismatch,
-}
-
 /// Semantic relationship between a parent session and a child logical session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum SessionRelation {
     /// General delegated implementation worker.
     DelegatedWorker,
@@ -711,6 +985,7 @@ impl SessionEdge {
 
 /// Invalid logical session-lineage relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SessionLineageError {
     /// A logical session cannot delegate/fork to itself.
     #[error("a session cannot be its own parent")]
@@ -727,38 +1002,46 @@ fn hash_tokens<'a>(domain: &str, tokens: impl IntoIterator<Item = &'a SafeToken>
 }
 
 fn hash_loadout(spec: &WorkerLoadoutSpec) -> [u8; 32] {
+    // Destructured exhaustively on purpose. Reading the fields through accessors
+    // would let a field added later escape the digest silently; with the pattern
+    // below, adding one is a compile error at the exact place that decides
+    // whether it fences a resume.
+    let WorkerLoadoutSpec {
+        id,
+        worker_kind,
+        runtime_kind,
+        role,
+        model_policy,
+        capability_profile,
+        delegation_policy,
+        managed_config,
+        hook_contract_epoch,
+        resume_policy,
+    } = spec;
+
     let mut hasher = Sha256::new();
     absorb(&mut hasher, WORKER_LOADOUT_DOMAIN.as_bytes());
-    absorb_uuid(&mut hasher, spec.id.as_uuid());
-    absorb(&mut hasher, spec.worker_kind.as_str().as_bytes());
-    absorb(&mut hasher, spec.runtime_kind.as_str().as_bytes());
-    absorb(&mut hasher, spec.role.as_token().as_str().as_bytes());
+    absorb_uuid(&mut hasher, id.as_uuid());
+    absorb(&mut hasher, worker_kind.as_token().as_str().as_bytes());
+    absorb(&mut hasher, runtime_kind.as_token().as_str().as_bytes());
+    absorb(&mut hasher, role.as_token().as_str().as_bytes());
 
-    absorb_uuid(&mut hasher, spec.model_policy.id().as_uuid());
-    absorb(&mut hasher, spec.model_policy.digest().as_bytes());
+    absorb_uuid(&mut hasher, model_policy.id().as_uuid());
+    absorb(&mut hasher, model_policy.digest().as_bytes());
 
-    absorb_uuid(&mut hasher, spec.capability_profile.id().as_uuid());
-    absorb(&mut hasher, spec.capability_profile.digest().as_bytes());
+    absorb_uuid(&mut hasher, capability_profile.id().as_uuid());
+    absorb(&mut hasher, capability_profile.digest().as_bytes());
 
-    absorb_uuid(&mut hasher, spec.delegation_policy.id().as_uuid());
-    absorb(&mut hasher, spec.delegation_policy.digest().as_bytes());
+    absorb_uuid(&mut hasher, delegation_policy.id().as_uuid());
+    absorb(&mut hasher, delegation_policy.digest().as_bytes());
 
-    absorb_uuid(&mut hasher, spec.managed_config.id().as_uuid());
-    absorb(&mut hasher, spec.managed_config.digest().as_bytes());
+    absorb_uuid(&mut hasher, managed_config.id().as_uuid());
+    absorb(&mut hasher, managed_config.digest().as_bytes());
+    absorb_u64(&mut hasher, managed_config.byte_len());
 
-    absorb(&mut hasher, &spec.hook_contract_epoch.get().to_be_bytes());
-    absorb(&mut hasher, spec.resume_policy.code().as_bytes());
+    absorb_u64(&mut hasher, hook_contract_epoch.get());
+    absorb(&mut hasher, resume_policy.code().as_bytes());
     hasher.finalize().into()
-}
-
-fn absorb_uuid(hasher: &mut Sha256, value: uuid::Uuid) {
-    absorb(hasher, value.as_bytes());
-}
-
-fn absorb(hasher: &mut Sha256, bytes: &[u8]) {
-    let len = u64::try_from(bytes.len()).expect("bounded loadout field length fits in u64");
-    hasher.update(len.to_be_bytes());
-    hasher.update(bytes);
 }
 
 #[cfg(test)]
@@ -766,6 +1049,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::error::ConflictKind;
+
+    const CONFIG_DIGEST: [u8; 32] = [5; 32];
+    const CONFIG_LEN: u64 = 512;
 
     fn token(value: &str) -> SafeToken {
         SafeToken::new(value).expect("test token is safe")
@@ -778,25 +1065,58 @@ mod tests {
         crate::id::Id::from_uuid(Uuid::from_u128(value))
     }
 
-    fn loadout_with(
+    fn spec_with(
         capability: CapabilityProfileRef,
         delegation: DelegationPolicyRef,
-    ) -> WorkerLoadout {
-        WorkerLoadout::new(WorkerLoadoutSpec {
+    ) -> WorkerLoadoutSpec {
+        WorkerLoadoutSpec {
             id: id(1),
-            worker_kind: token("claude"),
-            runtime_kind: token("herdr"),
+            worker_kind: WorkerKind::new(token("claude")),
+            runtime_kind: RuntimeKind::new(token("herdr")),
             role: WorkerRole::new(token("worker")),
             model_policy: ModelPolicyRef::new(id(2), ModelPolicyDigest::from_persisted([2; 32])),
             capability_profile: capability,
             delegation_policy: delegation,
             managed_config: ManagedConfigRef::new(
                 id(5),
-                ManagedConfigDigest::from_persisted([5; 32]),
+                ManagedConfigDigest::from_persisted(CONFIG_DIGEST),
+                CONFIG_LEN,
             ),
             hook_contract_epoch: HookContractEpoch::new(7),
             resume_policy: ResumePolicy::ExactLoadout,
+        }
+    }
+
+    fn loadout_with(
+        capability: CapabilityProfileRef,
+        delegation: DelegationPolicyRef,
+    ) -> WorkerLoadout {
+        WorkerLoadout::resolve(spec_with(capability, delegation))
+    }
+
+    fn committed(loadout: &WorkerLoadout) -> CommittedLoadout {
+        CommittedLoadout::rehydrate(PersistedWorkerLoadout {
+            spec: loadout.spec().clone(),
+            digest: loadout.digest(),
         })
+        .expect("a freshly resolved loadout agrees with its own digest")
+    }
+
+    /// The re-read the artifacts layer is expected to perform, standing in for
+    /// bytes that are still exactly as they were at launch.
+    fn verified_config(reference: ManagedConfigRef) -> ManagedConfigVerified {
+        ManagedConfigVerified::verify(
+            reference,
+            ManagedConfigDigest::from_persisted(CONFIG_DIGEST),
+            CONFIG_LEN,
+        )
+        .expect("unchanged bytes re-verify")
+    }
+
+    fn base_spec() -> WorkerLoadoutSpec {
+        let capabilities = CapabilityProfile::new(id(30), [CapabilityName::new(token("read"))]);
+        let delegation = DelegationPolicy::new(id(40), [WorkerRole::new(token("scout"))]);
+        spec_with(capabilities.reference(), delegation.reference())
     }
 
     #[test]
@@ -836,11 +1156,18 @@ mod tests {
         let capabilities = CapabilityProfile::new(id(30), [CapabilityName::new(token("read"))]);
         let delegation = DelegationPolicy::new(id(40), [WorkerRole::new(token("scout"))]);
         let loadout = loadout_with(capabilities.reference(), delegation.reference());
+        let committed = committed(&loadout);
 
-        let permit = loadout
-            .admit_resume(loadout.fence())
-            .expect("exact launch snapshot resumes");
+        // A loadout resolved from current configuration has no `admit_resume` at
+        // all; only the re-proved launch snapshot does.
+        let permit = committed
+            .admit_resume(
+                committed.fence(),
+                verified_config(committed.spec().managed_config),
+            )
+            .expect("exact launch snapshot with a re-verified config resumes");
         assert_eq!(permit.fence(), loadout.fence());
+        assert_eq!(permit.managed_config(), loadout.spec().managed_config);
     }
 
     #[test]
@@ -862,10 +1189,15 @@ mod tests {
 
         assert_eq!(original_loadout.spec().id, widened_loadout.spec().id);
         assert_ne!(original_loadout.digest(), widened_loadout.digest());
-        assert_eq!(
-            original_loadout.admit_resume(widened_loadout.fence()),
-            Err(LoadoutMismatch::DigestMismatch)
-        );
+
+        let committed = committed(&original_loadout);
+        let refusal = committed
+            .admit_resume(
+                widened_loadout.fence(),
+                verified_config(committed.spec().managed_config),
+            )
+            .expect_err("a widened profile is not the launch snapshot");
+        assert_eq!(refusal.kind(), ConflictKind::LoadoutDigestMismatch);
     }
 
     #[test]
@@ -873,11 +1205,13 @@ mod tests {
         let capabilities = CapabilityProfile::new(id(30), []);
         let delegation = DelegationPolicy::new(id(40), []);
         let loadout = loadout_with(capabilities.reference(), delegation.reference());
+        let committed = committed(&loadout);
         let presented = WorkerLoadoutFence::new(id(999), loadout.digest());
-        assert_eq!(
-            loadout.admit_resume(presented),
-            Err(LoadoutMismatch::DifferentIdentity)
-        );
+
+        let refusal = committed
+            .admit_resume(presented, verified_config(committed.spec().managed_config))
+            .expect_err("a different loadout identity is refused");
+        assert_eq!(refusal.kind(), ConflictKind::LoadoutIdentityMismatch);
     }
 
     #[test]
@@ -885,12 +1219,305 @@ mod tests {
         let capabilities = CapabilityProfile::new(id(30), []);
         let delegation = DelegationPolicy::new(id(40), []);
         let loadout = loadout_with(capabilities.reference(), delegation.reference());
-        let spec = loadout.spec().clone();
 
         assert_eq!(
-            WorkerLoadout::from_persisted(spec, WorkerLoadoutDigest::from_persisted([0xA5; 32])),
+            CommittedLoadout::rehydrate(PersistedWorkerLoadout {
+                spec: loadout.spec().clone(),
+                digest: WorkerLoadoutDigest::from_persisted([0xA5; 32]),
+            }),
             Err(LoadoutIntegrityError::DigestMismatch)
         );
+    }
+
+    #[test]
+    fn a_widened_profile_cannot_be_laundered_through_a_persisted_row() {
+        // The reviewer's probe: take the launch row, widen the capability
+        // profile, and try to load it back. `rehydrate` is the only path from a
+        // row to something that can resume, and it re-derives the digest.
+        let capability_id: CapabilityProfileId = id(30);
+        let delegation = DelegationPolicy::new(id(40), [WorkerRole::new(token("scout"))]);
+        let original = CapabilityProfile::new(capability_id, [CapabilityName::new(token("read"))]);
+        let launched = loadout_with(original.reference(), delegation.reference());
+
+        let widened = CapabilityProfile::new(
+            capability_id,
+            [
+                CapabilityName::new(token("read")),
+                CapabilityName::new(token("write")),
+            ],
+        );
+        let mut tampered = launched.spec().clone();
+        tampered.capability_profile = widened.reference();
+
+        assert_eq!(
+            CommittedLoadout::rehydrate(PersistedWorkerLoadout {
+                spec: tampered,
+                digest: launched.digest(),
+            }),
+            Err(LoadoutIntegrityError::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn every_spec_field_is_bound_by_the_loadout_digest() {
+        // One case per field the digest must cover. `resume_policy` has a single
+        // variant today, so no second value exists to differ from it; the
+        // exhaustive destructure in `hash_loadout` is what will force a future
+        // variant into the pre-image.
+        type Mutate = fn(&mut WorkerLoadoutSpec);
+        let cases: &[(&str, Mutate)] = &[
+            ("id", |spec| spec.id = id(0xBEEF)),
+            ("worker_kind", |spec| {
+                spec.worker_kind = WorkerKind::new(token("codex"));
+            }),
+            ("runtime_kind", |spec| {
+                spec.runtime_kind = RuntimeKind::new(token("tmux"));
+            }),
+            ("role", |spec| {
+                spec.role = WorkerRole::new(token("reviewer"));
+            }),
+            ("model_policy.id", |spec| {
+                spec.model_policy = ModelPolicyRef::new(id(0xA1), spec.model_policy.digest());
+            }),
+            ("model_policy.digest", |spec| {
+                spec.model_policy = ModelPolicyRef::new(
+                    spec.model_policy.id(),
+                    ModelPolicyDigest::from_persisted([0xA2; 32]),
+                );
+            }),
+            ("capability_profile.id", |spec| {
+                spec.capability_profile =
+                    CapabilityProfileRef::new(id(0xB1), spec.capability_profile.digest());
+            }),
+            ("capability_profile.digest", |spec| {
+                spec.capability_profile = CapabilityProfileRef::new(
+                    spec.capability_profile.id(),
+                    CapabilityProfileDigest::from_persisted([0xB2; 32]),
+                );
+            }),
+            ("delegation_policy.id", |spec| {
+                spec.delegation_policy =
+                    DelegationPolicyRef::new(id(0xC1), spec.delegation_policy.digest());
+            }),
+            ("delegation_policy.digest", |spec| {
+                spec.delegation_policy = DelegationPolicyRef::new(
+                    spec.delegation_policy.id(),
+                    DelegationPolicyDigest::from_persisted([0xC2; 32]),
+                );
+            }),
+            ("managed_config.id", |spec| {
+                spec.managed_config = ManagedConfigRef::new(
+                    id(0xD1),
+                    spec.managed_config.digest(),
+                    spec.managed_config.byte_len(),
+                );
+            }),
+            ("managed_config.digest", |spec| {
+                spec.managed_config = ManagedConfigRef::new(
+                    spec.managed_config.id(),
+                    ManagedConfigDigest::from_persisted([0xD2; 32]),
+                    spec.managed_config.byte_len(),
+                );
+            }),
+            ("managed_config.byte_len", |spec| {
+                spec.managed_config = ManagedConfigRef::new(
+                    spec.managed_config.id(),
+                    spec.managed_config.digest(),
+                    spec.managed_config.byte_len() + 1,
+                );
+            }),
+            ("hook_contract_epoch", |spec| {
+                spec.hook_contract_epoch =
+                    HookContractEpoch::new(spec.hook_contract_epoch.get() + 1);
+            }),
+        ];
+
+        let base = hash_loadout(&base_spec());
+        for (field, mutate) in cases {
+            let mut spec = base_spec();
+            mutate(&mut spec);
+            assert_ne!(spec, base_spec(), "case `{field}` did not change the spec");
+            assert_ne!(
+                hash_loadout(&spec),
+                base,
+                "field `{field}` escapes the loadout digest"
+            );
+        }
+    }
+
+    #[test]
+    fn loadout_fields_cannot_be_reflowed_across_their_boundaries() {
+        // `worker_kind` and `runtime_kind` are adjacent variable-length fields:
+        // without the length prefix these two specs share a pre-image.
+        let mut left = base_spec();
+        left.worker_kind = WorkerKind::new(token("ab"));
+        left.runtime_kind = RuntimeKind::new(token("c"));
+
+        let mut right = base_spec();
+        right.worker_kind = WorkerKind::new(token("a"));
+        right.runtime_kind = RuntimeKind::new(token("bc"));
+
+        assert_ne!(hash_loadout(&left), hash_loadout(&right));
+    }
+
+    #[test]
+    fn token_set_digests_are_domain_separated() {
+        let subject = token("read");
+        let capability = hash_tokens(CAPABILITY_PROFILE_DOMAIN, [&subject]);
+        let delegation = hash_tokens(DELEGATION_POLICY_DOMAIN, [&subject]);
+        let loadout = hash_tokens(WORKER_LOADOUT_DOMAIN, [&subject]);
+        assert_ne!(capability, delegation);
+        assert_ne!(capability, loadout);
+        assert_ne!(delegation, loadout);
+    }
+
+    #[test]
+    fn a_capability_set_never_hashes_to_the_same_bytes_as_a_role_set() {
+        // Identical token content, different meaning: granting `write` must not
+        // produce the digest of a policy that permits delegating to `write`.
+        let profile = CapabilityProfile::new(id(1), [CapabilityName::new(token("write"))]);
+        let policy = DelegationPolicy::new(id(1), [WorkerRole::new(token("write"))]);
+        assert_ne!(
+            profile.digest().as_bytes(),
+            policy.digest().as_bytes(),
+            "capability and delegation digests share a domain"
+        );
+    }
+
+    #[test]
+    fn capability_set_contents_are_bound_by_the_profile_digest() {
+        let profile_id: CapabilityProfileId = id(1);
+        let empty = CapabilityProfile::new(profile_id, []);
+        let read = CapabilityProfile::new(profile_id, [CapabilityName::new(token("read"))]);
+        let write = CapabilityProfile::new(profile_id, [CapabilityName::new(token("write"))]);
+        let both = CapabilityProfile::new(
+            profile_id,
+            [
+                CapabilityName::new(token("read")),
+                CapabilityName::new(token("write")),
+            ],
+        );
+        assert_ne!(empty.digest(), read.digest());
+        assert_ne!(read.digest(), write.digest());
+        assert_ne!(read.digest(), both.digest());
+
+        // Adjacent members must not be reflowable either.
+        let split = CapabilityProfile::new(
+            profile_id,
+            [
+                CapabilityName::new(token("ab")),
+                CapabilityName::new(token("c")),
+            ],
+        );
+        let shifted = CapabilityProfile::new(
+            profile_id,
+            [
+                CapabilityName::new(token("a")),
+                CapabilityName::new(token("bc")),
+            ],
+        );
+        assert_ne!(split.digest(), shifted.digest());
+    }
+
+    #[test]
+    fn delegation_set_contents_are_bound_by_the_policy_digest() {
+        let policy_id: DelegationPolicyId = id(1);
+        let empty = DelegationPolicy::new(policy_id, []);
+        let scout = DelegationPolicy::new(policy_id, [WorkerRole::new(token("scout"))]);
+        let reviewer = DelegationPolicy::new(policy_id, [WorkerRole::new(token("reviewer"))]);
+        let both = DelegationPolicy::new(
+            policy_id,
+            [
+                WorkerRole::new(token("scout")),
+                WorkerRole::new(token("reviewer")),
+            ],
+        );
+        assert_ne!(empty.digest(), scout.digest());
+        assert_ne!(scout.digest(), reviewer.digest());
+        assert_ne!(scout.digest(), both.digest());
+
+        let split = DelegationPolicy::new(
+            policy_id,
+            [WorkerRole::new(token("ab")), WorkerRole::new(token("c"))],
+        );
+        let shifted = DelegationPolicy::new(
+            policy_id,
+            [WorkerRole::new(token("a")), WorkerRole::new(token("bc"))],
+        );
+        assert_ne!(split.digest(), shifted.digest());
+    }
+
+    #[test]
+    fn a_rewritten_managed_config_cannot_be_verified() {
+        let reference = base_spec().managed_config;
+        assert_eq!(
+            ManagedConfigVerified::verify(
+                reference,
+                ManagedConfigDigest::from_persisted([0xEE; 32]),
+                CONFIG_LEN,
+            )
+            .err(),
+            Some(ArtifactIntegrityError::DigestMismatch)
+        );
+    }
+
+    #[test]
+    fn a_truncated_managed_config_is_reported_as_a_length_mismatch() {
+        // A truncated read has a valid digest *of the truncation*; the shared
+        // rule checks length first so the two failures stay distinguishable.
+        let reference = base_spec().managed_config;
+        assert_eq!(
+            ManagedConfigVerified::verify(
+                reference,
+                ManagedConfigDigest::from_persisted(CONFIG_DIGEST),
+                CONFIG_LEN - 1,
+            )
+            .err(),
+            Some(ArtifactIntegrityError::LengthMismatch {
+                expected: CONFIG_LEN,
+                observed: CONFIG_LEN - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_proof_for_another_artifact_cannot_admit_a_resume() {
+        let loadout = WorkerLoadout::resolve(base_spec());
+        let committed = committed(&loadout);
+
+        let other =
+            ManagedConfigRef::new(id(0xF00D), ManagedConfigDigest::from_persisted([9; 32]), 64);
+        let elsewhere =
+            ManagedConfigVerified::verify(other, ManagedConfigDigest::from_persisted([9; 32]), 64)
+                .expect("the other artifact verifies against its own reference");
+
+        let refusal = committed
+            .admit_resume(committed.fence(), elsewhere)
+            .expect_err("a proof for a different artifact vouches for nothing here");
+        assert_eq!(refusal.kind(), ConflictKind::ManagedConfigUnverifiable);
+    }
+
+    #[test]
+    fn a_stale_length_in_the_proof_cannot_admit_a_resume() {
+        // Same artifact identity and same digest, different recorded length: the
+        // witness must match the launch reference exactly, byte length included.
+        let loadout = WorkerLoadout::resolve(base_spec());
+        let committed = committed(&loadout);
+        let recorded = committed.spec().managed_config;
+
+        let shorter =
+            ManagedConfigRef::new(recorded.id(), recorded.digest(), recorded.byte_len() - 1);
+        let proof = ManagedConfigVerified::verify(
+            shorter,
+            ManagedConfigDigest::from_persisted(CONFIG_DIGEST),
+            CONFIG_LEN - 1,
+        )
+        .expect("the proof is self-consistent for the shorter reference");
+
+        let refusal = committed
+            .admit_resume(committed.fence(), proof)
+            .expect_err("a proof over a different byte length is not this configuration");
+        assert_eq!(refusal.kind(), ConflictKind::ManagedConfigUnverifiable);
     }
 
     #[test]

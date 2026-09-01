@@ -16,7 +16,8 @@ use crate::fence::{
 };
 use crate::foreman_turn::ForemanTurnState;
 use crate::id::{
-    ActorId, ClaimId, ExternalAttemptId, MutationCommandId, ObligationId, ResourceLeaseId,
+    ActorId, ClaimId, ExternalAttemptId, ManagedConfigArtifactId, MutationCommandId, ObligationId,
+    ResourceLeaseId, WorkerLoadoutId,
 };
 use crate::input::InputRequestState;
 use crate::lease::{IncarnationMismatch, LeaseState};
@@ -126,6 +127,14 @@ pub enum ConflictKind {
     NoCurrentLease,
     /// The event is not legal from the lease's current state.
     IllegalLeaseTransition,
+
+    // -- session loadouts ([`crate::session`]) -------------------------------
+    /// A resume presented a different logical loadout identity.
+    LoadoutIdentityMismatch,
+    /// The loadout identity matched but its resolved contents digest did not.
+    LoadoutDigestMismatch,
+    /// The managed configuration artifact could not be re-proved at resume time.
+    ManagedConfigUnverifiable,
 }
 
 impl ConflictKind {
@@ -177,6 +186,9 @@ impl ConflictKind {
             Self::ResourceAlreadyLeased => "resource_already_leased",
             Self::NoCurrentLease => "no_current_lease",
             Self::IllegalLeaseTransition => "illegal_lease_transition",
+            Self::LoadoutIdentityMismatch => "loadout_identity_mismatch",
+            Self::LoadoutDigestMismatch => "loadout_digest_mismatch",
+            Self::ManagedConfigUnverifiable => "managed_config_unverifiable",
         }
     }
 }
@@ -550,6 +562,38 @@ pub enum Conflict {
         /// Event class that was refused.
         event: &'static str,
     },
+
+    /// A resume presented a different logical loadout identity.
+    #[error("presented loadout {presented} is not the session's launch loadout {expected}")]
+    LoadoutIdentityMismatch {
+        /// Loadout identity the caller presented.
+        presented: WorkerLoadoutId,
+        /// Loadout identity the session was launched under.
+        expected: WorkerLoadoutId,
+    },
+
+    /// The loadout identity matched but its resolved contents digest did not.
+    ///
+    /// Today's role, capability profile or configuration has been edited since
+    /// the session was launched. The answer is a new loadout revision, never a
+    /// resume into the broader current sandbox.
+    #[error("presented loadout {loadout} does not match the resolved launch snapshot")]
+    LoadoutDigestMismatch {
+        /// Loadout identity whose contents disagreed.
+        loadout: WorkerLoadoutId,
+    },
+
+    /// The managed configuration artifact could not be re-proved at resume time.
+    ///
+    /// Its bytes are missing, truncated, rewritten, or the proof offered was for
+    /// some other artifact. Resume fails closed into reconciliation attention.
+    #[error("managed configuration {expected} for loadout {loadout} is missing or unverifiable")]
+    ManagedConfigUnverifiable {
+        /// Loadout whose resume was refused.
+        loadout: WorkerLoadoutId,
+        /// Configuration artifact the launch snapshot requires.
+        expected: ManagedConfigArtifactId,
+    },
 }
 
 impl Conflict {
@@ -603,6 +647,9 @@ impl Conflict {
             Self::ResourceAlreadyLeased { .. } => ConflictKind::ResourceAlreadyLeased,
             Self::NoCurrentLease => ConflictKind::NoCurrentLease,
             Self::IllegalLeaseTransition { .. } => ConflictKind::IllegalLeaseTransition,
+            Self::LoadoutIdentityMismatch { .. } => ConflictKind::LoadoutIdentityMismatch,
+            Self::LoadoutDigestMismatch { .. } => ConflictKind::LoadoutDigestMismatch,
+            Self::ManagedConfigUnverifiable { .. } => ConflictKind::ManagedConfigUnverifiable,
         }
     }
 
