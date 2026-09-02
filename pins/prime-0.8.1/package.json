@@ -1,0 +1,8 @@
+{
+  "name": "@divmode/command-governor-prime-install-root",
+  "private": true,
+  "description": "Install root for the pinned Prime Agent substrate. The wrapper tarball is installed from vendor/, which scripts/bootstrap.sh fills from the GitHub release after verifying every asset against pins/pins.json. The three sibling packages are pinned by sha512 integrity in package-lock.json; the URL they resolve from is a mirror, the hash is the authority.",
+  "dependencies": {
+    "prime-agent": "file:vendor/prime-agent-0.8.1.tgz"
+  }
+}

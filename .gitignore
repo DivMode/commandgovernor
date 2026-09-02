@@ -29,3 +29,9 @@ target/
 .venv/
 __pycache__/
 *.py[cod]
+
+# Command Governor substrate install roots. The tarballs under vendor/ are
+# downloaded and hash-verified by scripts/bootstrap.sh; the installed tree is
+# reproduced from the committed lockfile. Neither is source.
+pins/*/vendor/
+pins/*/node_modules/
