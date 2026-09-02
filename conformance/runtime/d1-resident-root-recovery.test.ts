@@ -13,7 +13,9 @@
  *
  * Falsification: two Governors race to recover; with the fence exactly one
  * `create` is dispatched. With the fence disabled both dispatch a `create`
- * (Prime converges them, so the duplicate is visible only in the ledgers --
+ * (Prime usually converges them, and sometimes refuses the loser's with
+ * `session_already_active`, an ambiguous pair the Governor records as
+ * UNCERTAIN; either way the duplicate is visible only in the ledgers --
  * which is why the fence is the Governor's, not the substrate's).
  */
 
@@ -22,6 +24,7 @@ import { after, before, describe, it } from "node:test";
 
 import { join } from "node:path";
 
+import { NotRecoverable } from "../../governor/governor.ts";
 import { StaleCursorError, StaleIncarnationError } from "../../governor/session/registry.ts";
 import { type PrimeFixture, startPrimeFixture } from "../lib/prime-fixture.ts";
 
@@ -141,15 +144,28 @@ describe("D1: a dead resident root is reopened exactly once under the same logic
 			process.kill(created.summary.workerPid, "SIGKILL");
 			await a.waitFailed(sessionId);
 
-			const [ra, rb] = await Promise.all([a.recoverResidentRoot(sessionId), b.recoverResidentRoot(sessionId)]);
-			const actions = [ra.action, rb.action].sort();
+			const settled = await Promise.allSettled([a.recoverResidentRoot(sessionId), b.recoverResidentRoot(sessionId)]);
 			const creates = a.ledger.list().filter((r) => r.commandType === "create" && r.sessionId === sessionId);
 			if (fenced) {
+				// With the fence, both recoveries must complete without error.
+				for (const outcome of settled) if (outcome.status === "rejected") throw outcome.reason;
+				const actions = settled.map((outcome) => (outcome.status === "fulfilled" ? outcome.value.action : "rejected")).sort();
 				assert.deepEqual(actions.filter((x) => x === "reopened"), ["reopened"], `exactly one reopen: ${JSON.stringify(actions)}`);
 				assert.ok(actions.includes("lease_held") || actions.includes("converged"), `the other observed the lease or converged: ${JSON.stringify(actions)}`);
 				assert.equal(creates.length, 1, "with the fence, one reopen create was dispatched");
 			} else {
+				// Negative control: the property is that BOTH Governors dispatched a create. What Prime
+				// then does with two racing creates on one path is Prime's business: usually it
+				// converges both, sometimes the loser's create is refused (`session_already_active`
+				// from the worker's lease, an ambiguous pair => UNCERTAIN => NotRecoverable). Either
+				// way the ledger holds two create records, which is exactly the hazard the fence removes.
 				assert.equal(creates.length, 2, "negative control: without the fence both Governors dispatched a create");
+				for (const outcome of settled) {
+					if (outcome.status === "rejected") {
+						assert.ok(outcome.reason instanceof NotRecoverable, `an unfenced loser fails only as NotRecoverable: ${String(outcome.reason)}`);
+					}
+				}
+				assert.ok(settled.some((outcome) => outcome.status === "fulfilled" && outcome.value.action === "reopened"), `at least one unfenced create reopened the root: ${JSON.stringify(settled.map((o) => (o.status === "fulfilled" ? o.value.action : "rejected")))}`);
 			}
 			// Either way Prime converged: one registration, one logical root.
 			await a.waitReady(sessionId);
