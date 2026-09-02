@@ -1,15 +1,11 @@
 /**
- * The pin and authority policies, as functions.
+ * Pin and authority policies as falsifiable functions.
  *
- * They live here rather than inline in the assertions for one reason: both
- * policies currently run over collections that are legitimately empty --
- * `pins.json` `packages[]` has no entries yet -- and an assertion that loops
- * over an empty array passes without evaluating anything. That is a test which
- * cannot come back negative, which is not a test.
- *
- * Extracting the rules lets the suite run them against fabricated records that
- * violate each one, so the checks are shown to fail before they are trusted to
- * pass.
+ * The active architecture is composition-first (ADRs 0008-0010). An authority
+ * record therefore answers not only "who owns this concern?" but also "why is
+ * that owner allowed to exist here?" Assigned concerns are classified as
+ * USE EXISTING, PLUGIN, or TEMP WORKAROUND; temporary workarounds must name the
+ * condition that removes them.
  */
 
 export interface PinnedPackageRecord {
@@ -28,6 +24,8 @@ export interface ConcernRecord {
 	readonly plannedOwner?: unknown;
 	readonly phase?: unknown;
 	readonly note?: unknown;
+	readonly disposition?: unknown;
+	readonly removalCondition?: unknown;
 }
 
 export interface AuthoritiesRecord {
@@ -38,20 +36,11 @@ function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0;
 }
 
-/**
- * Violations of the third-party pin policy for one package entry.
- *
- * Pi keeps no lockfile for the packages it installs and treats any git ref as
- * `pinned` -- a branch or a mutable tag included. Only an exact npm version or
- * a 40-character commit SHA is immutable, so only those count here.
- */
 export function checkPackagePin(pkg: PinnedPackageRecord): string[] {
 	const errors: string[] = [];
 	const label = isNonEmptyString(pkg.source) ? pkg.source : "<no source>";
 
-	if (!isNonEmptyString(pkg.source)) {
-		errors.push("package entry has no source");
-	}
+	if (!isNonEmptyString(pkg.source)) errors.push("package entry has no source");
 
 	const hasExactVersion =
 		typeof pkg.exactVersion === "string" && /^\d+\.\d+\.\d+/.test(pkg.exactVersion);
@@ -64,20 +53,13 @@ export function checkPackagePin(pkg: PinnedPackageRecord): string[] {
 		);
 	}
 	if (!isNonEmptyString(pkg.authority)) {
-		errors.push(
-			`${label}: must name the authority it owns, so a second owner is visible`,
-		);
+		errors.push(`${label}: must name the authority it owns, so a second owner is visible`);
 	}
-	if (!isNonEmptyString(pkg.license)) {
-		errors.push(`${label}: must record the license it was reviewed under`);
-	}
-	if (!isNonEmptyString(pkg.reviewedAt)) {
-		errors.push(`${label}: must record when it was reviewed, at that revision`);
-	}
+	if (!isNonEmptyString(pkg.license)) errors.push(`${label}: must record the license it was reviewed under`);
+	if (!isNonEmptyString(pkg.reviewedAt)) errors.push(`${label}: must record when it was reviewed, at that revision`);
 	return errors;
 }
 
-/** Violations across the whole pinned-package set, including shared authorities. */
 export function checkPackageSet(
 	packages: readonly PinnedPackageRecord[],
 	knownConcerns: ReadonlySet<string>,
@@ -101,21 +83,12 @@ export function checkPackageSet(
 
 	for (const [concern, sources] of owners) {
 		if (sources.length > 1) {
-			errors.push(
-				`${concern} is claimed by ${sources.join(" and ")}; Pi would resolve that silently by load order`,
-			);
+			errors.push(`${concern} is claimed by ${sources.join(" and ")}; Prime/Pi would resolve that authority collision outside our control`);
 		}
 	}
 	return errors;
 }
 
-/**
- * Violations of the one-authority-per-concern policy.
- *
- * Note the shape this depends on: `concerns` must be an array. An object keyed
- * by concern could not express two owners for one key, and the duplicate rule
- * below would be unfalsifiable.
- */
 export function checkAuthorities(
 	doc: AuthoritiesRecord,
 	ownerExists: (path: string) => boolean,
@@ -125,9 +98,7 @@ export function checkAuthorities(
 	if (!Array.isArray(doc.concerns)) {
 		return ["concerns must be an array, so that two owners for one concern is representable"];
 	}
-	if (doc.concerns.length === 0) {
-		return ["concerns is empty"];
-	}
+	if (doc.concerns.length === 0) return ["concerns is empty"];
 
 	const seen = new Map<string, number>();
 	for (const entry of doc.concerns as ConcernRecord[]) {
@@ -140,30 +111,35 @@ export function checkAuthorities(
 		if (entry.status !== "assigned" && entry.status !== "unassigned") {
 			errors.push(`${entry.concern}: status must be assigned or unassigned`);
 		}
+
 		if (entry.status === "assigned") {
 			if (!isNonEmptyString(entry.owner)) {
 				errors.push(`${entry.concern}: assigned with no owner`);
 			} else if (!ownerExists(entry.owner)) {
-				errors.push(
-					`${entry.concern}: owner ${entry.owner} does not exist in the repository`,
-				);
+				errors.push(`${entry.concern}: owner ${entry.owner} does not exist in the repository`);
+			}
+
+			if (
+				entry.disposition !== "USE EXISTING" &&
+				entry.disposition !== "PLUGIN" &&
+				entry.disposition !== "TEMP WORKAROUND"
+			) {
+				errors.push(`${entry.concern}: assigned concern needs disposition USE EXISTING, PLUGIN, or TEMP WORKAROUND`);
+			}
+			if (entry.disposition === "TEMP WORKAROUND" && !isNonEmptyString(entry.removalCondition)) {
+				errors.push(`${entry.concern}: TEMP WORKAROUND needs an explicit removalCondition`);
 			}
 		} else if (entry.status === "unassigned") {
 			if (!isNonEmptyString(entry.plannedOwner) || !isNonEmptyString(entry.phase)) {
-				errors.push(
-					`${entry.concern}: an unassigned concern must name a planned owner and a phase, so it cannot be adopted by accident`,
-				);
+				errors.push(`${entry.concern}: an unassigned concern must name a planned owner and a phase, so it cannot be adopted by accident`);
 			}
 		}
-		if (!isNonEmptyString(entry.note)) {
-			errors.push(`${entry.concern}: needs a note`);
-		}
+
+		if (!isNonEmptyString(entry.note)) errors.push(`${entry.concern}: needs a note`);
 	}
 
 	for (const [concern, count] of seen) {
-		if (count > 1) {
-			errors.push(`${concern}: has ${count} owners; exactly one is allowed`);
-		}
+		if (count > 1) errors.push(`${concern}: has ${count} owners; exactly one is allowed`);
 	}
 	return errors;
 }

@@ -1,22 +1,9 @@
 name: CI
 
-# Two families of merge-gating jobs.
-#
-# The Rust oracle (fmt, clippy, test, audit, deny) stays exactly as it was:
-# ADR 0008 §10 keeps the Rust crates as a frozen migration oracle until a
-# dedicated retirement PR, and Issue #17 explicitly does not retire them.
-#
-# The `harness` job is the one PR #16 lacked. It bootstraps the pinned Prime
-# Agent substrate in isolated state, typechecks, runs the credential-free
-# conformance suite -- pure Tier 1 and the runtime tier that drives real
-# supervisors for D1/D2/D8, the environment boundary and the S1 regressions --
-# and ends with the process sweep. A local PASS is evidence; this job is the
-# gate.
-#
-# The Rust toolchain is never named here: every job picks it up from
-# rust-toolchain.toml via rustup. Third-party actions are pinned by full
-# commit SHA per docs/threat-model.md, installed tools by exact version, and
-# every Cargo invocation that resolves dependencies runs --locked.
+# Command Governor is a Prime/Pi package distribution. CI gates the assembled
+# harness and the real pinned-Prime conformance surface; the superseded Rust
+# control-plane oracle was retired when ADR 0010 made composition-first ownership
+# the active repository architecture.
 
 on:
   push:
@@ -31,19 +18,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUST_BACKTRACE: 1
-
 jobs:
   harness:
-    # macOS is the supported platform (ADR 0009 Gate S0 ran there); Linux is
-    # kept green alongside it because the daemon protocol, Unix sockets and
-    # process identity are all exercised and a Linux-only regression would
-    # otherwise be invisible until someone ran it by hand.
     name: harness (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -51,13 +30,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Node (pinned floor from pins.json is asserted by bootstrap)
+      - name: Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-      - name: Component manifest, release assets, pinned install
+      - name: Verify component manifest and install pinned substrate
         run: scripts/bootstrap.sh
-      - name: Typecheck, Tier 1 (pure + runtime), process sweep
+      - name: Typecheck and conformance
         run: scripts/conformance.sh
       - name: No Prime processes survive the job
         if: always()
@@ -70,53 +49,3 @@ jobs:
             exit 1
           fi
           echo "no prime-agent processes"
-
-  fmt:
-    name: fmt
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show pinned toolchain
-        run: rustup show active-toolchain && cargo --version && rustfmt --version
-      - name: cargo fmt --check
-        run: cargo fmt --all --check
-
-  build:
-    # Rust oracle. Kept until the oracle is formally retired (ADR 0008 §10).
-    name: clippy + test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Show pinned toolchain
-        run: rustup show active-toolchain && cargo --version && cargo clippy --version
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.os }}
-      - name: cargo clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: cargo test
-        run: cargo test --locked --workspace --all-features
-
-  supply-chain:
-    # Vulnerability, licence, source, and banned-crate policy. Kept in its own
-    # job so a crates.io advisory failure is never confused with a code failure.
-    name: audit + deny
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install cargo-audit and cargo-deny
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
-        with:
-          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
-      - name: cargo audit
-        run: cargo audit --deny warnings
-      - name: cargo deny check
-        run: cargo deny --all-features --locked check

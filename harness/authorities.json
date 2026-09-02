@@ -1,145 +1,151 @@
 {
   "$comment": [
-    "One authority per concern, written down because it cannot be trusted.",
+    "One authority per concern, plus the architecture disposition that justifies that owner.",
     "",
-    "Prime Agent, like the upstream Pi it descends from, resolves competing",
-    "extension handlers silently by load order, and exposes no runtime API for",
-    "enumerating loaded extensions. A second owner is therefore an undetectable",
-    "failure mode, and this file is the only place it can be caught. With Issue",
-    "#17 the Governor also owns durable state of its own (a session registry and",
-    "a mutation ledger) whose single-writer claims live here too.",
+    "Assigned concerns must be USE EXISTING, PLUGIN, or TEMP WORKAROUND.",
+    "A TEMP WORKAROUND must name the condition that deletes it; correctness and test volume do not make it permanent.",
     "",
-    "`concerns` is an ARRAY, not an object keyed by concern: an object cannot",
-    "represent two owners for one key, which would make the duplicate check",
-    "vacuous. The check has to be able to fail.",
-    "",
-    "`status: \"unassigned\"` is a real entry, not a placeholder to be tidied",
-    "away. Naming an unowned concern is what stops it being quietly adopted by",
-    "whichever package is installed next."
+    "Unassigned concerns stay explicit so the next package cannot silently become an overlapping authority."
   ],
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "concerns": [
     {
       "concern": "runtime-substrate",
       "status": "assigned",
+      "disposition": "USE EXISTING",
       "owner": "pins/prime-0.8.1",
-      "note": "The pinned Prime Agent release. Supervisor, resident and client-owned workers, session leases, command journals, schedules, RLM children, sessions and ACP are ADOPTED from the substrate and not reimplemented (ADR 0009 §3)."
+      "note": "Prime owns the daemon supervisor, resident/client-owned workers, session leases, command journals, schedules, RLM children, sessions and ACP. Command Governor does not recreate them."
     },
     {
       "concern": "session-persistence",
       "status": "assigned",
+      "disposition": "USE EXISTING",
       "owner": "pins/prime-0.8.1",
-      "note": "Prime's own session JSONL. Command Governor ships no competing transcript format; the Governor's durable records are a separate concern with a separate owner."
+      "note": "Prime's session JSONL is the session/transcript authority. Command Governor ships no competing transcript format."
     },
     {
       "concern": "substrate-version-gate",
       "status": "assigned",
+      "disposition": "PLUGIN",
       "owner": "governor/prime/daemon-client.ts",
-      "note": "Refuses to speak to a daemon whose daemon_hello does not match pins.json (protocol name/version, appVersion, schemaRevision) before any command can be sent. governor/prime/substrate.ts is the sole reader of pins.json at runtime; the client consumes it."
+      "note": "Command-Governor-specific pin enforcement refuses a daemon whose hello disagrees with pins.json before commands are sent."
     },
     {
       "concern": "environment-boundary",
       "status": "assigned",
+      "disposition": "PLUGIN",
       "owner": "governor/prime/env.ts",
-      "note": "The positive allowlist applied on both edges: the supervisor spawn environment and the wire launchEnv. Nothing else may assemble an environment for Prime."
+      "note": "Command Governor's positive environment allowlist is a product security policy applied at the Prime boundary."
     },
     {
       "concern": "session-path-policy",
       "status": "assigned",
+      "disposition": "TEMP WORKAROUND",
       "owner": "governor/session/paths.ts",
-      "note": "D8. Defines canonical and fences it to the configured session directory. There is no default path and no fallback; omission fails preflight."
+      "removalCondition": "Delete or reduce to a package-level preflight once the intended Prime package path proves every Governor-created session has the required explicit persistent canonical path without this standalone module.",
+      "note": "D8 compatibility policy retained only until the package-shaped product proves the same invariant at the higher-level Prime API."
     },
     {
       "concern": "session-identity-and-incarnations",
       "status": "assigned",
+      "disposition": "TEMP WORKAROUND",
       "owner": "governor/session/registry.ts",
-      "note": "D1. Logical identity is Prime's stable sessionId; active-session ids are incarnations. Holds the stale-incarnation fence and the recovery lease. Extension-owned durable sidecar, never the session JSONL."
+      "removalCondition": "Delete when package-path D1 recovery proves Prime's high-level session identity/reconnect surfaces reject stale incarnations and recover the same logical session without an external Governor registry.",
+      "note": "D1 external-daemon adaptation only. It is not a permanent second session authority."
     },
     {
       "concern": "resident-root-recovery",
       "status": "assigned",
+      "disposition": "TEMP WORKAROUND",
       "owner": "governor/governor.ts",
-      "note": "D1. The one reopen loop: detect workerState=failed (never activity), take the lease, create on the same canonical path exactly once, bind the new incarnation, refuse a sessionId mismatch."
+      "removalCondition": "Delete the custom reopen loop when the actual package/plugin path recovers or safely reopens the same logical Prime session without duplicate roots under the D1 black-box reproducer.",
+      "note": "D1 compatibility behavior, retained pending the package-path reproducer required by ADR 0010."
     },
     {
       "concern": "mutation-outcome-classification",
       "status": "assigned",
+      "disposition": "TEMP WORKAROUND",
       "owner": "governor/mutation/classify.ts",
-      "note": "D2. The only decision procedure that may turn a daemon response into COMPLETED/FAILED/UNCERTAIN. Structural: FAILED requires a typed pre-effect error code; everything else unproven is UNCERTAIN. No error-text matching anywhere."
+      "removalCondition": "Delete when the intended package/plugin product path no longer consumes raw finalized daemon mutation failures in a way that can mint/re-drive a duplicate effect, or Prime upstream exposes trustworthy uncertain-effect semantics directly.",
+      "note": "D2 fail-closed classifier for the known Prime worker-loss journal defect; not a general Governor mutation framework."
     },
     {
       "concern": "mutation-ledger",
       "status": "assigned",
+      "disposition": "TEMP WORKAROUND",
       "owner": "governor/mutation/ledger.ts",
-      "note": "D2. Durable intent before send; a command id is dispatched once, ever; UNCERTAIN leaves only through evidence. No automatic re-dispatch and no automatic replacement id exist anywhere in the tree."
+      "removalCondition": "Delete when the package-path D2 worker-loss reproducer proves no duplicate external effect without an external Governor mutation/replacement authority; otherwise retain only the minimum shim still required by that reproducer.",
+      "note": "D2 compatibility ledger. Test depth does not grant permanent ownership."
     },
     {
       "concern": "agent-role-definitions",
       "status": "assigned",
+      "disposition": "PLUGIN",
       "owner": "harness/agents",
-      "note": "The role files are the definitions, not the enforcement. The `tools` and `model` fields bind only whatever later reads them. See role-loadout-enforcement."
+      "note": "Product-specific role defaults. Generic delegation/runtime behavior must still come from Prime or a selected package."
     },
     {
       "concern": "conformance-suite",
       "status": "assigned",
+      "disposition": "PLUGIN",
       "owner": "conformance",
-      "note": "The credential-free tier (pure + isolated runtime) gates every re-pin and every merge through the harness CI job. No second suite may claim to verify the pin."
+      "note": "Focused Command Governor distribution/package conformance. Tests protect product invariants or named temporary workarounds, not historical implementation topology."
     },
     {
       "concern": "role-loadout-enforcement",
       "status": "unassigned",
-      "phase": "C",
-      "plannedOwner": "a Command Governor policy layer over Prime's RLM child spawn (Gate P2/S5)",
-      "note": "ADR 0008 invariant 6 has no enforcement point yet. Until a component owns this, harness/agents/*.md restrictions are documentation, and the conformance suite says so rather than implying otherwise."
+      "phase": "package-bakeoff",
+      "plannedOwner": "Prime/package capability if sufficient; otherwise the smallest Command Governor policy extension",
+      "note": "Role files are definitions, not an excuse to build another child runtime. Prove the package gap before assigning an owner."
     },
     {
       "concern": "foreman-transport",
       "status": "unassigned",
-      "phase": "B",
-      "plannedOwner": "harness/extensions/cg-foreman (interface only in this revision; Gate S6)",
-      "note": "Transport candidates are capability-gated and replaceable; the interface is fixed now so neither candidate's shape reaches the ledger. Explicitly out of scope for Issue #17."
+      "phase": "foreman-bakeoff",
+      "plannedOwner": "an existing Pi-native exact-thread transport such as the selected pi-oracle/pi-gpt path, wrapped only if Command-Governor-specific correlation policy is missing",
+      "note": "Test existing transport candidates before bespoke browser/CDP machinery."
     },
     {
       "concern": "foreman-event-ledger",
       "status": "unassigned",
-      "phase": "B",
-      "plannedOwner": "a Command Governor extension-owned durable sidecar next to the mutation ledger",
-      "note": "Must not be the Prime session JSONL, and must not be confused with Prime's ack_result journal compaction, which is a receipt acknowledgement and not a foreman disposition."
+      "phase": "foreman-bakeoff",
+      "plannedOwner": "selected task/review/transport package state or the smallest proven Command Governor extension",
+      "note": "Do not assume a new sidecar store is required. Prove stale-revision/durable-disposition gaps on the assembled package path first."
     },
     {
       "concern": "compaction-summary",
       "status": "unassigned",
-      "phase": "E",
-      "plannedOwner": "exactly one memory package, not yet chosen",
-      "note": "Deferred deliberately. Prime resolves two session_before_compact handlers by load order with no error, so this must be exactly one owner forever."
+      "phase": "memory-bakeoff",
+      "plannedOwner": "exactly one selected Prime/Pi memory or compaction owner",
+      "note": "Only one owner; exact control facts remain deterministic rather than model-memory authority."
     },
     {
       "concern": "observational-memory",
       "status": "unassigned",
-      "phase": "E",
-      "plannedOwner": "undecided",
-      "note": "Deferred. Memory is never authority for exact lifecycle, capability, safety or user-owned decision facts (ADR 0008 invariant 5)."
+      "phase": "memory-bakeoff",
+      "plannedOwner": "a selected existing package if downstream-action evaluation demonstrates value",
+      "note": "Optional and advisory. Do not build a Governor memory engine."
     },
     {
       "concern": "tool-gating-and-veto",
       "status": "unassigned",
-      "phase": "C",
-      "plannedOwner": "a Command Governor policy extension",
-      "note": "ADR 0008 invariant 7 needs a single arbiter. Nothing in this revision gates tools."
+      "phase": "policy-bakeoff",
+      "plannedOwner": "Prime/package hook policy if sufficient; otherwise one small Command Governor policy extension",
+      "note": "One arbiter only. Existing hook/tool-gating capabilities are evaluated before custom code."
     },
     {
       "concern": "acp-boundary",
       "status": "unassigned",
-      "phase": "S2",
-      "plannedOwner": "Prime's stable ACP v1 server, driven by the official SDK in a Gate S2 conformance harness",
-      "note": "Out of scope for Issue #17 beyond one recorded fact: ACP mode leaves a resident worker after each invocation (Issue #15 D5), so the S2 harness must shut down and assert zero survivors, as the runtime fixture here already does."
+      "phase": "interop",
+      "plannedOwner": "Prime's stable ACP v1 server when ACP is actually part of a shipped path",
+      "note": "ACP is interoperability, not internal durability authority. Do not add permanent ACP tests before adoption."
     },
     {
       "concern": "sandbox-profile",
       "status": "unassigned",
-      "phase": "S3",
-      "plannedOwner": "Gate S3 selection (Gondolin, container, or OpenShell)",
-      "note": "Recorded requirement only: the daemon socket is a credential boundary (Issue #15 S0 finding 4); the environment-boundary owner above is the Governor-side half, OS containment is not chosen here."
+      "phase": "optional-hardening",
+      "plannedOwner": "an existing isolation mechanism selected only for untrusted workloads that require it",
+      "note": "Optional hardening for intentionally untrusted workloads; not a prerequisite for the trusted-local core product."
     }
   ]
 }

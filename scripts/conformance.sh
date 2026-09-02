@@ -1,23 +1,19 @@
 #!/bin/sh
-# Run the Command Governor conformance suite.
+# Run the active Command Governor conformance suite.
 #
-# Tier 1 is credential-free and must pass on every change; it is the gate on
-# any re-pin of the substrate and on every merge (the CI harness job runs this
-# script). It has two halves:
+# The suite is intentionally small and product-oriented:
 #
-#   conformance/tier1    pure: manifest, protocol facts against the pinned
-#                        build, classifier, ledger, registry, paths, env,
-#                        authorities, roles, ids, JSON;
-#   conformance/runtime  real: each file starts its own isolated Prime
-#                        supervisor (own socket, HOME, agent dir, mock model)
-#                        and drives the pinned daemon protocol -- D1, D2, D8,
-#                        the environment boundary, the S1 regressions.
+#   conformance/tier1    credential-free pin/policy checks plus the minimum
+#                        unit coverage for temporary D1/D2 compatibility shims;
+#   conformance/runtime  isolated real Prime supervisors exercising the public
+#                        pinned-runtime behavior: D1, D2, D8, environment
+#                        boundary, and the surviving S1 regressions.
 #
-# The runner is Node's own `node --test` with native type stripping. There is
-# no test-framework dependency and no build step.
+# Historical standalone-Rust tests are not an active second oracle. See
+# docs/testing.md and docs/research/2026-09-01-rust-invariant-catalog.md.
 #
-# The run ends with a process sweep: any process still referencing a fixture
-# root is a failure, not a warning.
+# Runtime tests are sequential because they kill supervisors/workers. The run
+# ends with a process sweep; survivors are a failure, not a warning.
 #
 # Usage: scripts/conformance.sh [extra node --test arguments]
 set -eu
@@ -50,12 +46,10 @@ printf 'conformance: typecheck (tsc --noEmit)\n'
 ./node_modules/.bin/tsc --noEmit || fail 'typecheck failed'
 printf 'conformance: typecheck clean\n\n'
 
-printf 'conformance: tier 1 / pure\n'
+printf 'conformance: tier 1 / policy + temporary-workaround units\n'
 node --test "$@" 'conformance/tier1/**/*.test.ts' </dev/null
 
-printf '\nconformance: tier 1 / runtime (isolated Prime supervisors)\n'
-# Sequential on purpose: several files kill supervisors and workers, and the
-# process sweep at the end must see a quiet table.
+printf '\nconformance: runtime / isolated pinned Prime\n'
 node --test --test-concurrency=1 "$@" 'conformance/runtime/**/*.test.ts' </dev/null
 
 printf '\nconformance: process sweep\n'
