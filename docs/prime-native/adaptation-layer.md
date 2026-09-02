@@ -241,11 +241,16 @@ dispatcher identity through the injectable process probe.
 
 **Probe responses only enter through one door.** `recordProbe` takes words
 only (what was attempted, what error ended it); a probe that came back
-with a response goes through `recordProbeOutcome`, which refuses to store
-a success response on a record that stays UNCERTAIN whatever verdict the
-caller passes, and the `mark*` writers refuse a response that contradicts
-the state they write. The suite tries every public writer and then scans
-every version of every record for UNCERTAIN-with-success.
+with a response goes through `recordProbeOutcome`, which resolves an
+UNCERTAIN record from a success response whatever verdict the caller
+passes, refuses any response on a DISPATCHED record (that is the
+dispatcher's outcome and belongs on `recordOutcome`, which resolves as it
+records), and keeps a response on an already-resolved record only with
+a `conflictsWith` mark when it contradicts the resolution. The `mark*`
+writers and both resolution branches refuse a response that contradicts
+the state they write. The suite calls every public writer, including
+`adoptAbandoned` after each, and then scans every version of every record
+for an UNCERTAIN or DISPATCHED version carrying a success response.
 
 **Evidence and resolution are one write.** A probe's stored success is
 exact evidence that the effect happened, and a stored typed pre-effect

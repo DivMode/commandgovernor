@@ -812,6 +812,16 @@ export class MutationLedger {
 			throw new MutationLedgerError("illegal_transition", `${commandId}: a failure response cannot be recorded as a completion`);
 		}
 		return this.#update(commandId, (current) => {
+			if (current.state === "DISPATCHED") {
+				// A response for a DISPATCHED record is the dispatcher's own outcome and
+				// belongs on recordOutcome, which resolves as it records. Storing it
+				// here would leave a DISPATCHED record carrying evidence, which the
+				// next adoption would turn into an UNCERTAIN record carrying evidence.
+				if (probe.response !== undefined) {
+					throw new MutationLedgerError("illegal_transition", `${commandId}: is DISPATCHED; a response for it is the dispatcher's outcome and must be recorded through recordOutcome`);
+				}
+				return { ...current, probes: [...(current.probes ?? []), { at, ...probe }] };
+			}
 			if (current.state !== "UNCERTAIN") {
 				// Already resolved: the probe is kept. If it is exact evidence that
 				// contradicts the resolution (a stored success on a FAILED record, a
@@ -822,13 +832,16 @@ export class MutationLedger {
 			}
 			const probes = [...(current.probes ?? []), { at, ...probe }];
 			if (verdict.verdict === "completed") {
+				MutationLedger.#assertEvidenceConsistent(commandId, "COMPLETED", verdict.response);
 				const evidence: ResolutionEvidence = { kind: "effect_observed", by, detail: "a success response for this command id is the substrate's own statement that the effect happened", observedAt: at };
 				return { ...current, probes, state: "COMPLETED", transitions: [...current.transitions, { at, to: "COMPLETED", reason: `resolved by effect_observed (${by})`, evidence, response: verdict.response }] };
 			}
 			if (verdict.verdict === "failed") {
+				MutationLedger.#assertEvidenceConsistent(commandId, "FAILED", verdict.response);
 				const evidence: ResolutionEvidence = { kind: "effect_absent_proven", by, detail: `typed pre-effect rejection ${verdict.proof.commandType} + ${verdict.proof.code}`, observedAt: at };
 				return { ...current, probes, state: "FAILED", transitions: [...current.transitions, { at, to: "FAILED", reason: `resolved by effect_absent_proven (${by})`, evidence, proof: verdict.proof, response: verdict.response }] };
 			}
+			MutationLedger.#assertEvidenceConsistent(commandId, "UNCERTAIN", probe.response);
 			return { ...current, probes };
 		});
 	}

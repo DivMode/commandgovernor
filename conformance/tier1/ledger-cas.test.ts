@@ -754,6 +754,28 @@ describe("D2: ledger writes are compare-and-swap", () => {
 		fresh("cg-c");
 		ledger.markUncertain("cg-c", "timeout");
 		assert.throws(() => ledger.recordProbeOutcome("cg-c", { response: stored }, { verdict: "completed", response: ok }, "probe"), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		// 6. The reviewer's route: a response-bearing probe on a DISPATCHED record (type-legal, no cast) is refused,
+		//    so the adoption that follows cannot turn it into UNCERTAIN-with-success. A words-only probe is fine.
+		fresh("cg-d");
+		assert.throws(() => ledger.recordProbeOutcome("cg-d", { response: ok }, { verdict: "completed", response: ok }, "some caller"), (e: unknown) => e instanceof MutationLedgerError && /recordOutcome/.test(e.message));
+		assert.throws(() => ledger.recordProbeOutcome("cg-d", { response: stored }, { verdict: "uncertain", reason: "untyped_failure", response: stored }, "some caller"), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		assert.equal(ledger.recordProbeOutcome("cg-d", { detail: "attempted" }, { verdict: "uncertain", reason: "timeout" }, "probe").probes?.length, 1);
+		assert.equal(ledger.require("cg-d").state, "DISPATCHED");
+		const successor = new MutationLedger(dir, { processProbe: { alive: () => false, startId: () => undefined }, self: { pid: 4004, processStartId: "start:4004" } });
+		successor.adoptAbandoned();
+		assert.equal(ledger.require("cg-d").state, "UNCERTAIN", "adopted, and carries no evidence");
+		// 7. A "failed" verdict carrying a success response (type-legal) is refused on the probe path as on markFailed.
+		fresh("cg-e");
+		ledger.markUncertain("cg-e", "timeout");
+		assert.throws(() => ledger.recordProbeOutcome("cg-e", { detail: "x" }, { verdict: "failed", proof: { kind: "typed_pre_effect_rejection", commandType: "import_jsonl", code: "session_import_file_not_found" }, response: ok }, "probe"), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		// 8. The remaining writers carry no response: resolveUncertain, markNeverSent, recordDispatch({ supersedes }), adoptAbandoned.
+		ledger.resolveUncertain("cg-e", absent);
+		fresh("cg-f");
+		assert.equal(ledger.markNeverSent("cg-f", "test").state, "FAILED");
+		fresh("cg-g");
+		ledger.markUncertain("cg-g", "timeout");
+		ledger.recordDispatch({ commandId: "cg-g2", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-g" });
+		successor.adoptAbandoned();
 		// The invariant, checked over every version of every record written above.
 		for (const record of ledger.list()) {
 			for (const version of ledger.history(record.commandId)) {
