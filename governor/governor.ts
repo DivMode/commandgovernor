@@ -439,15 +439,9 @@ export class Governor {
 		return client;
 	}
 
+	/** The dispatcher's own outcome; kept as evidence even if an adopter marked the record uncertain first. */
 	#record(commandId: string, verdict: Verdict): MutationRecord {
-		switch (verdict.verdict) {
-			case "completed":
-				return this.ledger.markCompleted(commandId, verdict.response);
-			case "failed":
-				return this.ledger.markFailed(commandId, verdict.proof, verdict.response);
-			case "uncertain":
-				return this.ledger.markUncertain(commandId, verdict.reason, verdict.response, verdict.detail);
-		}
+		return this.ledger.recordOutcome(commandId, verdict);
 	}
 
 	/**

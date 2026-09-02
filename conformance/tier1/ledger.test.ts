@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -99,6 +99,31 @@ describe("MutationLedger (D2)", () => {
 		const a = new MutationLedger(dir, { self: { pid: 5000, processStartId: "old" } });
 		const b = new MutationLedger(dir, { self: { pid: 5000, processStartId: "new" } });
 		assert.notEqual(a.self.ownerToken, b.self.ownerToken, "a recycled pid must not inherit the dead dispatcher's token");
+	});
+
+	it("a stray entry under mutations/ is reported, and does not hide the records around it", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-ledger-"));
+		const ledger = new MutationLedger(dir);
+		ledger.recordDispatch(identity("cg-real"));
+		ledger.markUncertain("cg-real", "timeout");
+		mkdirSync(join(ledger.dir, "stray dir"));
+		writeFileSync(join(ledger.dir, "notes.txt"), "x");
+		assert.deepEqual(ledger.list().map((r) => r.commandId), ["cg-real"]);
+		assert.deepEqual(ledger.awaitingReconciliation().map((r) => r.commandId), ["cg-real"], "the obligation is still visible");
+		assert.deepEqual([...ledger.adoptAbandoned().strays].sort(), ["notes.txt", "stray dir"]);
+	});
+
+	it("a version file with a non-canonical name is not a version, and a gap in the history is a typed error", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-ledger-"));
+		const ledger = new MutationLedger(dir);
+		ledger.recordDispatch(identity("cg-v"));
+		ledger.markUncertain("cg-v", "timeout");
+		const recordDir = join(ledger.dir, "cg-v");
+		writeFileSync(join(recordDir, "v03.json"), "{}");
+		assert.equal(ledger.require("cg-v").version, 2, "v03.json is ignored");
+		rmSync(join(recordDir, "v1.json"));
+		assert.equal(ledger.require("cg-v").state, "UNCERTAIN", "the current version is still readable");
+		assert.throws(() => ledger.history("cg-v"), (e: unknown) => e instanceof MutationLedgerError && e.code === "corrupt_history");
 	});
 
 	it("survives a re-open: a second ledger over the same dir reads the same states", () => {

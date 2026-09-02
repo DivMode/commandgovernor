@@ -139,6 +139,7 @@ describe("D2: ledger writes are compare-and-swap", () => {
 		assert.deepEqual(A.history("cg-1")[1]!.probes, undefined, "an older version is not rewritten when a newer one is published");
 		let attempts = 0;
 		const starved = new MutationLedger(dir, {
+			maxAttempts: 8,
 			hooks: {
 				beforeCommit: () => {
 					attempts += 1;
@@ -147,8 +148,49 @@ describe("D2: ledger writes are compare-and-swap", () => {
 			},
 		});
 		assert.throws(() => starved.recordProbe("cg-1", { detail: "never" }), (e: unknown) => e instanceof MutationLedgerError && e.code === "contended");
-		assert.equal(attempts, MAX_CAS_ATTEMPTS);
+		assert.equal(attempts, 8);
+		assert.ok(MAX_CAS_ATTEMPTS > 8, "the production bound is far higher (and each lost attempt backs off)");
 		assert.ok(!A.require("cg-1").probes?.some((p) => p.detail === "never"), "the starved write published nothing");
+	});
+
+	it("the dispatcher's own outcome is kept as evidence when an adopter marked the record uncertain first", () => {
+		// The reverse ordering of the race above: adoption commits before the dispatcher's result lands.
+		const setup = () => {
+			const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+			const dispatcher = new MutationLedger(dir, { self: { pid: 1001, processStartId: "start:1001" } });
+			dispatcher.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+			const adopter = new MutationLedger(dir, { processProbe: { alive: () => false, startId: () => undefined }, self: { pid: 2002, processStartId: "start:2002" } });
+			assert.equal(adopter.adoptAbandoned().adopted.length, 1);
+			assert.equal(dispatcher.require("cg-1").state, "UNCERTAIN");
+			return dispatcher;
+		};
+		// A success response is exact evidence: UNCERTAIN -> COMPLETED, with the response kept as a probe.
+		const ok = setup();
+		const completed = ok.recordOutcome("cg-1", { verdict: "completed", response: { type: "response", command: "x", success: true } });
+		assert.equal(completed.state, "COMPLETED");
+		assert.equal(completed.transitions[completed.transitions.length - 1]!.evidence?.by, "dispatcher's own response");
+		assert.equal(completed.probes?.length, 1);
+		assert.deepEqual(ok.history("cg-1").map((v) => v.state), ["DISPATCHED", "UNCERTAIN", "UNCERTAIN", "COMPLETED"]);
+		// A typed pre-effect rejection is exact evidence the other way: UNCERTAIN -> FAILED.
+		const failed = setup().recordOutcome("cg-1", {
+			verdict: "failed",
+			proof: { kind: "typed_pre_effect_rejection", commandType: "import_jsonl", code: "session_import_file_not_found" },
+			response: { type: "response", command: "x", success: false, error: "nope", errorInfo: { code: "session_import_file_not_found", filePath: "/x" } },
+		});
+		assert.equal(failed.state, "FAILED");
+		assert.equal(failed.transitions[failed.transitions.length - 1]!.evidence?.kind, "effect_absent_proven");
+		// An uncertain outcome adds nothing the adoption did not: it is appended as a probe, state unchanged.
+		const still = setup().recordOutcome("cg-1", { verdict: "uncertain", reason: "transport_lost", detail: "socket closed" });
+		assert.equal(still.state, "UNCERTAIN");
+		assert.equal(still.probes?.length, 1);
+		assert.match(still.probes![0]!.detail!, /transport_lost/);
+		// And with no adoption in the way, recordOutcome is the plain DISPATCHED transition.
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const plain = new MutationLedger(dir);
+		plain.recordDispatch({ commandId: "cg-2", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		assert.equal(plain.recordOutcome("cg-2", { verdict: "completed", response: { type: "response", command: "x", success: true } }).version, 2);
+		// A resolved record is not something a late outcome may touch: that is the caller's error.
+		assert.throws(() => plain.recordOutcome("cg-2", { verdict: "uncertain", reason: "timeout" }), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
 	});
 
 	it("negative control: the pre-review rename-in-place write loses A's evidence from a stale snapshot", () => {

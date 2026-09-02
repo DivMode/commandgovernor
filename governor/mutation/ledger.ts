@@ -63,7 +63,7 @@ import { join } from "node:path";
 import { createFileExclusiveDurable, mkdirDurable } from "../fs/durable.ts";
 import type { DaemonCommand, DaemonResponse } from "../prime/protocol.ts";
 import { classifyProcessIdentity, LIVE_PROBE, type ProcessIdentity, type ProcessIdentityVerdict, type ProcessProbe, identityProvesProcessOver } from "../process/identity.ts";
-import type { PreEffectProof, UncertainReason } from "./classify.ts";
+import type { PreEffectProof, UncertainReason, Verdict } from "./classify.ts";
 import { commandDigest } from "./digest.ts";
 
 export type MutationState = "DISPATCHED" | "COMPLETED" | "FAILED" | "UNCERTAIN";
@@ -118,7 +118,7 @@ export interface MutationRecord {
 	readonly probes?: readonly { readonly at: string; readonly response?: DaemonResponse; readonly detail?: string }[];
 }
 
-export type MutationLedgerErrorCode = "duplicate_command_id" | "illegal_transition" | "unknown_command" | "supersedes_not_uncertain" | "contended";
+export type MutationLedgerErrorCode = "duplicate_command_id" | "illegal_transition" | "unknown_command" | "supersedes_not_uncertain" | "contended" | "corrupt_history";
 
 export class MutationLedgerError extends Error {
 	readonly code: MutationLedgerErrorCode;
@@ -137,6 +137,8 @@ export interface AdoptionReport {
 	readonly inFlight: readonly MutationRecord[];
 	/** DISPATCHED records whose dispatcher cannot be classified. Left alone and reported: an operator decides. */
 	readonly undecidable: readonly { readonly record: MutationRecord; readonly verdict: ProcessIdentityVerdict }[];
+	/** Entries under `mutations/` that are not record directories. Ignored by every listing and reported here. */
+	readonly strays: readonly string[];
 }
 
 /**
@@ -156,12 +158,33 @@ export interface MutationLedgerOptions {
 	/** This Governor instance's owner token. */
 	readonly ownerToken?: string;
 	readonly hooks?: MutationLedgerHooks;
+	/** Attempts a write makes before reporting `contended`; defaults to {@link MAX_CAS_ATTEMPTS}. Tests lower it. */
+	readonly maxAttempts?: number;
 }
 
-/** Attempts a write makes against concurrent writers before it reports contention. */
-export const MAX_CAS_ATTEMPTS = 64;
+/**
+ * Attempts a write makes against concurrent writers before it reports
+ * contention. Every lost attempt means another writer made progress, so
+ * exhaustion needs that many OTHER writes to land on one record while this
+ * one keeps losing; with the backoff below that took more than 32 processes
+ * hammering one record to approach at the previous limit of 64.
+ */
+export const MAX_CAS_ATTEMPTS = 1024;
 
-const VERSION_FILE = /^v(\d+)\.json$/;
+/** Upper bound of the jittered pause after a lost attempt, in milliseconds. */
+const CAS_BACKOFF_MAX_MS = 25;
+
+const VERSION_FILE = /^v([1-9]\d*)\.json$/;
+const COMMAND_ID = /^[A-Za-z0-9._:-]+$/;
+
+const sleeper = new Int32Array(new SharedArrayBuffer(4));
+
+/** Synchronous, jittered pause; the write path is synchronous on purpose (see durable.ts). */
+function backoff(attempt: number): void {
+	const cap = Math.min(CAS_BACKOFF_MAX_MS, 1 + attempt);
+	const ms = Math.random() * cap;
+	if (ms >= 0.5) Atomics.wait(sleeper, 0, 0, ms);
+}
 
 /**
  * `value` with every environment-bearing field removed at any depth; the
@@ -198,6 +221,7 @@ export class MutationLedger {
 	readonly #probe: ProcessProbe;
 	readonly #self: DispatcherIdentity;
 	readonly #hooks: MutationLedgerHooks;
+	readonly #maxAttempts: number;
 
 	constructor(stateDir: string, options: MutationLedgerOptions = {}) {
 		this.dir = join(stateDir, "mutations");
@@ -209,6 +233,7 @@ export class MutationLedger {
 		// that dispatcher's record its own and never inspect it.
 		this.#self = { ...self, ownerToken: options.ownerToken ?? `pid#${self.pid}#${randomUUID().slice(0, 8)}` };
 		this.#hooks = options.hooks ?? {};
+		this.#maxAttempts = options.maxAttempts ?? MAX_CAS_ATTEMPTS;
 	}
 
 	/** The identity this ledger writes as dispatcher. */
@@ -217,8 +242,24 @@ export class MutationLedger {
 	}
 
 	#recordDir(commandId: string): string {
-		if (!/^[A-Za-z0-9._:-]+$/.test(commandId)) throw new Error(`refusing to use ${JSON.stringify(commandId)} as a file name`);
+		if (!COMMAND_ID.test(commandId)) throw new Error(`refusing to use ${JSON.stringify(commandId)} as a file name`);
 		return join(this.dir, commandId);
+	}
+
+	/** Record directory names under `mutations/`, and the entries that are not. */
+	#entries(): { ids: string[]; strays: string[] } {
+		const ids: string[] = [];
+		const strays: string[] = [];
+		for (const entry of readdirSync(this.dir, { withFileTypes: true })) {
+			if (entry.isDirectory() && COMMAND_ID.test(entry.name)) ids.push(entry.name);
+			else strays.push(entry.name);
+		}
+		return { ids, strays };
+	}
+
+	/** Entries under `mutations/` that are not record directories; never read, always reported. */
+	strays(): string[] {
+		return this.#entries().strays;
 	}
 
 	#versionPath(commandId: string, version: number): string {
@@ -268,16 +309,22 @@ export class MutationLedger {
 		if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
 		const versions: MutationRecord[] = [];
 		for (let version = 1; version <= current.version; version += 1) {
-			const parsed = JSON.parse(readFileSync(this.#versionPath(commandId, version), "utf8")) as MutationRecord;
-			versions.push({ ...parsed, version });
+			let raw: string;
+			try {
+				raw = readFileSync(this.#versionPath(commandId, version), "utf8");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				// Nothing in the Governor removes a version; a gap is damage, and is named as such.
+				throw new MutationLedgerError("corrupt_history", `${commandId}: version ${version} is missing although version ${current.version} exists`);
+			}
+			versions.push({ ...(JSON.parse(raw) as MutationRecord), version });
 		}
 		return versions;
 	}
 
 	list(): MutationRecord[] {
-		return readdirSync(this.dir, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => this.get(entry.name))
+		return this.#entries()
+			.ids.map((id) => this.get(id))
 			.filter((record): record is MutationRecord => record !== undefined)
 			.sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt) || a.commandId.localeCompare(b.commandId));
 	}
@@ -303,6 +350,7 @@ export class MutationLedger {
 		const adopted: MutationRecord[] = [];
 		const inFlight: MutationRecord[] = [];
 		const undecidable: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
+		const strays = this.strays();
 		for (const record of this.list()) {
 			if (record.state !== "DISPATCHED") continue;
 			const dispatcher = record.dispatchedBy;
@@ -340,7 +388,7 @@ export class MutationLedger {
 				if (!(error instanceof MutationLedgerError) || error.code !== "illegal_transition") throw error;
 			}
 		}
-		return { adopted, inFlight, undecidable };
+		return { adopted, inFlight, undecidable, strays };
 	}
 
 	/**
@@ -403,7 +451,7 @@ export class MutationLedger {
 	 * means another writer won; re-read and re-apply against the new state.
 	 */
 	#update(commandId: string, from: readonly MutationState[] | undefined, target: MutationState | undefined, derive: (current: MutationRecord) => Omit<MutationRecord, "version">): MutationRecord {
-		for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+		for (let attempt = 0; attempt < this.#maxAttempts; attempt += 1) {
 			const current = this.#current(commandId);
 			if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
 			if (from && !from.includes(current.record.state)) {
@@ -415,8 +463,9 @@ export class MutationLedger {
 			if (published.outcome === "created") return next;
 			// "exists": a concurrent writer published this version; "vanished"
 			// cannot happen (versions are never removed) and is treated the same.
+			backoff(attempt);
 		}
-		throw new MutationLedgerError("contended", `${commandId}: ${MAX_CAS_ATTEMPTS} attempts each found a newer version; giving up without writing`);
+		throw new MutationLedgerError("contended", `${commandId}: ${this.#maxAttempts} attempts each found a newer version; giving up without writing`);
 	}
 
 	#transition(commandId: string, from: readonly MutationState[], transition: MutationTransition): MutationRecord {
@@ -439,6 +488,40 @@ export class MutationLedger {
 			uncertainReason,
 			...(response ? { response } : {}),
 		});
+	}
+
+	/**
+	 * Record the dispatcher's own outcome for a command it sent. Normally a
+	 * DISPATCHED transition. If an adopter got there first (the record is
+	 * UNCERTAIN now), the outcome is not discarded: a success response IS
+	 * exact evidence that the effect happened, a typed pre-effect rejection IS
+	 * exact evidence that it did not, and an uncertain outcome is appended as
+	 * a probe. Anything else is the caller's error and propagates.
+	 */
+	recordOutcome(commandId: string, verdict: Verdict): MutationRecord {
+		try {
+			switch (verdict.verdict) {
+				case "completed":
+					return this.markCompleted(commandId, verdict.response);
+				case "failed":
+					return this.markFailed(commandId, verdict.proof, verdict.response);
+				case "uncertain":
+					return this.markUncertain(commandId, verdict.reason, verdict.response, verdict.detail);
+			}
+		} catch (error) {
+			if (!(error instanceof MutationLedgerError) || error.code !== "illegal_transition" || this.require(commandId).state !== "UNCERTAIN") throw error;
+		}
+		const observedAt = new Date().toISOString();
+		switch (verdict.verdict) {
+			case "completed":
+				this.recordProbe(commandId, { response: verdict.response, detail: "the dispatcher's own response, after adoption" });
+				return this.resolveUncertain(commandId, { kind: "effect_observed", by: "dispatcher's own response", detail: "the substrate returned success to the dispatcher after an adopter marked the record uncertain", observedAt });
+			case "failed":
+				this.recordProbe(commandId, { response: verdict.response, detail: "the dispatcher's own response, after adoption" });
+				return this.resolveUncertain(commandId, { kind: "effect_absent_proven", by: "dispatcher's own response", detail: `typed pre-effect rejection ${verdict.proof.commandType} + ${verdict.proof.code}, returned to the dispatcher after an adopter marked the record uncertain`, observedAt });
+			case "uncertain":
+				return this.recordProbe(commandId, { ...(verdict.response ? { response: verdict.response } : {}), detail: `the dispatcher's own outcome after adoption: ${verdict.reason}${verdict.detail ? ` (${verdict.detail})` : ""}` });
+		}
 	}
 
 	/** The only way out of UNCERTAIN: exact evidence about the external effect. */

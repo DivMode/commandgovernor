@@ -162,7 +162,12 @@ negative control (the pre-review rename-in-place from a stale snapshot,
 which loses the evidence); `ledger-race.test.ts` releases eight real child
 processes on one record by a filesystem barrier and asserts one winner,
 every probe kept, contiguous versions and no regression, and six real
-adopters producing one adoption. A command id is dispatched once, ever;
+adopters producing one adoption. The dispatcher's own outcome is never
+discarded either: if an adopter marked its record uncertain first, a
+success response resolves it (`effect_observed`, the response kept as a
+probe), a typed pre-effect rejection resolves it the other way, and an
+uncertain outcome is appended as a probe (`recordOutcome`). A command id
+is dispatched once, ever;
 `UNCERTAIN` leaves only through `resolveUncertain` with
 `effect_observed` (→ COMPLETED) or `effect_absent_proven` (→ FAILED). A
 human-issued replacement is a new command that must name the uncertain
@@ -185,7 +190,9 @@ uses: `gone` or `replaced` (pid reuse) adopts the record as UNCERTAIN with
 reason `dispatcher_lost` and the verdict on the transition; `current` is a
 live Governor sharing the state directory, whose in-flight record is left
 alone so that its own completion remains a legal transition; `unknown` is
-reported and left, never adopted. The Governor runs adoption at
+reported and left, never adopted; entries under `mutations/` that are
+not record directories are listed as `strays` and never read. The
+Governor runs adoption at
 construction (`startupAdoption`) and `awaitingReconciliation()` runs it
 before listing, so a record whose dispatcher is proven over is on the
 surface whichever way a successor looks; an `unknown` dispatcher's record
@@ -435,6 +442,23 @@ would have truncated the record.
   an operator who has confirmed the process is over resolves it. On macOS
   the start identity has one-second resolution, the same limit Prime's
   own lease accepts.
+- **A write can report `contended`.** Each lost compare-and-swap attempt
+  means another writer landed a version; after 1024 losses with jittered
+  backoff the write throws `contended` and nothing is written. Reaching
+  it needs that many other writes on ONE record while this one keeps
+  losing; the independent review saw a worst case of 54 attempts with 32
+  processes hammering one record before the backoff existed. Every
+  version carries the whole record, so a record with thousands of
+  versions costs quadratic bytes; writes per record are bounded by its
+  lifecycle, not by anything here.
+- **Readers trust names that writers made durable.** The create paths
+  (`createFileExclusiveDurable`, `mkdirDurable`, including their losers
+  and the already-exists case) fsync the parent before relying on a name.
+  Plain reads (`#current`, `readClientIdentity`, `inspectRecoveryLease`)
+  rely on that: the state directory and `mutations/` are fsynced at
+  Governor construction and each record directory at every dispatch, so
+  by the time a read happens the names it depends on have been confirmed
+  by a writer in this or an earlier process.
 - **Abandonment inside a live process is not adopted.** If the Governor
   process survives but its own dispatch path fails after DISPATCHED
   (the send throws something other than transport loss or timeout, or

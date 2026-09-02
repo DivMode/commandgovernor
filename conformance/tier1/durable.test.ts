@@ -306,10 +306,12 @@ describe("DUR: mkdirDurable", () => {
 		assert.equal(calls[1]!.path, root, "the state dir's entry is made durable in ITS parent");
 		assert.equal(calls[4]!.path, target);
 		assert.equal(calls[5]!.path, join(root, "state"), "and mutations/ in the state dir");
-		// Idempotent, and silent about what already exists: no mkdir attempt, no fsync.
+		// Idempotent: no mkdir attempt, but the leaf's parent is fsynced once, because
+		// a directory another process created is not known durable until this one confirms it.
 		const again = recorder();
 		assert.deepEqual(mkdirDurable(target, { fs: again.fs }), []);
-		assert.deepEqual(ops(again.calls), []);
+		assert.deepEqual(ops(again.calls), ["open", "fsync", "close"]);
+		assert.equal(again.calls[0]!.path, join(root, "state"), "the existing leaf's parent");
 	});
 
 	it("the loser of a concurrent mkdir still fsyncs the parent before returning", () => {

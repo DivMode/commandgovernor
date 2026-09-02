@@ -224,8 +224,10 @@ export function createFileExclusiveDurable(path: string, contents: string, optio
 /**
  * Create `dir` and any missing ancestors, durably: each directory that this
  * call creates is followed by an `fsync` of ITS PARENT, so the new entry is
- * on disk before the caller writes anything under it. Directories that
- * already exist are left alone and not fsynced. Returns the directories
+ * on disk before the caller writes anything under it. When `dir` already
+ * exists its parent is fsynced once, because a name another process created
+ * is not known durable to this one until it has confirmed it. On return the
+ * leaf's entry is durable whichever process made it. Returns the directories
  * created, outermost first.
  *
  * A directory that another creator made between this call's existence check
@@ -245,6 +247,13 @@ export function mkdirDurable(dir: string, options: { mode?: number; fs?: Durable
 	const missing: string[] = [];
 	for (let current = absolute; !fs.existsSync(current) && dirname(current) !== current; current = dirname(current)) {
 		missing.unshift(current);
+	}
+	if (missing.length === 0) {
+		// The directory exists, created by someone else at some time: its entry
+		// in the parent is not known durable to THIS caller until the parent is
+		// fsynced. One fsync, then the caller may write under it.
+		fsyncDirectory(dirname(absolute), fs);
+		return created;
 	}
 	for (const path of missing) {
 		let made = true;
