@@ -114,6 +114,22 @@ export class RecoveryLeaseHeld extends Error {
 }
 
 /**
+ * Every acquisition attempt found the lease changing under it and, at the
+ * final look, nobody held it. Nothing was taken and nothing was deleted; the
+ * caller may simply try again. Distinct from {@link RecoveryLeaseHeld} so the
+ * report never names a holder that does not exist.
+ */
+export class RecoveryLeaseContended extends Error {
+	readonly code = "recovery_lease_contended" as const;
+	readonly sessionId: string;
+	constructor(sessionId: string) {
+		super(`recovery lease for ${sessionId} changed under every attempt and is not held now; retry`);
+		this.name = "RecoveryLeaseContended";
+		this.sessionId = sessionId;
+	}
+}
+
+/**
  * A reclaim could not enter its critical section because the per-session
  * reclaim mutex exists. `holderIdentity: current` is contention with a live
  * reclaimer; `gone`/`replaced` means a Governor died inside the (microsecond,
@@ -423,8 +439,12 @@ export class SessionRegistry {
 			if (replaced === "created") return lease(); // the dead holder released it itself first; nothing was reclaimed
 			// Someone else acted between our inspection and our critical section: look again.
 		}
+		// Every attempt found the lease changing under it. Report what is there now,
+		// honestly: a holder if there is one, and "contended" -- never this caller's
+		// own record -- if the name is absent at the final look.
 		const inspected = this.inspectRecoveryLease(sessionId);
-		throw new RecoveryLeaseHeld(sessionId, inspected?.holder ?? record, inspected?.identity ?? "unknown");
+		if (inspected) throw new RecoveryLeaseHeld(sessionId, inspected.holder, inspected.identity);
+		throw new RecoveryLeaseContended(sessionId);
 	}
 
 	/**

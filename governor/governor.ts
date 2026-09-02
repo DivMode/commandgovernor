@@ -37,7 +37,7 @@ import type { DaemonEventCursor } from "./prime/protocol.ts";
 import { MutationLedger, type MutationRecord, type ResolutionEvidence } from "./mutation/ledger.ts";
 import { currentProcessIdentity } from "./process/identity.ts";
 import { canonicalSessionPath, type CanonicalSessionPath } from "./session/paths.ts";
-import { type Incarnation, RecoveryLeaseHeld, RecoveryReclaimBlocked, type SessionRecord, SessionRegistry } from "./session/registry.ts";
+import { type Incarnation, RecoveryLeaseContended, RecoveryLeaseHeld, RecoveryReclaimBlocked, type SessionRecord, SessionRegistry } from "./session/registry.ts";
 
 export interface GovernorOptions {
 	/** Durable Governor state: registry, ledger, client identity. */
@@ -90,7 +90,9 @@ export type RecoveryOutcome =
 	 * reclaimer (retry later); false for a stale mutex an operator must clear,
 	 * or one whose holder cannot be told. Nothing was dispatched either way.
 	 */
-	| { readonly action: "reclaim_blocked"; readonly holder: RecoveryReclaimBlocked; readonly transient: boolean };
+	| { readonly action: "reclaim_blocked"; readonly holder: RecoveryReclaimBlocked; readonly transient: boolean }
+	/** The lease changed under every attempt and nobody holds it now; retry. Nothing was dispatched. */
+	| { readonly action: "contended"; readonly detail: RecoveryLeaseContended };
 
 export interface DispatchResult {
 	readonly record: MutationRecord;
@@ -493,6 +495,7 @@ export class Governor {
 			} catch (error) {
 				if (error instanceof RecoveryReclaimBlocked) return { action: "reclaim_blocked", holder: error, transient: error.holderIdentity === "current" };
 				if (error instanceof RecoveryLeaseHeld) return { action: "lease_held", holder: error };
+				if (error instanceof RecoveryLeaseContended) return { action: "contended", detail: error };
 				throw error;
 			}
 		}

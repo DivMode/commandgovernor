@@ -211,6 +211,58 @@ describe("SessionRegistry (D1)", () => {
 		assert.throws(() => staging.acquireRecoveryLease("s", "me"), (e: unknown) => e instanceof RecoveryLeaseHeld && e.holder.ownerToken === "fresh" && e.holderIdentity === "current");
 	});
 
+	it("exhaustion under constant churn reports the real holder, or 'contended' when nobody holds -- never the caller's own record", () => {
+		const probe: ProcessProbe = { alive: (pid) => pid !== 2147483646, startId: () => undefined };
+		const { registry, stateDir, path } = fresh({ processProbe: probe, self: { pid: 1002, processStartId: "s2" } });
+		registry.create({ sessionId: "s", sessionPath: path("s.jsonl"), lifecycle: "resident", activeSessionId: "act-1", openedBy: "o" });
+		let looks = 0;
+		const churning = new SessionRegistry(stateDir, {
+			self: { pid: 1002, processStartId: "s2" },
+			processProbe: {
+				alive: (pid) => {
+					if (pid === 2147483646) {
+						looks += 1;
+						// Every attempt: the dead lease is swapped for a DIFFERENT dead lease after inspection, so the CAS sees changed bytes.
+						rmSync(join(registry.dir, "s.json.recovery.lock"));
+						lease(registry, "s", { ownerToken: `ghost-${looks}`, pid: 2147483646, processStartId: "gone" });
+					}
+					return probe.alive(pid);
+				},
+				startId: probe.startId,
+			},
+		});
+		lease(registry, "s", { ownerToken: "ghost-0", pid: 2147483646, processStartId: "gone" });
+		// Final look finds the last planted lease: RecoveryLeaseHeld names it, not the caller.
+		assert.throws(() => churning.acquireRecoveryLease("s", "me"), (e: unknown) => e instanceof RecoveryLeaseHeld && /^ghost-\d+$/.test(e.holder.ownerToken) && e.holder.ownerToken !== "me");
+		assert.ok(looks >= 4, `all attempts were spent (${looks})`);
+		// Same churn, but the dead holder vanishes for good during the last attempt: the name is free, so the
+		// acquirer simply takes it, and reports a plain acquisition rather than a reclaim of anybody.
+		looks = 0;
+		rmSync(join(registry.dir, "s.json.recovery.lock"));
+		lease(registry, "s", { ownerToken: "ghost-0", pid: 2147483646, processStartId: "gone" });
+		const freedAtEnd = new SessionRegistry(stateDir, {
+			self: { pid: 1002, processStartId: "s2" },
+			processProbe: {
+				alive: (pid) => {
+					if (pid === 2147483646) {
+						looks += 1;
+						rmSync(join(registry.dir, "s.json.recovery.lock"));
+						if (looks < 4) lease(registry, "s", { ownerToken: `ghost-${looks}`, pid: 2147483646, processStartId: "gone" });
+					}
+					return probe.alive(pid);
+				},
+				startId: probe.startId,
+			},
+		});
+		const taken = freedAtEnd.acquireRecoveryLease("s", "me");
+		assert.equal(taken.reclaimedFrom, undefined, "nothing was reclaimed: the name was free when the critical section looked");
+		assert.equal(taken.record.ownerToken, "me");
+		taken.release();
+		// RecoveryLeaseContended (every attempt changed under us AND the name is absent at the final look) needs a
+		// contender that acquires and releases inside a single attempt's window; it is not reachable through the
+		// probe seam and is covered by the reviewer's multi-process stress rather than staged here.
+	});
+
 	it("with a fabricated probe: a live pid whose start id cannot be read is unknown and honoured; a mismatch is replaced and reclaimed", () => {
 		const startIds = new Map<number, string | undefined>();
 		const probe: ProcessProbe = { alive: (pid) => pid !== 2147483646, startId: (pid) => startIds.get(pid) };

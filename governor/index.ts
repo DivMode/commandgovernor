@@ -17,5 +17,5 @@ export { classifyProcessIdentity, currentProcessIdentity, processStartId } from 
 export type { ProcessIdentity, ProcessIdentityVerdict, ProcessProbe } from "./process/identity.ts";
 export { SessionPathError, canonicalSessionPath, isAcceptableSessionPath } from "./session/paths.ts";
 export type { CanonicalSessionPath } from "./session/paths.ts";
-export { RecoveryLeaseHeld, RecoveryReclaimBlocked, SessionRegistry, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "./session/registry.ts";
+export { RecoveryLeaseContended, RecoveryLeaseHeld, RecoveryReclaimBlocked, SessionRegistry, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "./session/registry.ts";
 export type { Incarnation, RecoveryLease, RecoveryLeaseRecord, SessionRecord } from "./session/registry.ts";
