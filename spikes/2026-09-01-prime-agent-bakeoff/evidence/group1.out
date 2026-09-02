@@ -1,0 +1,60 @@
+########## s1-00b-ipython-smoke.mjs
+root {"id":"ab66003180e8","workerPid":37645}
+prompt {"id":"cg-ipy-3-54e112","type":"response","command":"prompt","success":true}
+idle ok after 526ms
+messages [{"role":"user","text":"[{\"type\":\"text\",\"text\":\"TOOL:ipython:{\\\"code\\\":\\\"open(\\\\\\\"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/s"},{"role":"assistant","text":"[{\"type\":\"toolCall\",\"id\":\"call_chatcmpl-10\",\"name\":\"ipython\",\"arguments\":{\"code\":\"open(\\\"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e6872"},{"role":"toolResult","text":"[{\"type\":\"text\",\"text\":\"14\"}]"},{"role":"assistant","text":"[{\"type\":\"text\",\"text\":\"done\"}]"}]
+mock requests during [{"lastRole":"user","lastUser":"TOOL:ipython:{\"code\":\"open(\\\"/private/tm","tools":["ipython"]},{"lastRole":"tool","lastUser":"TOOL:ipython:{\"code\":\"open(\\\"/private/tm","tools":["ipython"]}]
+PASS kernel executed the tool call and wrote the file
+PASS events carry generation cursors :: {"generation":"203b2f82561a","sequence":30}
+event types ["agent_start","turn_start","message_start","message_end","message_update","tool_execution_start","tool_execution_update","tool_execution_end","turn_end","agent_end"]
+########## s1-00b-ipython-smoke.mjs exit=0
+########## s1-01-client-detach.mjs
+root {"id":"1ef1ba10bbde","sessionId":"01a05f11-8d2f-77be-bb12-6f2adc5ca782","workerPid":37756}
+prompt (15s of streaming) {"id":"detach-1-3-6cc9df","type":"response","command":"prompt","success":true}
+cursor at detach {"generation":"fb86b16aa1bb","sequence":7}
+client socket destroyed abruptly at 2026-09-01T22:23:01.042Z
+mock: requests for this prompt 1 completed responses 1 client-gone 0
+PASS worker kept consuming the model stream after client detach (no client-gone, 1 request, completed)
+list after detach {"state":"ready","activity":"idle","clients":0,"pid":37756}
+PASS worker survived with zero attached clients
+reattach {"replay":{"status":"complete","toSequence":41,"toCursor":{"generation":"fb86b16aa1bb","sequence":41}},"lastEventCursor":{"generation":"fb86b16aa1bb","sequence":41},"activeSessionId":"1ef1ba10bbde","sessionId":"01a05f11-8d2f-77be-bb12-6f2adc5ca782"}
+last message [{"type":"text","text":"tick0 tick1 tick2 tick3 tick4 tick5 tick6 tick7 tick8 tick9 tick10 tick11 tick12 tick13 tick14 t
+PASS reattached to the exact same session identity
+PASS completed assistant turn visible after reattach (tick29 present, not streaming)
+PASS replay info returned for the presented cursor :: {"status":"complete","toSequence":41,"toCursor":{"generation":"fb86b16aa1bb","sequence":41}}
+########## s1-01-client-detach.mjs exit=0
+########## s1-02-supervisor-replacement.mjs
+supervisor before {"pid":34749,"generation":"ffd24531-0d82-48ac-b2aa-8044712dd4cc"}
+roots before [{"id":"1ef1ba10bbde","pid":37756,"state":"ready"},{"id":"ab66003180e8","pid":37645,"state":"ready"},{"id":"ecaa0929e4d6","pid":36893,"state":"ready"},{"id":"f3bcff5165d6","pid":35275,"state":"ready"}]
+worker descriptors before 4
+ps before {"34749":{"ppid":1,"etime":"07:55"},"34784":{"ppid":34749,"etime":"07:55"},"35275":{"ppid":34749,"etime":"07:52"},"35447":{"ppid":35275,"etime":"07:48"},"36893":{"ppid":34749,"etime":"03:15"},"36999":{"ppid":36893,"etime":"03:14"},"37645":{"ppid":34749,"etime":"00:22"},"37725":{"ppid":37645,"etime":"00:21"},"37756":{"ppid":34749,"etime":"00:21"},"37841":{"ppid":37756,"etime":"00:20"}}
+SIGKILL supervisor 34749 true
+replacement supervisor {"pid":38220,"generation":"62df9e18-a5ec-46ac-b3bc-95b958166d68","tookMs":5657}
+PASS a replacement supervisor came up without any client starting it
+roots after [{"id":"1ef1ba10bbde","pid":37756,"state":"ready"},{"id":"ab66003180e8","pid":37645,"state":"ready"},{"id":"ecaa0929e4d6","pid":36893,"state":"ready"},{"id":"f3bcff5165d6","pid":35275,"state":"ready"}]
+PASS every root adopted under the same active-session id with the same worker pid
+PASS no duplicate root workers :: {"descriptors":4}
+ps after {"35275":{"ppid":1,"etime":"07:57"},"35447":{"ppid":35275,"etime":"07:53"},"36893":{"ppid":1,"etime":"03:20"},"36999":{"ppid":36893,"etime":"03:19"},"37645":{"ppid":1,"etime":"00:27"},"37725":{"ppid":37645,"etime":"00:26"},"37756":{"ppid":1,"etime":"00:26"},"37841":{"ppid":37756,"etime":"00:25"},"38220":{"ppid":37756,"etime":"00:05"},"38260":{"ppid":38220,"etime":"00:00"}}
+FAIL exactly one detached supervisor process :: [35275,36893,37645,37756]
+PASS adopted worker still serves prompts through the new supervisor :: [{"type":"text","text":"after-supervisor-replacement"}]
+########## s1-02-supervisor-replacement.mjs exit=1
+########## s1-03-worker-crash-isolation.mjs
+roots {"A":{"id":"2075f84e4bc9","pid":38677,"file":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f11-f465-739b-b9f9-16c9985c8b7d.jsonl"},"B":{"id":"e2cc57d61f56","pid":38740,"file":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f11-f5a4-719d-829d-41a6fa3f280e.jsonl"}}
+PASS two roots run in two distinct worker processes
+B streaming; SIGKILL A worker 38677 true
+A worker state transitions (state/pid) ["recovering/38677","failed/38677"] after 325ms
+PASS root B finished its in-flight turn while A crashed :: [{"type":"text","text":"tick0 tick1 tick2 tick3 tick4 tick5 
+FAIL A recovered to ready under the same active-session id with a new worker pid :: {"state":"failed","pid":38677}
+A transcript {"before":8,"after":9,"recoveryMarkers":1,"marker":"{\"type\":\"custom_message\",\"customType\":\"prime-agent.worker_recovery\",\"content\":\"<prime_agent_worker_interrupted>\\nThe isolated session worker stopped during in-flight work. The saved transcript was rec"}
+B transcript {"before":6,"after":8,"recoveryMarkers":0}
+PASS A transcript carries a visible recovery marker; B transcript has none
+file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/s1-03-worker-crash-isolation.mjs:29
+const txt = JSON.stringify((mA.data.messages ?? mA.data).map((x) => x.content));
+                                    ^
+
+TypeError: Cannot read properties of undefined (reading 'messages')
+    at file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/s1-03-worker-crash-isolation.mjs:29:37
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+Node.js v24.19.0
+########## s1-03-worker-crash-isolation.mjs exit=1

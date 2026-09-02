@@ -1,0 +1,99 @@
+########## s1-03-worker-crash-isolation.mjs
+file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/common.mjs:31
+  if (!r.success) throw Object.assign(new Error(`create failed: ${r.error}`), { response: r });
+                                      ^
+
+Error: create failed: Agent name "cg-s1-03-A" is unavailable: an agent of that name already exists at depth 0 under this parent
+    at Module.createRoot (file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/common.mjs:31:39)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/s1-03-worker-crash-isolation.mjs:4:11 {
+  response: {
+    id: 'cg-iso-1-cfcdf1',
+    type: 'response',
+    command: 'create',
+    success: false,
+    error: 'Agent name "cg-s1-03-A" is unavailable: an agent of that name already exists at depth 0 under this parent'
+  }
+}
+
+Node.js v24.19.0
+########## s1-03-worker-crash-isolation.mjs exit=1
+########## s1-04-session-lease.mjs
+owner {"id":"162a2ff14c41","file":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f17-dadf-76e9-a024-539babbfb8a0.jsonl","pid":40401}
+contender create on the same session path {"id":"162a2ff14c41","lifecycle":"live","activity":"working","isSessionActive":false,"lastActivityAt":"2026-09-01T22:29:54.151Z","runtimeKind":"top-level","rlmDepth":0,"activeSessionId":"162a2ff14c41","sessionId":"01a05f17-dadf-76e9-a024-539babbfb8a0","sessionFile":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f17-dadf-76e9-a024-539babbfb8a0.jsonl","sessionName":"cg-s1-04","cwd":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/work","model":{"id":"mock-1","name":"Mock 1","api":"openai-completions","provider":"mock","baseUrl":"http://127.0.0.1:18765/v1","reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":128000,"maxTokens":8192},"thinkingLevel":"off","isStreaming":false,"isCompacting":false,"isBashRunning":false,"hasRunningRlmChildren":false,"isRunningTools":false,"attachedClients":1,"messageCount":2,"unfinishedActionCount":0,"sessionActions":{"queuedCount":0,"steering":[],"followUps":[]},"created":"2026-09-01T22:29:54.015Z","modified":"2026-09-01T22:29:54.190Z","firstMessage":"ECHO:lease-owner","diagnostics":[],"workerState":"ready","workerPid":40401}
+FAIL second open rejected with typed session_already_active naming the owner
+PASS only one worker still owns the path
+CLI one-shot on the owned path {"status":1,"stdout":"","stderr":"Error: Unknown option: --session\n"}
+FAIL one-shot CLI client is refused rather than writing the owned transcript
+PASS transcript bytes unchanged by both contenders :: {"before":1597,"after":1597}
+PASS transcript still parses line by line
+lease dir ["081c9cdb09dcf324209eb94356a5c8c4fbab0d8097de224c77f8f84f22ad2cbf.lock","666d94a123864066ea3387d00690ce0fe3ed0c00ee9b23b23d33966ace08c746.lock","74b3eb04b9935e7c8d936dee3d0e2267fd9e8a895fe81298e1ca655b44d2f13d.lock","79b47019af39ece7d66751cd0dcd362118e197cfc71ff777d62445eb31f5861e.lock","8959928013e0e7f9f37bbe705abb579eea707b57c81ffe32095cbfca17f61aa6.lock","a7685520cd5a9a359f5de68f63402954015cd21ae5d43a8dccfe66c7b2aba3ad.lock","d9d9d7a67ec801f3d504e62ad2c410acd04310e7b7335a0b3802ffc027c9eb10.lock"]
+PASS owner keeps working after contention
+########## s1-04-session-lease.mjs exit=1
+########## s1-05-generation-reconnect.mjs
+cursor before crash {"generation":"46082027cfc2","sequence":11}
+attach0 replay {"status":"complete","toSequence":0,"toCursor":{"generation":"46082027cfc2","sequence":0}}
+SIGKILL supervisor 38220 true
+attach with pre-replacement cursor after supervisor replacement {"status":"complete","toSequence":12,"toCursor":{"generation":"46082027cfc2","sequence":12}}
+PASS supervisor replacement does not change the worker generation; cursor interval reported complete :: {"status":"complete","toSequence":12,"toCursor":{"generation":"46082027cfc2","sequence":12}}
+cursor after replacement {"generation":"46082027cfc2","sequence":23}
+PASS sequence continues monotonically within the same generation
+SIGKILL worker 40663 true
+recovery transitions (state/pid) ["recovering/40663","failed/40663"] 330ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"ca62ac0c1c03","sessionId":"01a05f17-df7a-74e1-ae2f-2ef200a102a5","pid":41178,"state":"ready","sameActiveId":false}
+recovered {"path":"client-reopen","id2":"ca62ac0c1c03","sameActiveId":false}
+attach to recovered root with the old-generation cursor {"replay":{"status":"complete","toSequence":0,"toCursor":{"generation":"b42faaecbbe0","sequence":0}},"lastEventCursor":{"generation":"b42faaecbbe0","sequence":0},"snapshotMessages":5}
+FAIL old generation is reported as a generation change, not as a sequence gap :: {"status":"complete","toSequence":0,"toCursor":{"generation":"b42faaecbbe0","sequence":0}}
+PASS snapshot is coherent (holds at least every pre-crash message) :: {"n0":2}
+cursor after recovery {"generation":"b42faaecbbe0","sequence":11}
+PASS new events carry the new generation
+attach with a future sequence in the current generation {"status":"complete","toSequence":11,"toCursor":{"generation":"b42faaecbbe0","sequence":11}}
+attach from sequence 0 in the current generation {"status":"complete","toSequence":11,"toCursor":{"generation":"b42faaecbbe0","sequence":11}}
+PASS server states replay coverage explicitly for every presented cursor
+########## s1-05-generation-reconnect.mjs exit=1
+########## s1-06-idempotence.mjs
+first {"success":true,"data":"{\"output\":\"\",\"exitCode\":0,\"cancelled\":false,\"truncated\":false}","lines":1}
+repeat same clientId+commandId {"success":true,"data":"{\"output\":\"\",\"exitCode\":0,\"cancelled\":false,\"truncated\":false}","lines":1}
+PASS repeat returns the stored result
+PASS no duplicate external effect (file has exactly one line) :: {"lines":1}
+journal entries for this command id [{"file":"f9f5d05e4767/command-journal.jsonl","n":2,"types":["received","result"]}]
+PASS mutation was journaled (receipt + result) before/after dispatch
+file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/cgd.mjs:52
+      const t = setTimeout(() => { this.pending.delete(id); reject(new Error(`timeout waiting for ${command.type} ${id}`)); }, timeoutMs);
+                                                                   ^
+
+Error: timeout waiting for ack_result m-client-3-9281bc
+    at Timeout._onTimeout (file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/cgd.mjs:52:68)
+    at listOnTimeout (node:internal/timers:635:17)
+    at process.processTimers (node:internal/timers:571:7)
+
+Node.js v24.19.0
+########## s1-06-idempotence.mjs exit=1
+########## s1-07-uncertain.mjs
+(a) journal right after send ["received"]
+(a) SIGKILL supervisor mid-command 40767 true
+(a) replacement supervisor 41723
+(a) retry with the same clientId+commandId {"success":false,"code":"command_result_uncertain","error":"The previous command result is uncertain and was not replayed"}
+PASS (a) retry is reported uncertain, not re-executed
+(a) target lines after first retry / after second retry 1 1 {"secondRetry":"command_result_uncertain"}
+PASS (a) target mutated at most once and never again on retries
+(a) journal entries now ["received"]
+PASS (a) journal holds a receipt without a durable result
+(a) a NEW command id on the same worker still executes {"success":true,"lines":2}
+PASS (a) uncertainty is scoped to the command identity, not the session
+(b) SIGKILL worker mid-command 42248 true
+(b) response to the in-flight command {"success":false,"error":"Daemon worker socket closed"}
+recovery transitions (state/pid) ["recovering/42248","failed/42248"] 336ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"c77b0c10573f","sessionId":"01a05f19-4146-752f-a325-b23f052228a0","pid":42363,"state":"ready","sameActiveId":false}
+(b) recovered {"path":"client-reopen","id2":"c77b0c10573f"}
+(b) retry same clientId+commandId (old active id) {"success":false,"error":"Daemon worker socket closed"}
+(b) retry same clientId+commandId (reopened active id) {"success":false,"error":"Daemon worker socket closed"}
+FAIL (b) retry is reported uncertain, not re-executed
+PASS (b) killed bash tree left no effect and no retry re-ran it :: {"lines":0}
+FAIL (b) transcript shows a recovery marker
+(b) journal entries ["received","result"]
+########## s1-07-uncertain.mjs exit=1

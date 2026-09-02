@@ -19,6 +19,20 @@ pin (v0.8.2, a patched fork, or an upstream fix for finding D2) and compared lin
   recovery path v0.8.1 offers a resident root (client `create` on the same session path).
 - `harness/s1/s1-0*.mjs` — one scenario per Issue #15 S1 bullet. Each writes
   `evidence/<name>.log` (PASS/FAIL lines) and a wire log that is deliberately not committed.
+
+## What `evidence/` holds, and why it was incomplete until 2026-09-01
+
+- `s1-*.log`, `probe-*.log`: the per-scenario PASS/FAIL logs the report cites, verbatim.
+- `group*.out`: the sequential runner's stdout for each run group (the same lines,
+  with process ids and timing between scenarios).
+- `summary-group3.txt`: the runner's one-line-per-scenario tally.
+- **not present, on purpose:** every `*.wire.jsonl`. Those hold each envelope in and
+  out, and `create`/`attach` envelopes carry the forwarded client environment
+  (Issue #15 S0 finding 4). They stay on the machine that produced them.
+
+The `.log` files were missing from the first push because the repository's
+`.gitignore` ignores `*.log`; they are force-added here after a check that none
+contains `launchEnv`, an API key, a bearer token, or an env assignment.
 - `harness/s1/run.sh` — sequential runner; `collect.mjs` renders the logs as markdown.
 - `harness/cg-marker.ts`, `harness/skill/` — the harmless extension and skill used in S0.
 

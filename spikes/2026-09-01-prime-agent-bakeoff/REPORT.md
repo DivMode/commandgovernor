@@ -220,7 +220,7 @@ Non-blocking follow-ups to carry into S2/S3: ACP-mode worker leak (D5) needs an 
 
 ## Reproduce
 
-Harness, mock provider, and the per-scenario evidence logs are on branch `spike/prime-agent-s0-s1-bakeoff` under `spikes/2026-09-01-prime-agent-bakeoff/`. Wire-level logs are intentionally not committed (they contain the forwarded client environment). Requirements: Node ≥ 22.8, `uv` on PATH, network for the one-time kernel bootstrap, stdin closed on every Prime/Pi/OMP invocation.
+Harness, mock provider, and the per-scenario evidence logs are on branch `spike/prime-agent-s0-s1-bakeoff` under `spikes/2026-09-01-prime-agent-bakeoff/` (the `.log` files were added on 2026-09-01 after the first push; see the README for exactly what is retained). Wire-level logs are intentionally not committed (they contain the forwarded client environment). Requirements: Node ≥ 22.8, `uv` on PATH, network for the one-time kernel bootstrap, stdin closed on every Prime/Pi/OMP invocation.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 

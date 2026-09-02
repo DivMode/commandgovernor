@@ -1,0 +1,22 @@
+########## s1-09-child-recovery.mjs
+prompt true
+idle true
+kernel output child id sub-1a90a452 {"messages":[{"role":"user","content":[{"type":"text","text":"TOOL:ipython:{\"code\":\"handle = await rlm(\\\"ECHO:child-hi\\\", name=\\\"cg-child\\\"); print(\\\"CHILD\\\", handle.rlm_child_id, handle.name)\"}"}],"timestamp":1788302493085},{"role":"assistant","content":[{"type":"toolCall","id":"cal
+children before crash [{"id":"sub-1a90a452","name":"cg-child","status":"done"}]
+PASS exactly one child was registered
+child reached the model once
+child sessions in list(all) before crash [{"id":"5d2e58044f6d","child":"sub-1a90a452","pid":53359,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}]
+SIGKILL parent worker 53359 true
+recovery transitions (state/pid) ["recovering/53359","failed/53359"] 393ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"6ddf3ee144e4","sessionId":"01a05f22-851e-7486-894e-9a52fec36be9","pid":53603,"state":"ready","sameActiveId":false}
+parent recovered {"path":"client-reopen","id2":"6ddf3ee144e4"}
+children after recovery []
+FAIL get_rlm_children on the reopened parent still lists the child (documented: registry survives parent restoration) :: {"before":[{"id":"sub-1a90a452","name":"cg-child","status":"done"}],"after":[]}
+kernel-side rlm.list_subagents() on the reopened parent SUBS 1 [('cg-child', 'completed')]
+PASS kernel-side registry lists the child after parent reopen
+PASS child work was not silently re-run (model saw the child prompt exactly once) :: {"childModelCalls":1}
+child sessions in list(all) after recovery [{"id":"01a05f22-8767-75ad-a420-a0488eb224e9","child":"sub-1a90a452","pid":53603,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}]
+PASS child session identity (sessionId) is stable across parent recovery :: {"all0":[{"id":"5d2e58044f6d","child":"sub-1a90a452","pid":53359,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}],"all1":[{"id":"01a05f22-8767-75ad-a420-a0488eb224e9","child":"sub-1a90a452","pid":53603,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}]}
+########## s1-09-child-recovery.mjs exit=1

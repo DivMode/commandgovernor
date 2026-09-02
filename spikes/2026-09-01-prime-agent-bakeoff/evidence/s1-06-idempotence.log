@@ -1,0 +1,12 @@
+[2026-09-01T22:35:23.139Z] first {"success":true,"data":{"output":"","exitCode":0,"cancelled":false,"truncated":false},"lines":1}
+[2026-09-01T22:35:23.139Z] repeat same clientId+commandId {"success":true,"data":{"output":"","exitCode":0,"cancelled":false,"truncated":false},"lines":1}
+[2026-09-01T22:35:23.139Z] PASS repeat returns the stored result
+[2026-09-01T22:35:23.139Z] PASS no duplicate external effect (file has exactly one line) :: {"lines":1}
+[2026-09-01T22:35:23.140Z] journal entries for this command id ["received","result"]
+[2026-09-01T22:35:23.140Z] PASS mutation was journaled (receipt before dispatch, result after)
+[2026-09-01T22:35:23.160Z] same commandId from a DIFFERENT clientId {"success":true,"lines":2}
+[2026-09-01T22:35:23.160Z] PASS idempotency key is clientId+commandId (another client's same commandId is new work)
+[2026-09-01T22:35:23.664Z] ack_result sent (fire-and-forget: the supervisor returns no response for ack_result) ["received","result","received","result","acknowledged"]
+[2026-09-01T22:35:23.666Z] PASS acknowledged entry is compacted/removed from the journal :: ["received","result","received","result","acknowledged"]
+[2026-09-01T22:35:23.687Z] repeat after acknowledgement {"success":true,"lines":3}
+[2026-09-01T22:35:23.687Z] observation: after ack the same clientId+commandId is admitted as new work (documented: ack lets the journal compact); lines now 3

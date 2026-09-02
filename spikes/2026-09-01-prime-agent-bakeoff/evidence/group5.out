@@ -1,0 +1,20 @@
+########## s1-09-child-recovery.mjs
+prompt true
+idle true
+kernel output child id sub-74e6c7c3 {"messages":[{"role":"user","content":[{"type":"text","text":"TOOL:ipython:{\"code\":\"handle = await rlm(\\\"ECHO:child-hi\\\", name=\\\"cg-child\\\"); print(\\\"CHILD\\\", handle.rlm_child_id, handle.name)\"}"}],"timestamp":1788302324214},{"role":"assistant","content":[{"type":"toolCall","id":"cal
+children before crash [{"id":"sub-74e6c7c3","name":"cg-child","status":"running"}]
+PASS exactly one child was registered
+child reached the model once
+child sessions in list(all) before crash [{"id":"5b7694795e67","child":"sub-74e6c7c3","pid":52082,"sessionId":"01a05f1f-f369-7788-aca9-b6fe835ea0dd"}]
+SIGKILL parent worker 52082 true
+recovery transitions (state/pid) ["recovering/52082","failed/52082"] 385ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"a82293b42162","sessionId":"01a05f1f-f197-7752-b970-8efda6370a38","pid":52296,"state":"ready","sameActiveId":false}
+parent recovered {"path":"client-reopen","id2":"a82293b42162"}
+children after recovery []
+FAIL child registry restored with the same child identity and no duplicate :: {"before":[{"id":"sub-74e6c7c3","name":"cg-child","status":"running"}],"after":[]}
+FAIL child work was not silently re-run (model saw the child prompt exactly once) :: {"childModelCalls":2}
+child sessions in list(all) after recovery [{"id":"01a05f1f-f369-7788-aca9-b6fe835ea0dd","child":"sub-74e6c7c3","pid":52296,"sessionId":"01a05f1f-f369-7788-aca9-b6fe835ea0dd"}]
+PASS child session identity (sessionId) is stable across parent recovery :: {"all0":[{"id":"5b7694795e67","child":"sub-74e6c7c3","pid":52082,"sessionId":"01a05f1f-f369-7788-aca9-b6fe835ea0dd"}],"all1":[{"id":"01a05f1f-f369-7788-aca9-b6fe835ea0dd","child":"sub-74e6c7c3","pid":52296,"sessionId":"01a05f1f-f369-7788-aca9-b6fe835ea0dd"}]}
+########## s1-09-child-recovery.mjs exit=1

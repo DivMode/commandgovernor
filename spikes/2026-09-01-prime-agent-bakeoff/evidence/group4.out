@@ -1,0 +1,79 @@
+########## s1-03-worker-crash-isolation.mjs
+roots {"A":{"id":"f7e1346513fa","pid":48643,"sessionId":"01a05f1f-188f-75f5-9ec1-79f44ac03c68"},"B":{"id":"e73eb2b652ee","pid":48716,"sessionId":"01a05f1f-19fc-7216-93ef-d5f4357223f4"}}
+PASS two roots run in two distinct worker processes
+B streaming; SIGKILL A worker 48643 true
+recovery transitions (state/pid) ["recovering/48643","failed/48643"] 365ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"5b9eaa0ceedf","sessionId":"01a05f1f-188f-75f5-9ec1-79f44ac03c68","pid":48869,"state":"ready","sameActiveId":false}
+A recovery path {"path":"client-reopen","sameActiveId":false,"newActiveId":"5b9eaa0ceedf","newPid":48869,"sessionId":"01a05f1f-188f-75f5-9ec1-79f44ac03c68"}
+PASS root B finished its in-flight turn untouched while A crashed
+PASS crashed root entered the documented failed state (no auto-relaunch) and was reopened with the same sessionId
+observation: active-session id preserved across reopen? false
+A transcript {"before":8,"after":10,"recoveryMarkers":1,"marker":"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash,"}
+B transcript {"before":6,"after":8,"recoveryMarkers":0}
+PASS A transcript carries a visible recovery marker; B transcript has none
+PASS recovered A keeps its history and serves new prompts
+PASS B transcript parses cleanly (no contamination)
+PASS no duplicate registration for A's session after reopen
+########## s1-03-worker-crash-isolation.mjs exit=0
+########## s1-05-generation-reconnect.mjs
+cursor before supervisor kill {"generation":"886f9ccbf4a3","sequence":11}
+SIGKILL supervisor 46563 true
+(1) attach with pre-replacement cursor {"status":"complete","toSequence":12,"toCursor":{"generation":"886f9ccbf4a3","sequence":12}}
+PASS (1) supervisor replacement keeps the worker generation; interval reported complete
+PASS (1) sequence continues monotonically within the same generation :: {"generation":"886f9ccbf4a3","sequence":23}
+SIGKILL resident worker 49033 true
+recovery transitions (state/pid) ["recovering/49033","failed/49033"] 358ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"76b331198e3f","sessionId":"01a05f1f-448c-76e2-a40d-17667159cec1","pid":50144,"state":"ready","sameActiveId":false}
+(2) attach to reopened root presenting the dead generation's cursor {"replay":{"status":"complete","toSequence":0,"toCursor":{"generation":"2234b814c4af","sequence":0}},"snapshotMessages":5}
+PASS (2) dead-generation cursor is not treated as a live position: replay restarts at the new generation with the snapshot as baseline :: {"n0":2}
+(3) client-owned worker {"id":"10ab5d11473c","pid":50191}
+(3) owned cursor {"generation":"3c611af06f43","sequence":11}
+(3) SIGKILL owned worker 50191 true
+(3) owned worker transitions ["recovering/50191","starting/50297","ready/50297"] {"state":"ready","pid":50297}
+PASS (3) client-owned worker is relaunched automatically under the same active-session id
+(3) reattach with the previous generation's cursor {"replay":{"status":"complete","toSequence":0,"toCursor":{"generation":"cef615b56c5d","sequence":0}},"snapshotMessages":0}
+PASS (3) old generation's sequence is not honoured as a live position (new generation, replay restarts at its baseline) :: {"status":"complete","toSequence":0,"toCursor":{"generation":"cef615b56c5d","sequence":0}}
+(3) observation: replay.reason absent (docs/protocol tests describe event_generation_changed; the live attach path reports a bare complete/0 baseline)
+(3) messages visible on the relaunched owned worker 0 []
+FAIL (3) relaunched client-owned worker kept its transcript (pre-crash turn still present) :: {"count":0}
+PASS (3) relaunched owned worker serves prompts; events carry the new generation :: {"generation":"cef615b56c5d","sequence":11}
+(3) kill owned worker true
+########## s1-05-generation-reconnect.mjs exit=1
+########## s1-07-uncertain.mjs
+(a) journal right after send ["received"]
+(a) SIGKILL supervisor mid-command 49137 true
+(a) replacement supervisor 50508
+(a) retry with the same clientId+commandId {"success":false,"code":"command_result_uncertain","error":"The previous command result is uncertain and was not replayed"}
+PASS (a) retry is reported uncertain, not re-executed
+(a) target lines after first retry / after second retry 1 1 {"secondRetry":"command_result_uncertain"}
+PASS (a) target mutated at most once and never again on retries
+PASS (a) journal holds the receipt without a durable result :: ["received"]
+PASS (a) uncertainty is scoped to the command identity; a new id on the same root executes :: {"lines":2}
+(b) SIGKILL worker mid-command 51667 true
+(b) response to the in-flight command {"success":false,"error":"Daemon worker socket closed"}
+recovery transitions (state/pid) ["recovering/51667","failed/51667"] 274ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"7c3b15ebfd01","sessionId":"01a05f1f-c20d-7147-b986-dc26e78756ff","pid":51782,"state":"ready","sameActiveId":false}
+(b) retries with the same clientId+commandId (old id / reopened id) {"a":{"success":false,"error":"Daemon worker socket closed"},"b":{"success":false,"error":"Daemon worker socket closed"}}
+(b) journal entries [{"type":"received"},{"type":"result","success":false,"error":"Daemon worker socket closed"}]
+PASS (b) the mutation was not re-executed on retry :: {"lines":0}
+PASS (b) retry surfaces the loss explicitly (uncertain code or the stored socket-loss failure), never a fabricated success :: Daemon worker socket closed
+(b) observation: worker loss mid-command is journaled as a definite failure result, not as command_result_uncertain ["received","result"]
+(c) effect landed on disk; SIGKILL worker before the command can complete 51876 true
+(c) response to the in-flight command {"success":false,"error":"Daemon worker socket closed"}
+recovery transitions (state/pid) ["recovering/51876","failed/51876"] 355ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"e82cbbc32a22","sessionId":"01a05f1f-dcfe-7568-b484-7acd76885d58","pid":51969,"state":"ready","sameActiveId":false}
+(c) retry same clientId+commandId {"success":false,"error":"Daemon worker socket closed"}
+(c) journal entries [{"type":"received"},{"type":"result","success":false,"error":"Daemon worker socket closed"}]
+PASS (c) not re-executed (file still has exactly one line) :: {"lines":1}
+FAIL (c) CRITICAL: an effect that happened is reported as uncertain, not as a definite failure :: {"reported":"Daemon worker socket closed","effectOnDisk":1}
+(c) client retries under a new command id because it was told the mutation failed {"success":true,"lines":2}
+FAIL (c) consequence: the misreported verdict leads to a duplicate external effect :: {"linesAfterClientRetry":2}
+########## s1-07-uncertain.mjs exit=1

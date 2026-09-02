@@ -1,0 +1,32 @@
+[2026-09-01T22:38:09.999Z] (a) journal right after send ["received"]
+[2026-09-01T22:38:09.999Z] (a) SIGKILL supervisor mid-command 49137 true
+[2026-09-01T22:38:15.975Z] (a) replacement supervisor 50508
+[2026-09-01T22:38:21.986Z] (a) retry with the same clientId+commandId {"success":false,"code":"command_result_uncertain","error":"The previous command result is uncertain and was not replayed"}
+[2026-09-01T22:38:21.986Z] PASS (a) retry is reported uncertain, not re-executed
+[2026-09-01T22:38:27.489Z] (a) target lines after first retry / after second retry 1 1 {"secondRetry":"command_result_uncertain"}
+[2026-09-01T22:38:27.489Z] PASS (a) target mutated at most once and never again on retries
+[2026-09-01T22:38:27.497Z] PASS (a) journal holds the receipt without a durable result :: ["received"]
+[2026-09-01T22:38:31.532Z] PASS (a) uncertainty is scoped to the command identity; a new id on the same root executes :: {"lines":2}
+[2026-09-01T22:38:32.466Z] (b) SIGKILL worker mid-command 51667 true
+[2026-09-01T22:38:32.686Z] (b) response to the in-flight command {"success":false,"error":"Daemon worker socket closed"}
+[2026-09-01T22:38:32.960Z] recovery transitions (state/pid) ["recovering/51667","failed/51667"] 274ms
+[2026-09-01T22:38:32.961Z] failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+[2026-09-01T22:38:33.232Z] retry_worker Waiting for a client with fresh runtime context
+[2026-09-01T22:38:33.513Z] reopened via create(sessionPath) {"activeSessionId":"7c3b15ebfd01","sessionId":"01a05f1f-c20d-7147-b986-dc26e78756ff","pid":51782,"state":"ready","sameActiveId":false}
+[2026-09-01T22:38:38.536Z] (b) retries with the same clientId+commandId (old id / reopened id) {"a":{"success":false,"error":"Daemon worker socket closed"},"b":{"success":false,"error":"Daemon worker socket closed"}}
+[2026-09-01T22:38:38.538Z] (b) journal entries [{"type":"received"},{"type":"result","success":false,"error":"Daemon worker socket closed"}]
+[2026-09-01T22:38:38.538Z] PASS (b) the mutation was not re-executed on retry :: {"lines":0}
+[2026-09-01T22:38:38.538Z] PASS (b) retry surfaces the loss explicitly (uncertain code or the stored socket-loss failure), never a fabricated success :: Daemon worker socket closed
+[2026-09-01T22:38:38.539Z] (b) observation: worker loss mid-command is journaled as a definite failure result, not as command_result_uncertain ["received","result"]
+[2026-09-01T22:38:38.983Z] (c) effect landed on disk; SIGKILL worker before the command can complete 51876 true
+[2026-09-01T22:38:38.993Z] (c) response to the in-flight command {"success":false,"error":"Daemon worker socket closed"}
+[2026-09-01T22:38:39.348Z] recovery transitions (state/pid) ["recovering/51876","failed/51876"] 355ms
+[2026-09-01T22:38:39.350Z] failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+[2026-09-01T22:38:39.621Z] retry_worker Waiting for a client with fresh runtime context
+[2026-09-01T22:38:39.901Z] reopened via create(sessionPath) {"activeSessionId":"e82cbbc32a22","sessionId":"01a05f1f-dcfe-7568-b484-7acd76885d58","pid":51969,"state":"ready","sameActiveId":false}
+[2026-09-01T22:38:39.916Z] (c) retry same clientId+commandId {"success":false,"error":"Daemon worker socket closed"}
+[2026-09-01T22:38:39.917Z] (c) journal entries [{"type":"received"},{"type":"result","success":false,"error":"Daemon worker socket closed"}]
+[2026-09-01T22:38:39.917Z] PASS (c) not re-executed (file still has exactly one line) :: {"lines":1}
+[2026-09-01T22:38:39.917Z] FAIL (c) CRITICAL: an effect that happened is reported as uncertain, not as a definite failure :: {"reported":"Daemon worker socket closed","effectOnDisk":1}
+[2026-09-01T22:38:39.942Z] (c) client retries under a new command id because it was told the mutation failed {"success":true,"lines":2}
+[2026-09-01T22:38:39.942Z] FAIL (c) consequence: the misreported verdict leads to a duplicate external effect :: {"linesAfterClientRetry":2}

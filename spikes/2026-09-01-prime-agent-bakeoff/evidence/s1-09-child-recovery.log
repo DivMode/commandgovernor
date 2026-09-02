@@ -1,0 +1,20 @@
+[2026-09-01T22:41:33.123Z] prompt true
+[2026-09-01T22:41:33.664Z] idle true
+[2026-09-01T22:41:33.666Z] kernel output child id sub-1a90a452 {"messages":[{"role":"user","content":[{"type":"text","text":"TOOL:ipython:{\"code\":\"handle = await rlm(\\\"ECHO:child-hi\\\", name=\\\"cg-child\\\"); print(\\\"CHILD\\\", handle.rlm_child_id, handle.name)\"}"}],"timestamp":1788302493085},{"role":"assistant","content":[{"type":"toolCall","id":"cal
+[2026-09-01T22:41:33.741Z] children before crash [{"id":"sub-1a90a452","name":"cg-child","status":"done"}]
+[2026-09-01T22:41:33.741Z] PASS exactly one child was registered
+[2026-09-01T22:41:33.746Z] child reached the model once
+[2026-09-01T22:41:36.822Z] child sessions in list(all) before crash [{"id":"5d2e58044f6d","child":"sub-1a90a452","pid":53359,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}]
+[2026-09-01T22:41:36.822Z] SIGKILL parent worker 53359 true
+[2026-09-01T22:41:37.215Z] recovery transitions (state/pid) ["recovering/53359","failed/53359"] 393ms
+[2026-09-01T22:41:37.216Z] failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+[2026-09-01T22:41:37.482Z] retry_worker Waiting for a client with fresh runtime context
+[2026-09-01T22:41:37.828Z] reopened via create(sessionPath) {"activeSessionId":"6ddf3ee144e4","sessionId":"01a05f22-851e-7486-894e-9a52fec36be9","pid":53603,"state":"ready","sameActiveId":false}
+[2026-09-01T22:41:37.846Z] parent recovered {"path":"client-reopen","id2":"6ddf3ee144e4"}
+[2026-09-01T22:41:41.867Z] children after recovery []
+[2026-09-01T22:41:41.867Z] FAIL get_rlm_children on the reopened parent still lists the child (documented: registry survives parent restoration) :: {"before":[{"id":"sub-1a90a452","name":"cg-child","status":"done"}],"after":[]}
+[2026-09-01T22:41:42.067Z] kernel-side rlm.list_subagents() on the reopened parent SUBS 1 [('cg-child', 'completed')]
+[2026-09-01T22:41:42.067Z] PASS kernel-side registry lists the child after parent reopen
+[2026-09-01T22:41:42.067Z] PASS child work was not silently re-run (model saw the child prompt exactly once) :: {"childModelCalls":1}
+[2026-09-01T22:41:42.102Z] child sessions in list(all) after recovery [{"id":"01a05f22-8767-75ad-a420-a0488eb224e9","child":"sub-1a90a452","pid":53603,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}]
+[2026-09-01T22:41:42.102Z] PASS child session identity (sessionId) is stable across parent recovery :: {"all0":[{"id":"5d2e58044f6d","child":"sub-1a90a452","pid":53359,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}],"all1":[{"id":"01a05f22-8767-75ad-a420-a0488eb224e9","child":"sub-1a90a452","pid":53603,"sessionId":"01a05f22-8767-75ad-a420-a0488eb224e9"}]}

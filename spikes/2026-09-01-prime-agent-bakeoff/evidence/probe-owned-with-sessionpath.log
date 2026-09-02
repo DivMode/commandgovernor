@@ -1,0 +1,9 @@
+[2026-09-01T22:40:45.693Z] seed session {"file":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f21-cb63-740f-bc48-19980af64f60.jsonl","lines":8}
+[2026-09-01T22:40:47.554Z] owned worker on explicit path {"id":"897d4e38d6b0","pid":53062,"sessionId":"01a05f21-cb63-740f-bc48-19980af64f60","messageCount":2}
+[2026-09-01T22:40:47.644Z] messages before kill 4
+[2026-09-01T22:40:47.644Z] SIGKILL owned worker 53062 true
+[2026-09-01T22:40:49.303Z] after relaunch {"state":"ready","pid":53139,"sameActiveId":true}
+[2026-09-01T22:40:49.307Z] reattach {"snapshotMessages":5,"replay":{"status":"complete","toSequence":0,"toCursor":{"generation":"8d93a0e4bd4d","sequence":0}}}
+[2026-09-01T22:40:49.308Z] messages after relaunch 5 [[{"type":"text","text":"ECHO:seed-turn"}],[{"type":"text","text":"seed-turn"}],[{"type":"text","text":"ECHO:owned-path-one"}],[{"type":"text","text":"owned-path-one"}],"<prime_agent_worker_interrupte
+[2026-09-01T22:40:49.308Z] PASS client-owned worker created WITH sessionPath resumes its persisted transcript after relaunch :: {"count":5,"before":4}
+[2026-09-01T22:40:49.309Z] transcript on disk now {"lines":14,"hasRecoveryMarker":true}

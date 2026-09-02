@@ -1,0 +1,8 @@
+[2026-09-01T22:23:00.106Z] root {"id":"ab66003180e8","workerPid":37645}
+[2026-09-01T22:23:00.149Z] prompt {"id":"cg-ipy-3-54e112","type":"response","command":"prompt","success":true}
+[2026-09-01T22:23:00.635Z] idle ok after 526ms
+[2026-09-01T22:23:00.636Z] messages [{"role":"user","text":"[{\"type\":\"text\",\"text\":\"TOOL:ipython:{\\\"code\\\":\\\"open(\\\\\\\"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/s"},{"role":"assistant","text":"[{\"type\":\"toolCall\",\"id\":\"call_chatcmpl-10\",\"name\":\"ipython\",\"arguments\":{\"code\":\"open(\\\"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e6872"},{"role":"toolResult","text":"[{\"type\":\"text\",\"text\":\"14\"}]"},{"role":"assistant","text":"[{\"type\":\"text\",\"text\":\"done\"}]"}]
+[2026-09-01T22:23:00.637Z] mock requests during [{"lastRole":"user","lastUser":"TOOL:ipython:{\"code\":\"open(\\\"/private/tm","tools":["ipython"]},{"lastRole":"tool","lastUser":"TOOL:ipython:{\"code\":\"open(\\\"/private/tm","tools":["ipython"]}]
+[2026-09-01T22:23:00.637Z] PASS kernel executed the tool call and wrote the file
+[2026-09-01T22:23:00.637Z] PASS events carry generation cursors :: {"generation":"203b2f82561a","sequence":30}
+[2026-09-01T22:23:00.637Z] event types ["agent_start","turn_start","message_start","message_end","message_update","tool_execution_start","tool_execution_update","tool_execution_end","turn_end","agent_end"]

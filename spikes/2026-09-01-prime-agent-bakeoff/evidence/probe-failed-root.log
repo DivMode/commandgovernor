@@ -1,0 +1,3 @@
+[2026-09-01T22:25:25.026Z] failed roots [{"id":"2075f84e4bc9","pid":38677,"sessionId":"01a05f11-f465-739b-b9f9-16c9985c8b7d","diag":[]}]
+[2026-09-01T22:25:25.294Z] retry_worker 2075f84e4bc9 {"id":"cg-probe-2-0a1121","type":"response","command":"retry_worker","success":false,"error":"Waiting for a client with fresh runtime context"}
+[2026-09-01T22:25:55.340Z] after retry did not become ready

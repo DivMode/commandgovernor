@@ -1,0 +1,17 @@
+[2026-09-01T22:37:48.998Z] roots {"A":{"id":"f7e1346513fa","pid":48643,"sessionId":"01a05f1f-188f-75f5-9ec1-79f44ac03c68"},"B":{"id":"e73eb2b652ee","pid":48716,"sessionId":"01a05f1f-19fc-7216-93ef-d5f4357223f4"}}
+[2026-09-01T22:37:48.998Z] PASS two roots run in two distinct worker processes
+[2026-09-01T22:37:49.193Z] B streaming; SIGKILL A worker 48643 true
+[2026-09-01T22:37:49.558Z] recovery transitions (state/pid) ["recovering/48643","failed/48643"] 365ms
+[2026-09-01T22:37:49.559Z] failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+[2026-09-01T22:37:49.825Z] retry_worker Waiting for a client with fresh runtime context
+[2026-09-01T22:37:50.098Z] reopened via create(sessionPath) {"activeSessionId":"5b9eaa0ceedf","sessionId":"01a05f1f-188f-75f5-9ec1-79f44ac03c68","pid":48869,"state":"ready","sameActiveId":false}
+[2026-09-01T22:37:50.115Z] A recovery path {"path":"client-reopen","sameActiveId":false,"newActiveId":"5b9eaa0ceedf","newPid":48869,"sessionId":"01a05f1f-188f-75f5-9ec1-79f44ac03c68"}
+[2026-09-01T22:37:59.297Z] PASS root B finished its in-flight turn untouched while A crashed
+[2026-09-01T22:37:59.297Z] PASS crashed root entered the documented failed state (no auto-relaunch) and was reopened with the same sessionId
+[2026-09-01T22:37:59.297Z] observation: active-session id preserved across reopen? false
+[2026-09-01T22:37:59.297Z] A transcript {"before":8,"after":10,"recoveryMarkers":1,"marker":"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash,"}
+[2026-09-01T22:37:59.297Z] B transcript {"before":6,"after":8,"recoveryMarkers":0}
+[2026-09-01T22:37:59.297Z] PASS A transcript carries a visible recovery marker; B transcript has none
+[2026-09-01T22:37:59.430Z] PASS recovered A keeps its history and serves new prompts
+[2026-09-01T22:37:59.430Z] PASS B transcript parses cleanly (no contamination)
+[2026-09-01T22:37:59.450Z] PASS no duplicate registration for A's session after reopen

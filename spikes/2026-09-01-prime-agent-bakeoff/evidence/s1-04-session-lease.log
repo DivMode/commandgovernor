@@ -1,0 +1,12 @@
+[2026-09-01T22:35:12.283Z] owner {"id":"e689bf4fecfa","file":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1c-b56d-7361-a2f8-48d715e8e52b.jsonl","pid":45090}
+[2026-09-01T22:35:12.297Z] (1) contender create on the owned path {"converged":true,"activeSessionId":"e689bf4fecfa","workerPid":45090}
+[2026-09-01T22:35:12.297Z] PASS (1) contender receives the owning active-session identity (converged, not a second writer) :: {"convergedTo":"e689bf4fecfa"}
+[2026-09-01T22:35:12.304Z] PASS (1) no additional worker was launched
+[2026-09-01T22:35:12.654Z] (2) switch_session from another root onto the owned path {"success":false,"code":"session_already_active","owner":"e689bf4fecfa","error":"Session is already active in e689bf4fecfa: /private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a0"}
+[2026-09-01T22:35:12.654Z] PASS (2) rejected with typed session_already_active naming the owner
+[2026-09-01T22:35:12.914Z] (3) one-shot CLI --resume on the owned path {"status":1,"stdout":"","stderr":"Error: Session is already active in e689bf4fecfa: /private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1c-b56d-7361-a2f8-48d715e8e52b.jsonl\n"}
+[2026-09-01T22:35:12.914Z] PASS (3) one-shot client refused rather than writing the owned transcript
+[2026-09-01T22:35:12.914Z] PASS transcript bytes unchanged by all three contenders :: {"before":1606,"after":1606}
+[2026-09-01T22:35:12.914Z] PASS transcript still parses line by line
+[2026-09-01T22:35:12.914Z] lease dir entries 13
+[2026-09-01T22:35:13.000Z] PASS owner keeps working after contention

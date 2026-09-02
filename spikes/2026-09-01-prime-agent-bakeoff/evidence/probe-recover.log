@@ -1,0 +1,9 @@
+[2026-09-01T22:28:17.685Z] failed root {"id":"2075f84e4bc9","pid":38677,"sessionId":"01a05f11-f465-739b-b9f9-16c9985c8b7d"}
+[2026-09-01T22:28:17.688Z] recovery transitions (state/pid) ["failed/38677"] 2ms
+[2026-09-01T22:28:17.688Z] failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+[2026-09-01T22:28:17.958Z] retry_worker Waiting for a client with fresh runtime context
+[2026-09-01T22:28:18.349Z] reopened via create(sessionPath) {"activeSessionId":"1b7c0ce65c64","sessionId":"01a05f11-f465-739b-b9f9-16c9985c8b7d","pid":39989,"state":"ready","sameActiveId":false}
+[2026-09-01T22:28:18.351Z] recovered via client-reopen {"id":"1b7c0ce65c64","sameActiveId":false,"pid":39989,"sessionId":"01a05f11-f465-739b-b9f9-16c9985c8b7d"}
+[2026-09-01T22:28:18.461Z] history [{"role":"user","t":"[{\"type\":\"text\",\"text\":\"ECHO:A-before\"}]"},{"role":"assistant","t":"[{\"type\":\"text\",\"text\":\"A-before\"}]"},{"role":"custom","t":"\"<prime_agent_worker_interrupted>\\nThe isolated se"},{"role":"user","t":"[{\"type\":\"text\",\"text\":\"ECHO:after-recovery\"}]"},{"role":"assistant","t":"[{\"type\":\"text\",\"text\":\"after-recovery\"}]"}]
+[2026-09-01T22:28:18.461Z] PASS sessionId preserved and history intact after reopen
+[2026-09-01T22:28:18.465Z] list now for that sessionId [{"id":"1b7c0ce65c64","state":"ready","pid":39989}]

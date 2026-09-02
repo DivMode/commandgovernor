@@ -1,0 +1,13 @@
+[2026-09-01T22:23:00.963Z] root {"id":"1ef1ba10bbde","sessionId":"01a05f11-8d2f-77be-bb12-6f2adc5ca782","workerPid":37756}
+[2026-09-01T22:23:01.018Z] prompt (15s of streaming) {"id":"detach-1-3-6cc9df","type":"response","command":"prompt","success":true}
+[2026-09-01T22:23:01.042Z] cursor at detach {"generation":"fb86b16aa1bb","sequence":7}
+[2026-09-01T22:23:01.042Z] client socket destroyed abruptly at 2026-09-01T22:23:01.042Z
+[2026-09-01T22:23:21.050Z] mock: requests for this prompt 1 completed responses 1 client-gone 0
+[2026-09-01T22:23:21.051Z] PASS worker kept consuming the model stream after client detach (no client-gone, 1 request, completed)
+[2026-09-01T22:23:21.060Z] list after detach {"state":"ready","activity":"idle","clients":0,"pid":37756}
+[2026-09-01T22:23:21.061Z] PASS worker survived with zero attached clients
+[2026-09-01T22:23:21.063Z] reattach {"replay":{"status":"complete","toSequence":41,"toCursor":{"generation":"fb86b16aa1bb","sequence":41}},"lastEventCursor":{"generation":"fb86b16aa1bb","sequence":41},"activeSessionId":"1ef1ba10bbde","sessionId":"01a05f11-8d2f-77be-bb12-6f2adc5ca782"}
+[2026-09-01T22:23:21.066Z] last message [{"type":"text","text":"tick0 tick1 tick2 tick3 tick4 tick5 tick6 tick7 tick8 tick9 tick10 tick11 tick12 tick13 tick14 t
+[2026-09-01T22:23:21.066Z] PASS reattached to the exact same session identity
+[2026-09-01T22:23:21.066Z] PASS completed assistant turn visible after reattach (tick29 present, not streaming)
+[2026-09-01T22:23:21.066Z] PASS replay info returned for the presented cursor :: {"status":"complete","toSequence":41,"toCursor":{"generation":"fb86b16aa1bb","sequence":41}}

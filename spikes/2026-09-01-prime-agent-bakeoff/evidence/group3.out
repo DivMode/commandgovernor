@@ -1,0 +1,155 @@
+########## s1-02-supervisor-replacement.mjs
+supervisor before {"pid":41723,"generation":"dec41e62-9413-4681-8c09-aecba79bd959"}
+roots before [{"id":"03c5f937e764","pid":41635,"state":"ready"},{"id":"162a2ff14c41","pid":40401,"state":"ready"},{"id":"1b7c0ce65c64","pid":39989,"state":"ready"},{"id":"1ef1ba10bbde","pid":37756,"state":"ready"},{"id":"ab66003180e8","pid":37645,"state":"ready"},{"id":"c45c00718f5d","pid":41259,"state":"ready"},{"id":"c77b0c10573f","pid":42363,"state":"ready"},{"id":"ca62ac0c1c03","pid":41178,"state":"ready"},{"id":"e2cc57d61f56","pid":38740,"state":"ready"},{"id":"ecaa0929e4d6","pid":36893,"state":"ready"},{"id":"f3bcff5165d6","pid":35275,"state":"ready"}]
+worker descriptors before 11
+ps before {"35275":{"ppid":1,"etime":"19:36"},"35447":{"ppid":35275,"etime":"19:32"},"36893":{"ppid":1,"etime":"14:59"},"36999":{"ppid":36893,"etime":"14:58"},"37645":{"ppid":1,"etime":"12:06"},"37725":{"ppid":37645,"etime":"12:05"},"37756":{"ppid":1,"etime":"12:05"},"37841":{"ppid":37756,"etime":"12:04"},"38740":{"ppid":1,"etime":"11:38"},"38862":{"ppid":38740,"etime":"11:38"},"39989":{"ppid":1,"etime":"06:48"},"40086":{"ppid":39989,"etime":"06:47"},"40401":{"ppid":1,"etime":"05:12"},"40518":{"ppid":40401,"etime":"05:11"},"41178":{"ppid":1,"etime":"05:03"},"41259":{"ppid":1,"etime":"05:03"},"41270":{"ppid":41178,"etime":"05:03"},"41348":{"ppid":41259,"etime":"05:02"},"41635":{"ppid":1,"etime":"04:02"},"41710":{"ppid":41635,"etime":"04:02"},"41723":{"ppid":41635,"etime":"04:01"},"41786":{"ppid":41723,"etime":"03:56"},"42363":{"ppid":41723,"etime":"03:39"},"42412":{"ppid":42363,"etime":"03:38"}}
+SIGKILL supervisor 41723 true
+replacement supervisor {"pid":44055,"generation":"97f8a19c-9bcf-4e84-bf0c-f05f266c4743","tookMs":6172}
+PASS a replacement supervisor came up without any client starting it
+roots after [{"id":"03c5f937e764","pid":41635,"state":"ready"},{"id":"162a2ff14c41","pid":40401,"state":"ready"},{"id":"1b7c0ce65c64","pid":39989,"state":"ready"},{"id":"1ef1ba10bbde","pid":37756,"state":"ready"},{"id":"ab66003180e8","pid":37645,"state":"ready"},{"id":"c45c00718f5d","pid":41259,"state":"ready"},{"id":"c77b0c10573f","pid":42363,"state":"ready"},{"id":"ca62ac0c1c03","pid":41178,"state":"ready"},{"id":"e2cc57d61f56","pid":38740,"state":"ready"},{"id":"ecaa0929e4d6","pid":36893,"state":"ready"},{"id":"f3bcff5165d6","pid":35275,"state":"ready"}]
+PASS every root adopted under the same active-session id with the same worker pid
+PASS no duplicate root workers :: {"descriptors":11}
+ps after (orphaned workers are reparented to pid 1 by the OS; the replacement is spawned by a worker) {"35275":{"ppid":1,"etime":"19:42"},"35447":{"ppid":35275,"etime":"19:38"},"36893":{"ppid":1,"etime":"15:05"},"36999":{"ppid":36893,"etime":"15:04"},"37645":{"ppid":1,"etime":"12:12"},"37725":{"ppid":37645,"etime":"12:11"},"37756":{"ppid":1,"etime":"12:11"},"37841":{"ppid":37756,"etime":"12:10"},"38740":{"ppid":1,"etime":"11:44"},"38862":{"ppid":38740,"etime":"11:44"},"39989":{"ppid":1,"etime":"06:54"},"40086":{"ppid":39989,"etime":"06:53"},"40401":{"ppid":1,"etime":"05:18"},"40518":{"ppid":40401,"etime":"05:17"},"41178":{"ppid":1,"etime":"05:09"},"41259":{"ppid":1,"etime":"05:09"},"41270":{"ppid":41178,"etime":"05:09"},"41348":{"ppid":41259,"etime":"05:08"},"41635":{"ppid":1,"etime":"04:08"},"41710":{"ppid":41635,"etime":"04:08"},"42363":{"ppid":1,"etime":"03:45"},"42412":{"ppid":42363,"etime":"03:44"},"44055":{"ppid":41259,"etime":"00:06"},"44100":{"ppid":44055,"etime":"00:01"}}
+processes listening on daemon.sock [44055]
+PASS exactly one process listens on the public daemon socket :: {"listeners":[44055],"hello":44055}
+PASS adopted worker still serves prompts through the new supervisor :: [{"type":"text","text":"after-supervisor-replacement"}]
+########## s1-02-supervisor-replacement.mjs exit=0
+########## s1-03-worker-crash-isolation.mjs
+file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/common.mjs:31
+  if (!r.success) throw Object.assign(new Error(`create failed: ${r.error}`), { response: r });
+                                      ^
+
+Error: create failed: Agent name "cg-s1-03-A" is unavailable: an agent of that name already exists at depth 0 under this parent
+    at Module.createRoot (file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/common.mjs:31:39)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/s1-03-worker-crash-isolation.mjs:5:11 {
+  response: {
+    id: 'cg-iso-1-3166c5',
+    type: 'response',
+    command: 'create',
+    success: false,
+    error: 'Agent name "cg-s1-03-A" is unavailable: an agent of that name already exists at depth 0 under this parent'
+  }
+}
+
+Node.js v24.19.0
+########## s1-03-worker-crash-isolation.mjs exit=1
+########## s1-04-session-lease.mjs
+owner {"id":"e689bf4fecfa","file":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1c-b56d-7361-a2f8-48d715e8e52b.jsonl","pid":45090}
+(1) contender create on the owned path {"converged":true,"activeSessionId":"e689bf4fecfa","workerPid":45090}
+PASS (1) contender receives the owning active-session identity (converged, not a second writer) :: {"convergedTo":"e689bf4fecfa"}
+PASS (1) no additional worker was launched
+(2) switch_session from another root onto the owned path {"success":false,"code":"session_already_active","owner":"e689bf4fecfa","error":"Session is already active in e689bf4fecfa: /private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a0"}
+PASS (2) rejected with typed session_already_active naming the owner
+(3) one-shot CLI --resume on the owned path {"status":1,"stdout":"","stderr":"Error: Session is already active in e689bf4fecfa: /private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1c-b56d-7361-a2f8-48d715e8e52b.jsonl\n"}
+PASS (3) one-shot client refused rather than writing the owned transcript
+PASS transcript bytes unchanged by all three contenders :: {"before":1606,"after":1606}
+PASS transcript still parses line by line
+lease dir entries 13
+PASS owner keeps working after contention
+########## s1-04-session-lease.mjs exit=0
+########## s1-05-generation-reconnect.mjs
+cursor before supervisor kill {"generation":"89d9d7da3b5f","sequence":11}
+SIGKILL supervisor 44055 true
+(1) attach with pre-replacement cursor {"status":"complete","toSequence":12,"toCursor":{"generation":"89d9d7da3b5f","sequence":12}}
+PASS (1) supervisor replacement keeps the worker generation; interval reported complete
+PASS (1) sequence continues monotonically within the same generation :: {"generation":"89d9d7da3b5f","sequence":23}
+SIGKILL resident worker 45322 true
+recovery transitions (state/pid) ["recovering/45322","failed/45322"] 341ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"a9a8fa9b48de","sessionId":"01a05f1c-b9e1-748e-bf66-bd59ca80e027","pid":46069,"state":"ready","sameActiveId":false}
+(2) attach to reopened root presenting the dead generation's cursor {"replay":{"status":"complete","toSequence":0,"toCursor":{"generation":"1b759a0564bd","sequence":0}},"snapshotMessages":5}
+PASS (2) dead-generation cursor is not treated as a live position: replay restarts at the new generation with the snapshot as baseline :: {"n0":2}
+(3) client-owned worker {"id":"7ff434bc8ab4","pid":46116}
+(3) owned cursor {"generation":"d5179be50b0f","sequence":11}
+(3) SIGKILL owned worker 46116 true
+(3) owned worker transitions ["recovering/46116","starting/46222","ready/46222"] {"state":"ready","pid":46222}
+PASS (3) client-owned worker is relaunched automatically under the same active-session id
+(3) reattach with the previous generation's cursor {"replay":{"status":"complete","toSequence":0,"toCursor":{"generation":"552bb22aa4f9","sequence":0}},"snapshotMessages":0}
+FAIL (3) generation change is reported explicitly and the old sequence is not compared as current :: {"status":"complete","toSequence":0,"toCursor":{"generation":"552bb22aa4f9","sequence":0}}
+PASS (3) relaunched owned worker serves prompts; events carry the new generation :: {"generation":"552bb22aa4f9","sequence":11}
+(3) kill owned worker true
+########## s1-05-generation-reconnect.mjs exit=1
+########## s1-06-idempotence.mjs
+first {"success":true,"data":{"output":"","exitCode":0,"cancelled":false,"truncated":false},"lines":1}
+repeat same clientId+commandId {"success":true,"data":{"output":"","exitCode":0,"cancelled":false,"truncated":false},"lines":1}
+PASS repeat returns the stored result
+PASS no duplicate external effect (file has exactly one line) :: {"lines":1}
+journal entries for this command id ["received","result"]
+PASS mutation was journaled (receipt before dispatch, result after)
+same commandId from a DIFFERENT clientId {"success":true,"lines":2}
+PASS idempotency key is clientId+commandId (another client's same commandId is new work)
+ack_result sent (fire-and-forget: the supervisor returns no response for ack_result) ["received","result","received","result","acknowledged"]
+PASS acknowledged entry is compacted/removed from the journal :: ["received","result","received","result","acknowledged"]
+repeat after acknowledgement {"success":true,"lines":3}
+observation: after ack the same clientId+commandId is admitted as new work (documented: ack lets the journal compact); lines now 3
+########## s1-06-idempotence.mjs exit=0
+########## s1-07-uncertain.mjs
+(a) journal right after send ["received"]
+(a) SIGKILL supervisor mid-command 45426 true
+(a) replacement supervisor 46563
+(a) retry with the same clientId+commandId {"success":false,"code":"command_result_uncertain","error":"The previous command result is uncertain and was not replayed"}
+PASS (a) retry is reported uncertain, not re-executed
+(a) target lines after first retry / after second retry 1 1 {"secondRetry":"command_result_uncertain"}
+PASS (a) target mutated at most once and never again on retries
+PASS (a) journal holds the receipt without a durable result :: ["received"]
+PASS (a) uncertainty is scoped to the command identity; a new id on the same root executes :: {"lines":2}
+(b) SIGKILL worker mid-command 47338 true
+(b) response to the in-flight command {"success":false,"error":"Daemon worker socket closed"}
+recovery transitions (state/pid) ["recovering/47338","failed/47338"] 351ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"b9974d4825cb","sessionId":"01a05f1d-3b68-74bd-b7dd-0fcfaf213c68","pid":47446,"state":"ready","sameActiveId":false}
+(b) retries with the same clientId+commandId (old id / reopened id) {"a":{"success":false,"error":"Daemon worker socket closed"},"b":{"success":false,"error":"Daemon worker socket closed"}}
+(b) journal entries [{"type":"received"},{"type":"result","success":false,"error":"Daemon worker socket closed"}]
+PASS (b) the mutation was not re-executed on retry :: {"lines":0}
+PASS (b) retry surfaces the loss explicitly (uncertain code or the stored socket-loss failure), never a fabricated success :: Daemon worker socket closed
+(b) observation: worker loss mid-command is journaled as a definite failure result, not as command_result_uncertain ["received","result"]
+(c) effect landed on disk; SIGKILL worker before the command can complete 47533 true
+(c) response to the in-flight command {"success":false,"error":"Daemon worker socket closed"}
+recovery transitions (state/pid) ["recovering/47533","failed/47533"] 343ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"fa97fa786971","sessionId":"01a05f1d-5598-70b8-9497-0b2d6456f5da","pid":47631,"state":"ready","sameActiveId":false}
+(c) retry same clientId+commandId {"success":false,"error":"Daemon worker socket closed"}
+(c) journal entries [{"type":"received"},{"type":"result","success":false,"error":"Daemon worker socket closed"}]
+PASS (c) not re-executed (file still has exactly one line) :: {"lines":1}
+FAIL (c) CRITICAL: an effect that happened is reported as uncertain, not as a definite failure :: {"reported":"Daemon worker socket closed","effectOnDisk":1}
+########## s1-07-uncertain.mjs exit=1
+########## s1-08-schedule.mjs
+cron_add {"job":{"id":"01d7d1d0-152e-4881-a6f7-74411ca90db5","status":"active","source":"cron","runtimeKind":"top-level","activeSessionId":"59a8fea0feb0","sessionId":"01a05f1d-5af5-7319-9098-0908569f84e8","sessionFile":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1d-5af5-7319-9098-0908569f84e8.jsonl","cwd":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/work","prompt":"SLOW:20:500","schedule":{"kind":"interval","expression":"every 20s","intervalMs":20000},"createdAt":"2026-09-01T22:35:54.581Z","updatedAt":"2026-09-01T22:35:54.581Z","nextRunAt":"2026-09-01T22:36:14.581Z","runCount":0}}
+PASS recurring job accepted
+jobs file /private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/session-artifacts/01a05f1d-5af5-7319-9098-0908569f84e8/scheduled-jobs.json
+job state after add {"jobs":[{"id":"01d7d1d0-152e-4881-a6f7-74411ca90db5","status":"active","source":"cron","runtimeKind":"top-level","activeSessionId":"59a8fea0feb0","sessionId":"01a05f1d-5af5-7319-9098-0908569f84e8","sessionFile":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1d-5af5-7319-9098-0908569f84e8.jsonl","cwd":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-
+first tick delivered to the model after 20233ms
+job state during delivery {"jobs":[{"id":"01d7d1d0-152e-4881-a6f7-74411ca90db5","status":"active","source":"cron","runtimeKind":"top-level","activeSessionId":"59a8fea0feb0","sessionId":"01a05f1d-5af5-7319-9098-0908569f84e8","sessionFile":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1d-5af5-7319-9098-0908569f84e8.jsonl","cwd":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/work","prompt":"SLOW:20:500","schedule":{"kind":"interval","expression":"every 20s","intervalMs":20000},"createdAt":"2026-09-01T22:35:54.581Z","updatedAt":"2
+SIGKILL worker during the scheduled turn 47681 true
+recovery transitions (state/pid) ["recovering/47681","failed/47681"] 365ms
+failed descriptor {"lifecycle":"failed","lastError":"Waiting for a client with fresh runtime context","consecutiveFailures":0}
+retry_worker Waiting for a client with fresh runtime context
+reopened via create(sessionPath) {"activeSessionId":"ff7b12c92603","sessionId":"01a05f1d-5af5-7319-9098-0908569f84e8","pid":47882,"state":"ready","sameActiveId":false}
+recovered {"path":"client-reopen","id2":"ff7b12c92603","afterMs":1003}
+job state right after reopen {"jobs":[{"id":"01d7d1d0-152e-4881-a6f7-74411ca90db5","status":"active","source":"cron","runtimeKind":"top-level","activeSessionId":"ff7b12c92603","sessionId":"01a05f1d-5af5-7319-9098-0908569f84e8","sessionFile":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1d-5af5-7319-9098-0908569f84e8.jsonl","cwd":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/work","prompt":"SLOW:20:500","schedule":{"kind":"interval","expression":"every 20s","intervalMs":20000},"createdAt":"2026-09-01T22:35:54.581Z","updatedAt":"2
+PASS the interrupted tick was not re-delivered on restart (no immediate replay) :: {"deliveredWithin15s":0}
+PASS job persisted with an advanced schedule and no dangling dispatch after recovery :: {"jobs":[{"id":"01d7d1d0-152e-4881-a6f7-74411ca90db5","status":"active","source":"cron","runtimeKind":"top-level","activeSessionId":"ff7b12c92603","sessionId":"01a05f1d-5af5-7319-9098-0908569f84e8","sessionFile":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223
+PASS future ticks continue after recovery
+cron_list {"jobs":[{"id":"01d7d1d0-152e-4881-a6f7-74411ca90db5","status":"active","source":"cron","runtimeKind":"top-level","activeSessionId":"ff7b12c92603","sessionId":"01a05f1d-5af5-7319-9098-0908569f84e8","sessionFile":"/private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/prime/home/.prime/agent/sessions/01a05f1d-5af5-7319-9098-0908569f84
+cron_cancel ok
+########## s1-08-schedule.mjs exit=0
+########## s1-09-child-recovery.mjs
+prompt true
+idle true
+kernel output child id sub-750840f6 {"messages":[{"role":"user","content":[{"type":"text","text":"TOOL:ipython:{\"code\":\"handle = await rlm(\\\"ECHO:child-hi\\\", name=\\\"cg-child\\\"); print(\\\"CHILD\\\", handle.rlm_child_id, handle.name)\"}"}],"timestamp":1788302195178},{"role":"assistant","content":[{"type":"toolCall","id":"cal
+children before crash [{"id":"sub-750840f6","name":"cg-child","status":"done"}]
+PASS exactly one child was registered
+file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/cgd.mjs:78
+export async function waitUntil(fn, timeoutMs = 20000, every = 100) { const end = Date.now() + timeoutMs; for (;;) { const v = await fn(); if (v) return v; if (Date.now() > end) throw new Error("waitUntil timeout"); await sleep(every); } }
+                                                                                                                                                                                        ^
+
+Error: waitUntil timeout
+    at Module.waitUntil (file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/cgd.mjs:78:185)
+    at async file:///private/tmp/claude-501/-Volumes-Data-Developer-commandgovernor/70e68721-f82c-4a9c-8223-3fe3a8820578/scratchpad/bakeoff/s1/s1-09-child-recovery.mjs:14:1
+
+Node.js v24.19.0
+########## s1-09-child-recovery.mjs exit=1
