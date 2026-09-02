@@ -138,10 +138,17 @@ export function loadOrCreateClientIdentity(stateDir: string, hooks: LoadClientId
 		createdBy: currentProcessIdentity(),
 	};
 	hooks.beforeCommit?.();
-	const result = createFileExclusiveDurable(path, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-	if (result.outcome === "created") return { record, created: true };
-	// Lost the race: the winner's record is the identity. It is validated like
-	// any other read, so a foreign file that appeared under the name is an
-	// error rather than an identity.
-	return { record: parseRecord(path, result.contents), created: false };
+	const contents = `${JSON.stringify(record, null, 2)}\n`;
+	for (let attempt = 0; attempt < 8; attempt += 1) {
+		const result = createFileExclusiveDurable(path, contents, { mode: 0o600 });
+		if (result.outcome === "created") return { record, created: true };
+		// Lost the race: the winner's record is the identity. It is validated like
+		// any other read, so a foreign file that appeared under the name is an
+		// error rather than an identity.
+		if (result.outcome === "exists") return { record: parseRecord(path, result.contents), created: false };
+		// "vanished": something removed the winner between our link and our read.
+		// Nothing in the Governor does that to an identity; whatever did, the
+		// name is free again and this candidate is still valid.
+	}
+	throw new ClientIdentityError("identity_unreadable", path, "the identity file kept appearing and vanishing; refusing to guess");
 }

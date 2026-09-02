@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 
-import { DaemonClient, SubstrateMismatch, connectWithRetry } from "../../governor/prime/daemon-client.ts";
+import { DaemonClient, SubstrateMismatch, TransportLost, connectWithRetry } from "../../governor/prime/daemon-client.ts";
 import { expectedSubstrate } from "../../governor/prime/substrate.ts";
 
 const root = mkdtempSync("/tmp/cg-pin-"); // short: sun_path
@@ -50,20 +50,20 @@ describe("PIN (wire): an unpinned daemon never receives a command", () => {
 		client.close();
 	});
 
-	for (const [label, mutate, pattern] of [
-		["wrong protocol version", (h: Record<string, unknown>) => ({ ...h, protocol: { ...expected.protocol, version: 99 } }), /pin requires prime-agent\.daemon v7/],
-		["wrong protocol name", (h: Record<string, unknown>) => ({ ...h, protocol: { name: "something-else", version: expected.protocol.version } }), /daemon speaks something-else/],
-		["wrong appVersion", (h: Record<string, unknown>) => ({ ...h, appVersion: "9.9.9" }), /appVersion 9\.9\.9; pin requires/],
-		["missing appVersion", (h: Record<string, unknown>) => ({ ...h, appVersion: undefined }), /appVersion undefined; pin requires/],
-		["wrong schemaRevision", (h: Record<string, unknown>) => ({ ...h, schemaRevision: 999999 }), /schemaRevision 999999; pin requires/],
-		["missing schemaRevision", (h: Record<string, unknown>) => ({ ...h, schemaRevision: undefined }), /schemaRevision undefined; pin requires/],
+	for (const [label, mutate, field] of [
+		["wrong protocol version", (h: Record<string, unknown>) => ({ ...h, protocol: { ...expected.protocol, version: 99 } }), "protocol"],
+		["wrong protocol name", (h: Record<string, unknown>) => ({ ...h, protocol: { name: "something-else", version: expected.protocol.version } }), "protocol"],
+		["wrong appVersion", (h: Record<string, unknown>) => ({ ...h, appVersion: "9.9.9" }), "appVersion"],
+		["missing appVersion", (h: Record<string, unknown>) => ({ ...h, appVersion: undefined }), "appVersion"],
+		["wrong schemaRevision", (h: Record<string, unknown>) => ({ ...h, schemaRevision: 999999 }), "schemaRevision"],
+		["missing schemaRevision", (h: Record<string, unknown>) => ({ ...h, schemaRevision: undefined }), "schemaRevision"],
 	] as const) {
-		it(`${label}: SubstrateMismatch, socket closed, nothing sent`, async () => {
+		it(`${label}: SubstrateMismatch on ${field}, socket closed, nothing sent`, async () => {
 			hello = mutate(good());
 			const before = received.length;
 			const client = new DaemonClient(socketPath, { clientId: "cg-pin-test", expected });
-			await assert.rejects(client.connect(2000), (e: unknown) => e instanceof SubstrateMismatch && pattern.test(e.message));
-			await assert.rejects(client.request({ type: "list" }, "cg-pin-after-refusal"), /not connected|closed/);
+			await assert.rejects(client.connect(2000), (e: unknown) => e instanceof SubstrateMismatch && e.field === field);
+			await assert.rejects(client.request({ type: "list" }, "cg-pin-after-refusal"), (e: unknown) => e instanceof TransportLost);
 			await new Promise((resolve) => setTimeout(resolve, 50));
 			assert.equal(received.length, before, "the fake daemon received nothing");
 			// connectWithRetry does not retry past a mismatch: the answer is definitive, not transient.

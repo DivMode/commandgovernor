@@ -61,11 +61,16 @@ export class RequestTimeout extends Error {
 }
 
 /** The daemon on the other end is not the one the pin describes. */
+export type SubstrateMismatchField = "protocol" | "appVersion" | "schemaRevision";
+
 export class SubstrateMismatch extends Error {
 	readonly hello: DaemonHello;
-	constructor(message: string, hello: DaemonHello) {
+	/** Which pinned fact the daemon failed. */
+	readonly field: SubstrateMismatchField;
+	constructor(field: SubstrateMismatchField, message: string, hello: DaemonHello) {
 		super(message);
 		this.name = "SubstrateMismatch";
+		this.field = field;
 		this.hello = hello;
 	}
 }
@@ -159,7 +164,7 @@ export class DaemonClient {
 				const mismatch = describeMismatch(hello, this.#expected);
 				if (mismatch) {
 					socket.destroy();
-					reject(new SubstrateMismatch(mismatch, hello));
+					reject(new SubstrateMismatch(mismatch.field, mismatch.message, hello));
 					return;
 				}
 				this.hello = hello;
@@ -319,15 +324,15 @@ export class DaemonClient {
 	}
 }
 
-function describeMismatch(hello: DaemonHello, expected: ExpectedSubstrate): string | undefined {
+function describeMismatch(hello: DaemonHello, expected: ExpectedSubstrate): { field: SubstrateMismatchField; message: string } | undefined {
 	if (hello.protocol.name !== expected.protocol.name || hello.protocol.version !== expected.protocol.version) {
-		return `daemon speaks ${hello.protocol.name} v${hello.protocol.version}; pin requires ${expected.protocol.name} v${expected.protocol.version}`;
+		return { field: "protocol", message: `daemon speaks ${hello.protocol.name} v${hello.protocol.version}; pin requires ${expected.protocol.name} v${expected.protocol.version}` };
 	}
 	if (hello.appVersion !== expected.appVersion) {
-		return `daemon reports appVersion ${String(hello.appVersion)}; pin requires ${expected.appVersion}`;
+		return { field: "appVersion", message: `daemon reports appVersion ${String(hello.appVersion)}; pin requires ${expected.appVersion}` };
 	}
 	if (expected.schemaRevision !== undefined && hello.schemaRevision !== expected.schemaRevision) {
-		return `daemon reports schemaRevision ${String(hello.schemaRevision)}; pin requires ${expected.schemaRevision}`;
+		return { field: "schemaRevision", message: `daemon reports schemaRevision ${String(hello.schemaRevision)}; pin requires ${expected.schemaRevision}` };
 	}
 	return undefined;
 }

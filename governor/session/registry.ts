@@ -408,16 +408,19 @@ export class SessionRegistry {
 				if (onDisk === contents) unlinkDurable(path);
 			},
 		});
-		for (let attempt = 0; attempt < 3; attempt += 1) {
+		for (let attempt = 0; attempt < 4; attempt += 1) {
 			const created = createFileExclusiveDurable(path, contents, { mode: 0o600 });
 			if (created.outcome === "created") return lease();
+			if (created.outcome === "vanished") continue; // released between our EEXIST and our read
 			const inspected = this.inspectRecoveryLease(sessionId);
-			if (!inspected) continue; // released between our EEXIST and our read
+			if (!inspected) continue; // released between our EEXIST and our inspection
 			const { holder, identity, raw } = inspected;
 			if (holder.ownerToken === ownerToken || !identityProvesProcessOver(identity)) {
 				throw new RecoveryLeaseHeld(sessionId, holder, identity);
 			}
-			if (this.#replaceDeadLease(sessionId, raw, contents, record)) return lease(holder, identity);
+			const replaced = this.#replaceDeadLease(sessionId, raw, contents, record);
+			if (replaced === "reclaimed") return lease(holder, identity);
+			if (replaced === "created") return lease(); // the dead holder released it itself first; nothing was reclaimed
 			// Someone else acted between our inspection and our critical section: look again.
 		}
 		const inspected = this.inspectRecoveryLease(sessionId);
@@ -431,7 +434,7 @@ export class SessionRegistry {
 	 * the file had changed or vanished-and-been-retaken, in which case nothing
 	 * was deleted.
 	 */
-	#replaceDeadLease(sessionId: string, expected: string, contents: string, self: RecoveryLeaseRecord): boolean {
+	#replaceDeadLease(sessionId: string, expected: string, contents: string, self: RecoveryLeaseRecord): "reclaimed" | "created" | "changed" {
 		const path = this.#leasePath(sessionId);
 		const mutex = this.#reclaimMutexPath(sessionId);
 		let fd: number;
@@ -442,14 +445,20 @@ export class SessionRegistry {
 			throw this.#reclaimBlocked(sessionId);
 		}
 		try {
-			writeSync(fd, `${JSON.stringify({ ...self, stage: "reclaim" })}\n`);
-			closeSync(fd);
+			try {
+				writeSync(fd, `${JSON.stringify({ ...self, stage: "reclaim" })}\n`);
+			} finally {
+				closeSync(fd);
+			}
 			const now = readRaw(path);
-			if (now !== undefined && now !== expected) return false;
-			if (now !== undefined) unlinkDurable(path);
+			if (now !== undefined && now !== expected) return "changed";
+			const wasDead = now !== undefined;
+			if (wasDead) unlinkDurable(path);
 			// A fresh acquirer (no mutex needed for a plain create) may have taken
 			// the name while it was absent; then it holds, legitimately, and we do not.
-			return createFileExclusiveDurable(path, contents, { mode: 0o600 }).outcome === "created";
+			const created = createFileExclusiveDurable(path, contents, { mode: 0o600 });
+			if (created.outcome !== "created") return "changed";
+			return wasDead ? "reclaimed" : "created";
 		} finally {
 			try {
 				unlinkSync(mutex);

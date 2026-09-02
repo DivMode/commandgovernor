@@ -120,7 +120,11 @@ export function writeFileDurable(path: string, contents: string, options: { mode
 	fsyncDirectory(dirname(path), fs);
 }
 
-export type ExclusiveCreateOutcome = { readonly outcome: "created" } | { readonly outcome: "exists"; readonly contents: string };
+export type ExclusiveCreateOutcome =
+	| { readonly outcome: "created" }
+	| { readonly outcome: "exists"; readonly contents: string }
+	/** The name existed when `link` ran and was gone by the time it was read: somebody released it. The caller retries. */
+	| { readonly outcome: "vanished" };
 
 /**
  * Create `path` with `contents` only if it does not exist, durably and
@@ -143,7 +147,12 @@ export function createFileExclusiveDurable(path: string, contents: string, optio
 			fs.linkSync(temp, path);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			return { outcome: "exists", contents: fs.readFileSync(path, "utf8") };
+			try {
+				return { outcome: "exists", contents: fs.readFileSync(path, "utf8") };
+			} catch (readError) {
+				if ((readError as NodeJS.ErrnoException).code !== "ENOENT") throw readError;
+				return { outcome: "vanished" };
+			}
 		}
 		fsyncDirectory(dirname(path), fs);
 		return { outcome: "created" };

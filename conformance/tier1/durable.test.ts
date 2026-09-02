@@ -164,6 +164,28 @@ describe("DUR: createFileExclusiveDurable", () => {
 		assert.deepEqual(readdirSync(dir), ["identity.json"], "the loser's temp was removed");
 	});
 
+	it("a name that vanishes between the link's EEXIST and the read is reported as vanished, not thrown", () => {
+		// A concurrent lease release does exactly this; the caller retries rather than crashing.
+		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(dir, "lease.lock");
+		writeFileSync(target, "holder\n");
+		const { fs } = recorder();
+		const racing: DurableFs = {
+			...fs,
+			linkSync: (from, to) => {
+				try {
+					fs.linkSync(from, to);
+				} finally {
+					NODE_FS.unlinkSync(target); // the holder releases right after our link fails
+				}
+			},
+		};
+		const result = createFileExclusiveDurable(target, "mine\n", { fs: racing });
+		assert.equal(result.outcome, "vanished");
+		assert.deepEqual(readdirSync(dir), [], "nothing under the name, no temp left");
+		assert.equal(createFileExclusiveDurable(target, "mine\n", { fs }).outcome, "created", "the retry succeeds");
+	});
+
 	it("a failure before the link leaves no file under the name", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
 		const target = join(dir, "identity.json");

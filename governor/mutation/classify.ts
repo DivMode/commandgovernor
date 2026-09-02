@@ -158,13 +158,20 @@ export function classifyMutationOutcome(observation: Observation, policy: Classi
 			if (review === undefined) {
 				return { verdict: "uncertain", reason: "typed_failure_unreviewed", response, detail: `${commandType} + ${code} has no reviewed proof` };
 			}
-			if (review.timing === "post_effect") {
-				return { verdict: "uncertain", reason: "typed_failure_post_effect", response, detail: review.basis };
+			// Only a reviewed pre-effect timing is proof. Anything else -- including a
+			// timing value this switch has never heard of -- fails closed.
+			switch (review.timing) {
+				case "pre_effect":
+					return { verdict: "failed", proof: { kind: "typed_pre_effect_rejection", commandType, code, review }, response };
+				case "post_effect":
+					return { verdict: "uncertain", reason: "typed_failure_post_effect", response, detail: review.basis };
+				case "ambiguous":
+					return { verdict: "uncertain", reason: "typed_failure_ambiguous", response, detail: review.basis };
+				default: {
+					const unknownTiming: never = review.timing;
+					return { verdict: "uncertain", reason: "typed_failure_unreviewed", response, detail: `unknown review timing ${String(unknownTiming)}` };
+				}
 			}
-			if (review.timing === "ambiguous") {
-				return { verdict: "uncertain", reason: "typed_failure_ambiguous", response, detail: review.basis };
-			}
-			return { verdict: "failed", proof: { kind: "typed_pre_effect_rejection", commandType, code, review }, response };
 		}
 	}
 }

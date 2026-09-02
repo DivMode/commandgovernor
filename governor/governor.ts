@@ -85,8 +85,12 @@ export type RecoveryOutcome =
 	| { readonly action: "reopened"; readonly incarnation: Incarnation; readonly previous: Incarnation; readonly createCommandId: string }
 	| { readonly action: "converged"; readonly incarnation: Incarnation; readonly previous: Incarnation }
 	| { readonly action: "lease_held"; readonly holder: RecoveryLeaseHeld }
-	/** The reclaim mutex is held (a live reclaimer, or a stale one an operator must clear). Nothing was dispatched. */
-	| { readonly action: "reclaim_blocked"; readonly holder: RecoveryReclaimBlocked };
+	/**
+	 * The reclaim mutex is held. `transient` is true for contention with a live
+	 * reclaimer (retry later); false for a stale mutex an operator must clear,
+	 * or one whose holder cannot be told. Nothing was dispatched either way.
+	 */
+	| { readonly action: "reclaim_blocked"; readonly holder: RecoveryReclaimBlocked; readonly transient: boolean };
 
 export interface DispatchResult {
 	readonly record: MutationRecord;
@@ -487,7 +491,7 @@ export class Governor {
 			try {
 				lease = this.registry.acquireRecoveryLease(sessionId, this.ownerToken);
 			} catch (error) {
-				if (error instanceof RecoveryReclaimBlocked) return { action: "reclaim_blocked", holder: error };
+				if (error instanceof RecoveryReclaimBlocked) return { action: "reclaim_blocked", holder: error, transient: error.holderIdentity === "current" };
 				if (error instanceof RecoveryLeaseHeld) return { action: "lease_held", holder: error };
 				throw error;
 			}
