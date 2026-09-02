@@ -239,6 +239,14 @@ and probes under the original id, identity and command;
 this process's own record, two concurrent adopters, and a record with no
 dispatcher identity through the injectable process probe.
 
+**Probe responses only enter through one door.** `recordProbe` takes words
+only (what was attempted, what error ended it); a probe that came back
+with a response goes through `recordProbeOutcome`, which refuses to store
+a success response on a record that stays UNCERTAIN whatever verdict the
+caller passes, and the `mark*` writers refuse a response that contradicts
+the state they write. The suite tries every public writer and then scans
+every version of every record for UNCERTAIN-with-success.
+
 **Evidence and resolution are one write.** A probe's stored success is
 exact evidence that the effect happened, and a stored typed pre-effect
 rejection is exact evidence that it did not. `recordProbeOutcome` writes
@@ -589,15 +597,24 @@ would have truncated the record.
   completes, so a reader cannot assume a name it found is durable. Where
   a read leads to external action the reader confirms the name itself:
   the client identity is fsynced at load before it is stamped on any
-  envelope; a supersede's claim, a probe and every dispatch write a
-  version (which fsyncs the record directory) before or as part of the
-  action; the create paths (`createFileExclusiveDurable`, `mkdirDurable`,
-  their losers and the already-exists case) fsync the parent before
-  returning. What is NOT confirmed by a plain read is the current version
-  of a record another process just published; the consequence of losing
-  it to power failure is that the record reverts to its previous version,
-  which the next adoption or write re-derives from. No read of that kind
-  precedes an external effect without a write of its own.
+  envelope; a supersede's claim and confirm, and every dispatch, write a
+  version (which fsyncs the record directory) before the action; the
+  create paths (`createFileExclusiveDurable`, `mkdirDurable`, their losers
+  and the already-exists case) fsync the parent before returning. What is
+  NOT confirmed by a plain read is the current version of a record another
+  process just published, and `probeStoredResult` is such a reader: it
+  reads the record (state, digest, backlink) and then sends, writing only
+  afterwards. Its fences are therefore process-crash-safe but not
+  power-loss-safe in this exact sense: if the version it read is lost to
+  power failure after the probe went out, the record reverts to its
+  previous version, which the next sweep re-derives from (an UNCERTAIN
+  record reverts to DISPATCHED and is re-adopted; a confirmed claim
+  reverts to taken and the settle rule applies). The probe itself is
+  answered by Prime from its journal, so a lost version never causes a
+  second execution; what it can cost is the probe's own recorded outcome,
+  which the next probe re-fetches. Hardening this to power-loss safety
+  would mean fsyncing the record directory before every probe; recorded
+  here as a contract, not done.
 - **A replacement that does not declare `supersedes` is invisible to the
   claim.** The ledger serialises replacements that name the record they
   replace. A second command for the same intent issued as an ordinary

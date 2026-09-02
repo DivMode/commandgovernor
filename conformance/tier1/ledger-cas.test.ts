@@ -52,7 +52,7 @@ describe("D2: ledger writes are compare-and-swap", () => {
 				},
 			},
 		});
-		const result = B.ledger.recordProbe("cg-1", { response: stored });
+		const result = B.ledger.recordProbeOutcome("cg-1", { response: stored }, { verdict: "uncertain", reason: "untyped_failure", response: stored }, "probe");
 		assert.equal(result.state, "COMPLETED", "B's write was re-applied on top of A's resolution");
 		assert.equal(result.version, 4);
 		assert.equal(result.probes?.length, 1, "the probe was kept");
@@ -727,6 +727,41 @@ describe("D2: ledger writes are compare-and-swap", () => {
 		const marked = ledger.recordProbeOutcome("cg-1", { response: { type: "response", command: "x", success: true } }, { verdict: "completed", response: { type: "response", command: "x", success: true } }, "substrate stored result");
 		assert.equal(marked.state, "FAILED");
 		assert.equal(marked.probes?.[0]?.conflictsWith, "FAILED");
+	});
+
+	it("no public ledger API can leave a success response on a record that stays UNCERTAIN", () => {
+		const ok: DaemonResponse = { type: "response", command: "x", success: true };
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const ledger = new MutationLedger(dir);
+		const fresh = (id: string) => ledger.recordDispatch({ commandId: id, clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		// 1. recordProbe takes words only; a response smuggled in is refused at runtime as well as by the type.
+		fresh("cg-a");
+		ledger.markUncertain("cg-a", "transport_lost");
+		assert.throws(() => ledger.recordProbe("cg-a", { response: ok, detail: "smuggled" } as never), (e: unknown) => e instanceof MutationLedgerError && /recordProbeOutcome/.test(e.message));
+		assert.equal(ledger.require("cg-a").probes, undefined);
+		// 2. recordProbeOutcome with a success response and a wrong verdict: the response wins and the record completes.
+		const completed = ledger.recordProbeOutcome("cg-a", { response: ok }, { verdict: "uncertain", reason: "untyped_failure", response: ok }, "probe");
+		assert.equal(completed.state, "COMPLETED");
+		// 3. markUncertain refuses a success response; markFailed refuses one; markCompleted refuses a failure.
+		fresh("cg-b");
+		assert.throws(() => ledger.markUncertain("cg-b", "untyped_failure", ok), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		assert.throws(() => ledger.markFailed("cg-b", { kind: "typed_pre_effect_rejection", commandType: "import_jsonl", code: "session_import_file_not_found" }, ok), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		assert.throws(() => ledger.markCompleted("cg-b", stored), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		assert.equal(ledger.require("cg-b").state, "DISPATCHED");
+		// 4. recordOutcome with a success verdict whose response says failure is refused too.
+		assert.throws(() => ledger.recordOutcome("cg-b", { verdict: "completed", response: stored } as never), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		// 5. A failure response with a "completed" verdict through the probe path is refused.
+		fresh("cg-c");
+		ledger.markUncertain("cg-c", "timeout");
+		assert.throws(() => ledger.recordProbeOutcome("cg-c", { response: stored }, { verdict: "completed", response: ok }, "probe"), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
+		// The invariant, checked over every version of every record written above.
+		for (const record of ledger.list()) {
+			for (const version of ledger.history(record.commandId)) {
+				const carriesSuccess = version.probes?.some((p) => p.response?.success === true) || version.transitions.some((t) => t.response?.success === true);
+				assert.ok(!(version.state === "UNCERTAIN" && carriesSuccess), `${record.commandId} v${version.version} is UNCERTAIN with a success response`);
+				assert.ok(!(version.state === "DISPATCHED" && carriesSuccess), `${record.commandId} v${version.version} is DISPATCHED with a success response`);
+			}
+		}
 	});
 
 	it("negative control: the pre-review rename-in-place write loses A's evidence from a stale snapshot", () => {

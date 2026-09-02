@@ -724,15 +724,35 @@ export class MutationLedger {
 		});
 	}
 
+	/**
+	 * The one invariant every write below enforces at the API surface, not
+	 * only on the paths the Governor happens to use: a version whose state is
+	 * UNCERTAIN never carries a success response, anywhere on the record. A
+	 * success response for a command id is the substrate's own statement that
+	 * the effect happened; a record that stored it while staying uncertain
+	 * would be supersedable despite holding proof of its own completion.
+	 */
+	static #assertEvidenceConsistent(commandId: string, to: MutationState, response: DaemonResponse | undefined): void {
+		if (response?.success === true && to !== "COMPLETED") {
+			throw new MutationLedgerError("illegal_transition", `${commandId}: a success response is exact evidence of completion and cannot be recorded with state ${to}`);
+		}
+		if (response !== undefined && response.success === false && to === "COMPLETED") {
+			throw new MutationLedgerError("illegal_transition", `${commandId}: a failure response cannot be recorded as COMPLETED`);
+		}
+	}
+
 	markCompleted(commandId: string, response: DaemonResponse): MutationRecord {
+		MutationLedger.#assertEvidenceConsistent(commandId, "COMPLETED", response);
 		return this.#transition(commandId, ["DISPATCHED"], { at: new Date().toISOString(), to: "COMPLETED", reason: "success response", response });
 	}
 
 	markFailed(commandId: string, proof: PreEffectProof, response: DaemonResponse): MutationRecord {
+		MutationLedger.#assertEvidenceConsistent(commandId, "FAILED", response);
 		return this.#transition(commandId, ["DISPATCHED"], { at: new Date().toISOString(), to: "FAILED", reason: `typed pre-effect rejection ${proof.commandType} + ${proof.code}`, proof, response });
 	}
 
 	markUncertain(commandId: string, uncertainReason: UncertainReason, response?: DaemonResponse, detail?: string): MutationRecord {
+		MutationLedger.#assertEvidenceConsistent(commandId, "UNCERTAIN", response);
 		return this.#transition(commandId, ["DISPATCHED"], {
 			at: new Date().toISOString(),
 			to: "UNCERTAIN",
@@ -780,6 +800,17 @@ export class MutationLedger {
 	 */
 	recordProbeOutcome(commandId: string, probe: { response?: DaemonResponse; detail?: string }, verdict: Verdict, by: string): MutationRecord {
 		const at = new Date().toISOString();
+		// The response itself is the authority over the verdict a caller passes:
+		// a success response is exact evidence of completion whatever the
+		// classifier said, so it can never be stored on a record that stays
+		// UNCERTAIN. (A failure response with a verdict of "completed" is a
+		// caller error and refused.)
+		if (probe.response?.success === true && verdict.verdict !== "completed") {
+			verdict = { verdict: "completed", response: probe.response };
+		}
+		if (probe.response !== undefined && probe.response.success === false && verdict.verdict === "completed") {
+			throw new MutationLedgerError("illegal_transition", `${commandId}: a failure response cannot be recorded as a completion`);
+		}
 		return this.#update(commandId, (current) => {
 			if (current.state !== "UNCERTAIN") {
 				// Already resolved: the probe is kept. If it is exact evidence that
@@ -814,12 +845,16 @@ export class MutationLedger {
 	}
 
 	/**
-	 * Record that the substrate's stored result for this id was fetched. Does
-	 * not change state, and is applied on whatever the current version is when
-	 * it lands: a probe written while another Governor resolved the record is
-	 * appended to the resolved record, never over it.
+	 * Record that a probe was attempted and what happened to it, in words
+	 * only. A probe that came back with a RESPONSE goes through
+	 * {@link recordProbeOutcome}, which writes the response together with the
+	 * resolution it proves; this method refuses a response so that no caller
+	 * can store exact evidence on a record without resolving it.
 	 */
-	recordProbe(commandId: string, probe: { response?: DaemonResponse; detail?: string }): MutationRecord {
-		return this.#update(commandId, (current) => ({ ...current, probes: [...(current.probes ?? []), { at: new Date().toISOString(), ...probe }] }));
+	recordProbe(commandId: string, probe: { detail: string }): MutationRecord {
+		if ("response" in probe) {
+			throw new MutationLedgerError("illegal_transition", `${commandId}: a probe response is evidence and must be recorded through recordProbeOutcome`);
+		}
+		return this.#update(commandId, (current) => ({ ...current, probes: [...(current.probes ?? []), { at: new Date().toISOString(), detail: probe.detail }] }));
 	}
 }
