@@ -356,7 +356,8 @@ behaviour, since power loss itself cannot be staged in a test.
   Prime converges their reopens, but each would ledger its own `create`,
   and neither can probe the other's UNCERTAIN records (the identity fence
   refuses, by design).
-- **Only two `(command, code)` pairs are proof.** Every other typed
+- **Only one `(command, code)` pair is proof** (`import_jsonl` +
+  `session_import_file_not_found`). Every other typed
   failure is UNCERTAIN: the reviewed post-effect and ambiguous rows, and
   everything unreviewed, including `create` + `missing_session_cwd`, which
   is thrown in the worker after a session lease was taken. Widening the
