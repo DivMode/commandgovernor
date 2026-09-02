@@ -1,5 +1,5 @@
 export { ClientIdentityMismatch, Governor, NotRecoverable, SessionIdentityMismatch } from "./governor.ts";
-export type { CreateSessionSpec, CreatedSession, DispatchResult, GovernorOptions, RecoveryOutcome } from "./governor.ts";
+export type { ClientIdentityMismatchReason, CreateSessionSpec, CreatedSession, DispatchResult, GovernorOptions, RecoveryOutcome } from "./governor.ts";
 export { DaemonClient, RequestTimeout, SubstrateMismatch, TransportLost, connectWithRetry } from "./prime/daemon-client.ts";
 export { DEFAULT_LAUNCH_ENV_ALLOWLIST, buildLaunchEnv, launchEnvIsWithinAllowlist } from "./prime/env.ts";
 export * from "./prime/protocol.ts";
@@ -17,5 +17,5 @@ export { classifyProcessIdentity, currentProcessIdentity, processStartId } from 
 export type { ProcessIdentity, ProcessIdentityVerdict, ProcessProbe } from "./process/identity.ts";
 export { SessionPathError, canonicalSessionPath, isAcceptableSessionPath } from "./session/paths.ts";
 export type { CanonicalSessionPath } from "./session/paths.ts";
-export { RecoveryLeaseHeld, SessionRegistry, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "./session/registry.ts";
+export { RecoveryLeaseHeld, RecoveryReclaimBlocked, SessionRegistry, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "./session/registry.ts";
 export type { Incarnation, RecoveryLease, RecoveryLeaseRecord, SessionRecord } from "./session/registry.ts";

@@ -45,18 +45,21 @@ describe("classifyMutationOutcome (D2)", () => {
 	});
 
 	it("a reviewed pre-effect pair is the only failed verdict, and it carries the review as proof", () => {
-		const verdict = classifyMutationOutcome({ kind: "response", commandType: "create", response: failure("create", "already active", alreadyActive) });
+		const verdict = classifyMutationOutcome({ kind: "response", commandType: "import_jsonl", response: failure("import_jsonl", "not found", importNotFound) });
 		assert.equal(verdict.verdict, "failed");
 		assert.ok(verdict.verdict === "failed");
 		assert.equal(verdict.proof.kind, "typed_pre_effect_rejection");
-		assert.equal(verdict.proof.commandType, "create");
-		assert.equal(verdict.proof.code, "session_already_active");
+		assert.equal(verdict.proof.commandType, "import_jsonl");
+		assert.equal(verdict.proof.code, "session_import_file_not_found");
 		assert.equal(verdict.proof.review?.timing, "pre_effect");
-		assert.match(verdict.proof.review?.thrownAt ?? "", /reuseWorkerForCreate/);
+		assert.match(verdict.proof.review?.thrownAt ?? "", /importFromJsonl/);
+	});
 
-		const notFound = classifyMutationOutcome({ kind: "response", commandType: "import_jsonl", response: failure("import_jsonl", "not found", importNotFound) });
-		assert.equal(notFound.verdict, "failed");
-		assert.equal(notFound.verdict === "failed" ? notFound.proof.review?.timing : undefined, "pre_effect");
+	it("a reviewed AMBIGUOUS pair is uncertain: create + session_already_active has a worker-side throw site after launchWorker", () => {
+		const verdict = classifyMutationOutcome({ kind: "response", commandType: "create", response: failure("create", "already active", alreadyActive) });
+		assert.equal(verdict.verdict, "uncertain");
+		assert.equal(verdict.verdict === "uncertain" ? verdict.reason : undefined, "typed_failure_ambiguous");
+		assert.match(verdict.verdict === "uncertain" ? (verdict.detail ?? "") : "", /acquireSessionLease/);
 	});
 
 	it("the same code is proof for one command and not for another: import_jsonl + missing_session_cwd is post-effect", () => {

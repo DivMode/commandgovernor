@@ -84,7 +84,7 @@ describe("IDENT: probeStoredResult fails closed on any client-identity doubt, be
 		uncertainRecord(governor, governor.clientId, "cg-missing");
 		rmSync(clientIdentityPath(governor.stateDir));
 		const before = received.length;
-		await assert.rejects(governor.probeStoredResult("cg-missing", command), (e: unknown) => e instanceof ClientIdentityMismatch && /identity_missing/.test(e.reason));
+		await assert.rejects(governor.probeStoredResult("cg-missing", command), (e: unknown) => e instanceof ClientIdentityMismatch && e.reason === "identity_file_unavailable" && e.identityCode === "identity_missing");
 		assert.equal(received.length, before);
 		governor.close();
 	});
@@ -96,14 +96,14 @@ describe("IDENT: probeStoredResult fails closed on any client-identity doubt, be
 		const path = clientIdentityPath(governor.stateDir);
 		writeFileSync(path, "{broken");
 		let before = received.length;
-		await assert.rejects(governor.probeStoredResult("cg-corrupt", command), (e: unknown) => e instanceof ClientIdentityMismatch && /identity_malformed/.test(e.reason));
+		await assert.rejects(governor.probeStoredResult("cg-corrupt", command), (e: unknown) => e instanceof ClientIdentityMismatch && e.reason === "identity_file_unavailable" && e.identityCode === "identity_malformed");
 		assert.equal(received.length, before);
 		// Replaced: a valid identity file that names a different Governor. This is what "someone re-initialised the state dir" looks like.
 		rmSync(path);
 		const other = loadOrCreateClientIdentity(governor.stateDir).record.clientId;
 		assert.notEqual(other, governor.clientId);
 		before = received.length;
-		await assert.rejects(governor.probeStoredResult("cg-corrupt", command), (e: unknown) => e instanceof ClientIdentityMismatch && e.current === other && /no longer carries/.test(e.reason));
+		await assert.rejects(governor.probeStoredResult("cg-corrupt", command), (e: unknown) => e instanceof ClientIdentityMismatch && e.current === other && e.reason === "identity_file_differs");
 		assert.equal(received.length, before);
 		governor.close();
 	});

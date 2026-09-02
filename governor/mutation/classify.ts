@@ -60,6 +60,7 @@ export type UncertainReason =
 	| "untyped_failure"
 	| "unknown_error_code"
 	| "typed_failure_post_effect"
+	| "typed_failure_ambiguous"
 	| "typed_failure_unreviewed"
 	| "transport_lost"
 	| "timeout";
@@ -159,6 +160,9 @@ export function classifyMutationOutcome(observation: Observation, policy: Classi
 			}
 			if (review.timing === "post_effect") {
 				return { verdict: "uncertain", reason: "typed_failure_post_effect", response, detail: review.basis };
+			}
+			if (review.timing === "ambiguous") {
+				return { verdict: "uncertain", reason: "typed_failure_ambiguous", response, detail: review.basis };
 			}
 			return { verdict: "failed", proof: { kind: "typed_pre_effect_rejection", commandType, code, review }, response };
 		}

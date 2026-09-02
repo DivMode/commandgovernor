@@ -21,9 +21,15 @@
  * cannot be established (`unknown`), is never overridden. A recycled pid
  * therefore cannot keep a dead Governor's lease alive, and a lease the
  * Governor cannot inspect cannot be stolen.
+ *
+ * Reclaim itself is a compare-and-swap under a per-session reclaim mutex
+ * (`<sessionId>.json.recovery.reclaim`, exclusive create): the dead lease is
+ * replaced only if its bytes are still exactly the bytes that were
+ * classified dead. Two reclaimers cannot both take over, and a reclaimer
+ * can never delete a lease it did not inspect. The mutex is never stolen.
  */
 
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 import { createFileExclusiveDurable, unlinkDurable, writeFileDurable } from "../fs/durable.ts";
@@ -107,6 +113,30 @@ export class RecoveryLeaseHeld extends Error {
 	}
 }
 
+/**
+ * A reclaim could not enter its critical section because the per-session
+ * reclaim mutex exists. `holderIdentity: current` is contention with a live
+ * reclaimer; `gone`/`replaced` means a Governor died inside the (microsecond,
+ * subprocess-free) critical section and left the mutex behind; `unknown`
+ * means it cannot be told. None of these is reclaimed automatically: a mutex
+ * that could be stolen would reintroduce the race it exists to close. An
+ * operator who has confirmed the holder is gone removes the `.recovery.reclaim`
+ * file.
+ */
+export class RecoveryReclaimBlocked extends Error {
+	readonly code = "recovery_reclaim_blocked" as const;
+	readonly sessionId: string;
+	readonly holder: RecoveryLeaseRecord;
+	readonly holderIdentity: ProcessIdentityVerdict;
+	constructor(sessionId: string, holder: RecoveryLeaseRecord, holderIdentity: ProcessIdentityVerdict) {
+		super(`reclaim of the recovery lease for ${sessionId} is blocked: the reclaim mutex is held by ${holder.ownerToken} (pid ${holder.pid}, process ${holderIdentity}); never taken over automatically`);
+		this.name = "RecoveryReclaimBlocked";
+		this.sessionId = sessionId;
+		this.holder = holder;
+		this.holderIdentity = holderIdentity;
+	}
+}
+
 export interface RecoveryLeaseRecord {
 	readonly sessionId: string;
 	readonly ownerToken: string;
@@ -132,13 +162,18 @@ export interface SessionRegistryOptions {
 	readonly self?: ProcessIdentity;
 }
 
-function readJson<T>(path: string): T | undefined {
+function readRaw(path: string): string | undefined {
 	try {
-		return JSON.parse(readFileSync(path, "utf8")) as T;
+		return readFileSync(path, "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
 	}
+}
+
+function readJson<T>(path: string): T | undefined {
+	const raw = readRaw(path);
+	return raw === undefined ? undefined : (JSON.parse(raw) as T);
 }
 
 function isLeaseRecord(value: unknown): value is RecoveryLeaseRecord {
@@ -319,31 +354,39 @@ export class SessionRegistry {
 		return { record: updated, incarnation, appended: true };
 	}
 
-	/** The lease on disk for `sessionId`, if any, with the verdict on its holder's process. */
-	inspectRecoveryLease(sessionId: string): { holder: RecoveryLeaseRecord; identity: ProcessIdentityVerdict } | undefined {
-		let raw: unknown;
-		try {
-			raw = readJson<unknown>(this.#leasePath(sessionId));
-		} catch (error) {
-			if (!(error instanceof SyntaxError)) throw error;
-			raw = null; // present but not JSON: an uninspectable holder, handled below
-		}
+	/** The lease on disk for `sessionId`, if any, with the verdict on its holder's process and the exact bytes inspected. */
+	inspectRecoveryLease(sessionId: string): { holder: RecoveryLeaseRecord; identity: ProcessIdentityVerdict; raw: string } | undefined {
+		const raw = readRaw(this.#leasePath(sessionId));
 		if (raw === undefined) return undefined;
-		if (!isLeaseRecord(raw)) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw);
+		} catch {
+			parsed = null;
+		}
+		if (!isLeaseRecord(parsed)) {
 			// A lease file that is not a lease record has no inspectable holder. It
 			// is honoured, because "unknown" is never a licence to reclaim.
-			return { holder: { sessionId, ownerToken: "<unreadable>", pid: -1, acquiredAt: "" }, identity: "unknown" };
+			return { holder: { sessionId, ownerToken: "<unreadable>", pid: -1, acquiredAt: "" }, identity: "unknown", raw };
 		}
-		return { holder: raw, identity: classifyProcessIdentity(raw, this.#probe) };
+		return { holder: parsed, identity: classifyProcessIdentity(parsed, this.#probe), raw };
 	}
 
 	/**
-	 * Take the recovery lease for `sessionId`, or throw {@link RecoveryLeaseHeld}.
+	 * Take the recovery lease for `sessionId`, or throw {@link RecoveryLeaseHeld}
+	 * (or {@link RecoveryReclaimBlocked}).
 	 *
 	 * Atomic and durable by `createFileExclusiveDurable`. A lease whose holder
 	 * process is proven over (`gone` or `replaced` by pid reuse) is reclaimed
 	 * exactly once, with the dead holder reported; a lease whose holder is
 	 * `current`, or whose identity is `unknown`, is honoured.
+	 *
+	 * Reclaim is a compare-and-swap, not an unlink by name: the holder is
+	 * classified OUTSIDE the critical section (that step may spawn `ps`), and
+	 * then, under the per-session reclaim mutex, the lease bytes are re-read
+	 * and compared with the bytes that were classified. Only an unchanged dead
+	 * lease is replaced. Anything else means another process acted first, and
+	 * this one re-inspects rather than deleting whatever is there now.
 	 */
 	acquireRecoveryLease(sessionId: string, ownerToken: string): RecoveryLease {
 		this.require(sessionId);
@@ -356,31 +399,85 @@ export class SessionRegistry {
 			...(self.processStartId !== undefined ? { processStartId: self.processStartId } : {}),
 			acquiredAt: new Date().toISOString(),
 		};
-		let reclaimedFrom: RecoveryLeaseRecord | undefined;
-		let reclaimedBecause: ProcessIdentityVerdict | undefined;
-		for (let attempt = 0; attempt < 2; attempt += 1) {
-			const created = createFileExclusiveDurable(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-			if (created.outcome === "created") {
-				return {
-					record,
-					...(reclaimedFrom ? { reclaimedFrom, reclaimedBecause } : {}),
-					release: () => {
-						const onDisk = readJson<RecoveryLeaseRecord>(path);
-						if (onDisk && onDisk.ownerToken === ownerToken) unlinkDurable(path);
-					},
-				};
-			}
+		const contents = `${JSON.stringify(record)}\n`;
+		const lease = (reclaimedFrom?: RecoveryLeaseRecord, reclaimedBecause?: ProcessIdentityVerdict): RecoveryLease => ({
+			record,
+			...(reclaimedFrom ? { reclaimedFrom, reclaimedBecause } : {}),
+			release: () => {
+				const onDisk = readRaw(path);
+				if (onDisk === contents) unlinkDurable(path);
+			},
+		});
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			const created = createFileExclusiveDurable(path, contents, { mode: 0o600 });
+			if (created.outcome === "created") return lease();
 			const inspected = this.inspectRecoveryLease(sessionId);
 			if (!inspected) continue; // released between our EEXIST and our read
-			const { holder, identity } = inspected;
+			const { holder, identity, raw } = inspected;
 			if (holder.ownerToken === ownerToken || !identityProvesProcessOver(identity)) {
 				throw new RecoveryLeaseHeld(sessionId, holder, identity);
 			}
-			reclaimedFrom = holder;
-			reclaimedBecause = identity;
-			unlinkDurable(path);
+			if (this.#replaceDeadLease(sessionId, raw, contents, record)) return lease(holder, identity);
+			// Someone else acted between our inspection and our critical section: look again.
 		}
 		const inspected = this.inspectRecoveryLease(sessionId);
 		throw new RecoveryLeaseHeld(sessionId, inspected?.holder ?? record, inspected?.identity ?? "unknown");
+	}
+
+	/**
+	 * The critical section of a reclaim. Exclusive by the reclaim mutex; no
+	 * subprocess and no classification inside it. Returns true when the dead
+	 * lease whose bytes were `expected` was replaced by `contents`, false when
+	 * the file had changed or vanished-and-been-retaken, in which case nothing
+	 * was deleted.
+	 */
+	#replaceDeadLease(sessionId: string, expected: string, contents: string, self: RecoveryLeaseRecord): boolean {
+		const path = this.#leasePath(sessionId);
+		const mutex = this.#reclaimMutexPath(sessionId);
+		let fd: number;
+		try {
+			fd = openSync(mutex, "wx", 0o600);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			throw this.#reclaimBlocked(sessionId);
+		}
+		try {
+			writeSync(fd, `${JSON.stringify({ ...self, stage: "reclaim" })}\n`);
+			closeSync(fd);
+			const now = readRaw(path);
+			if (now !== undefined && now !== expected) return false;
+			if (now !== undefined) unlinkDurable(path);
+			// A fresh acquirer (no mutex needed for a plain create) may have taken
+			// the name while it was absent; then it holds, legitimately, and we do not.
+			return createFileExclusiveDurable(path, contents, { mode: 0o600 }).outcome === "created";
+		} finally {
+			try {
+				unlinkSync(mutex);
+			} catch {
+				// Already gone; nothing to hold open.
+			}
+		}
+	}
+
+	#reclaimMutexPath(sessionId: string): string {
+		return `${this.#recordPath(sessionId)}.recovery.reclaim`;
+	}
+
+	#reclaimBlocked(sessionId: string): RecoveryReclaimBlocked {
+		const raw = readRaw(this.#reclaimMutexPath(sessionId));
+		let parsed: unknown = null;
+		try {
+			parsed = raw === undefined ? undefined : JSON.parse(raw);
+		} catch {
+			parsed = null;
+		}
+		if (parsed === undefined) {
+			// The mutex was released between our EEXIST and our read: contention, not a stale mutex.
+			return new RecoveryReclaimBlocked(sessionId, { sessionId, ownerToken: "<released>", pid: -1, acquiredAt: "" }, "current");
+		}
+		if (!isLeaseRecord(parsed)) {
+			return new RecoveryReclaimBlocked(sessionId, { sessionId, ownerToken: "<unreadable>", pid: -1, acquiredAt: "" }, "unknown");
+		}
+		return new RecoveryReclaimBlocked(sessionId, parsed, classifyProcessIdentity(parsed, this.#probe));
 	}
 }

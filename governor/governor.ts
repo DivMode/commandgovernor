@@ -20,7 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 
-import { ClientIdentityError, loadOrCreateClientIdentity, readClientIdentity } from "./prime/client-identity.ts";
+import { ClientIdentityError, type ClientIdentityErrorCode, loadOrCreateClientIdentity, readClientIdentity } from "./prime/client-identity.ts";
 import { DaemonClient, RequestTimeout, TransportLost, connectWithRetry } from "./prime/daemon-client.ts";
 import { buildLaunchEnv, type LaunchEnvOptions } from "./prime/env.ts";
 import {
@@ -37,7 +37,7 @@ import type { DaemonEventCursor } from "./prime/protocol.ts";
 import { MutationLedger, type MutationRecord, type ResolutionEvidence } from "./mutation/ledger.ts";
 import { currentProcessIdentity } from "./process/identity.ts";
 import { canonicalSessionPath, type CanonicalSessionPath } from "./session/paths.ts";
-import { type Incarnation, RecoveryLeaseHeld, type SessionRecord, SessionRegistry } from "./session/registry.ts";
+import { type Incarnation, RecoveryLeaseHeld, RecoveryReclaimBlocked, type SessionRecord, SessionRegistry } from "./session/registry.ts";
 
 export interface GovernorOptions {
 	/** Durable Governor state: registry, ledger, client identity. */
@@ -84,7 +84,9 @@ export type RecoveryOutcome =
 	| { readonly action: "healthy"; readonly incarnation: Incarnation }
 	| { readonly action: "reopened"; readonly incarnation: Incarnation; readonly previous: Incarnation; readonly createCommandId: string }
 	| { readonly action: "converged"; readonly incarnation: Incarnation; readonly previous: Incarnation }
-	| { readonly action: "lease_held"; readonly holder: RecoveryLeaseHeld };
+	| { readonly action: "lease_held"; readonly holder: RecoveryLeaseHeld }
+	/** The reclaim mutex is held (a live reclaimer, or a stale one an operator must clear). Nothing was dispatched. */
+	| { readonly action: "reclaim_blocked"; readonly holder: RecoveryReclaimBlocked };
 
 export interface DispatchResult {
 	readonly record: MutationRecord;
@@ -125,16 +127,21 @@ export class ClientIdentityMismatch extends Error {
 	readonly commandId: string;
 	readonly recorded: string;
 	readonly current: string | undefined;
-	readonly reason: string;
-	constructor(commandId: string, recorded: string, current: string | undefined, reason: string) {
-		super(`refusing to probe ${commandId}: ${reason} (record ${recorded}, current ${current ?? "<none>"}); nothing was sent`);
+	readonly reason: ClientIdentityMismatchReason;
+	/** The typed identity-file error, when that is what stopped the probe. */
+	readonly identityCode: ClientIdentityErrorCode | undefined;
+	constructor(commandId: string, recorded: string, current: string | undefined, reason: ClientIdentityMismatchReason, identityCode?: ClientIdentityErrorCode) {
+		super(`refusing to probe ${commandId}: ${reason}${identityCode ? ` (${identityCode})` : ""} (record ${recorded}, current ${current ?? "<none>"}); nothing was sent`);
 		this.name = "ClientIdentityMismatch";
 		this.commandId = commandId;
 		this.recorded = recorded;
 		this.current = current;
 		this.reason = reason;
+		this.identityCode = identityCode;
 	}
 }
+
+export type ClientIdentityMismatchReason = "identity_file_unavailable" | "identity_file_differs" | "governor_differs" | "connection_differs";
 
 function summaryOf(value: unknown, what: string): SessionSummary {
 	if (!isSessionSummary(value)) throw new Error(`${what}: response data is not a session summary`);
@@ -371,19 +378,19 @@ export class Governor {
 			onDisk = readClientIdentity(this.stateDir).clientId;
 		} catch (error) {
 			if (error instanceof ClientIdentityError) {
-				throw new ClientIdentityMismatch(record.commandId, recorded, undefined, `identity file ${error.code}: ${error.message}`);
+				throw new ClientIdentityMismatch(record.commandId, recorded, undefined, "identity_file_unavailable", error.code);
 			}
 			throw error;
 		}
 		if (onDisk !== recorded) {
-			throw new ClientIdentityMismatch(record.commandId, recorded, onDisk, "the identity file no longer carries the record's clientId");
+			throw new ClientIdentityMismatch(record.commandId, recorded, onDisk, "identity_file_differs");
 		}
 		if (this.clientId !== recorded) {
-			throw new ClientIdentityMismatch(record.commandId, recorded, this.clientId, "this Governor's clientId differs from the record's");
+			throw new ClientIdentityMismatch(record.commandId, recorded, this.clientId, "governor_differs");
 		}
 		const client = this.client;
 		if (client.clientId !== recorded) {
-			throw new ClientIdentityMismatch(record.commandId, recorded, client.clientId, "the live connection would stamp a different clientId on the envelope");
+			throw new ClientIdentityMismatch(record.commandId, recorded, client.clientId, "connection_differs");
 		}
 		return client;
 	}
@@ -480,6 +487,7 @@ export class Governor {
 			try {
 				lease = this.registry.acquireRecoveryLease(sessionId, this.ownerToken);
 			} catch (error) {
+				if (error instanceof RecoveryReclaimBlocked) return { action: "reclaim_blocked", holder: error };
 				if (error instanceof RecoveryLeaseHeld) return { action: "lease_held", holder: error };
 				throw error;
 			}

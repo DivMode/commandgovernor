@@ -98,9 +98,15 @@ response claims.
 
 | command | code | reviewed timing | thrown at (pin 514633727) |
 | --- | --- | --- | --- |
-| `create` | `session_already_active` | pre-effect | supervisor `createOrReuseWorker` → `reuseWorkerForCreate`, before `launchWorker` |
 | `import_jsonl` | `session_import_file_not_found` | pre-effect | `importFromJsonl`, first statement, before `mkdirSync`/lease/`copyFileSync` |
 | `import_jsonl` | `missing_session_cwd` | **post-effect** | `importFromJsonl` → `assertSessionCwdExists`, after `copyFileSync` |
+| `create` | `session_already_active` | **ambiguous** | supervisor `reuseWorkerForCreate` before `launchWorker`, **and** the worker's `createRuntime` → `acquireSessionLease` after it (which may first rename/remove a stale lease directory); the supervisor re-serialises both identically |
+
+The `create` row was first recorded as pre-effect by enumerating one throw
+site; the independent review of 50762f4 produced the worker-side response
+through a spawned worker against the pinned daemon. It is the failure mode
+this matrix exists to prevent, so the row is kept as a reviewed
+*ambiguous* pair rather than deleted: only `pre_effect` is proof.
 
 Everything not in the table is unreviewed. So:
 
@@ -109,6 +115,7 @@ Everything not in the table is unreviewed. So:
 | `success: true` | COMPLETED |
 | `errorInfo.code` reviewed **pre-effect** for this command | FAILED, with the review as proof |
 | `errorInfo.code` reviewed **post-effect** for this command | UNCERTAIN (`typed_failure_post_effect`) |
+| `errorInfo.code` reviewed **ambiguous** for this command | UNCERTAIN (`typed_failure_ambiguous`) |
 | `errorInfo.code` known but the pair unreviewed, or the command unknown | UNCERTAIN (`typed_failure_unreviewed`) |
 | `errorInfo.code` unknown to the pin | UNCERTAIN (`unknown_error_code`) |
 | `errorInfo.code = command_result_uncertain` | UNCERTAIN (substrate says so) |
@@ -124,8 +131,9 @@ diffs the vocabulary and the read/mutating split against the pinned build,
 asserts that the worker's catch path does serialise typed codes, and pins
 the source facts behind each row of the table (the copy precedes the cwd
 check in `importFromJsonl`; the existence check is its first statement;
-`reuseWorkerForCreate` throws before `launchWorker`), so a re-pin cannot
-move a throw silently. Adding a reviewed pair requires adding its source
+`reuseWorkerForCreate` throws before `launchWorker` *and*
+`acquireSessionLease` throws the same class from the worker's
+`createRuntime`), so a re-pin cannot move a throw silently. Adding a reviewed pair requires adding its source
 fact there; the test counts the rows.
 
 **Why this is not brittle string matching.** The Issue #17 fallback trigger
@@ -271,9 +279,30 @@ alive) or `unknown` (no recorded or no observable start identity;
 "cannot signal" counts as alive). The lease is reclaimed, with the old
 holder reported, **only** on `gone` or `replaced`; `current` and `unknown`
 are honoured, and so is a lease file that is not a readable record.
+
+**Reclaim is a compare-and-swap, not an unlink by name.** Inspecting a
+holder may spawn `ps`, so two recoverers can both classify the same dead
+lease, and a reclaimer that then deleted "the lease file" by name could
+delete the live lease the other one had just published (demonstrated by the
+independent review of 50762f4). The reclaim therefore happens under a
+per-session reclaim mutex (`<sessionId>.json.recovery.reclaim`, exclusive
+create) whose critical section spawns nothing: re-read the lease bytes,
+proceed only if they are exactly the bytes that were classified dead,
+replace them, release the mutex. A changed file means someone else acted
+first; the reclaimer re-inspects instead of deleting. A fresh acquirer
+needs no mutex, and if one takes the name while the reclaimer has it
+absent, the reclaimer's exclusive create fails and it yields. The mutex
+itself is never taken over: a live holder is contention, a dead one means a
+Governor died inside a microsecond critical section, and both surface as
+`recovery_reclaim_blocked` (the Governor returns `reclaim_blocked`, dispatching
+nothing) until an operator who has confirmed the holder is gone removes the
+file. A mutex that could be stolen would reintroduce the race it closes.
+
 `conformance/tier1/registry.test.ts` stages pid reuse with this process's
-own pid under a foreign start identity, and each conservative branch with a
-fabricated probe.
+own pid under a foreign start identity, each conservative branch with a
+fabricated probe, the reclaim interleaving above (R1 reclaims inside R2's
+classification window; R2 must not delete R1's lease), a fresh acquirer
+winning the absent name, and a stale, a contended and an unreadable mutex.
 
 ## Durability contract
 
@@ -295,7 +324,7 @@ goes through `governor/fs/durable.ts`:
 | --- | --- | --- |
 | `writeFileDurable` | write temp → `fsync` temp → close → `rename` → `fsync` parent | mutation records, session records |
 | `createFileExclusiveDurable` | write temp → `fsync` temp → close → `link` (fails `EEXIST`, never replaces) → `fsync` parent → unlink temp | client identity, recovery lease |
-| `unlinkDurable` | `unlink` → `fsync` parent | lease release |
+| `unlinkDurable` | `unlink` → `fsync` parent | lease release; the dead lease inside a reclaim's critical section |
 
 The exclusive create publishes an already-complete, already-fsynced file,
 so no concurrent reader can observe an empty or partial identity or lease,
@@ -327,11 +356,19 @@ behaviour, since power loss itself cannot be staged in a test.
   Prime converges their reopens, but each would ledger its own `create`,
   and neither can probe the other's UNCERTAIN records (the identity fence
   refuses, by design).
-- **Only three `(command, code)` pairs are reviewed.** Every other typed
-  failure is UNCERTAIN, including `create` + `missing_session_cwd`, which
+- **Only two `(command, code)` pairs are proof.** Every other typed
+  failure is UNCERTAIN: the reviewed post-effect and ambiguous rows, and
+  everything unreviewed, including `create` + `missing_session_cwd`, which
   is thrown in the worker after a session lease was taken. Widening the
-  matrix is a source review plus a pinned source-fact assertion, never a
-  runtime observation.
+  matrix is a source review of *every* throw site plus a pinned source-fact
+  assertion, never a runtime observation.
+- **A Governor that dies inside a reclaim's critical section blocks that
+  session's recovery** until an operator removes
+  `<sessionId>.json.recovery.reclaim`. The window is microseconds and
+  spawns nothing; the trade is a blocked reopen for an impossible double one.
+- **The substrate pin guard is proven by a fake daemon**
+  (`conformance/tier1/substrate-pin.test.ts`): each wrong hello is refused
+  with `SubstrateMismatch`, the socket is closed, and nothing is sent.
 - **The pinned Prime is not itself durability-hardened.** The Governor's
   contract covers the Governor's records. Prime's own journal and lease
   files are written as Prime writes them.

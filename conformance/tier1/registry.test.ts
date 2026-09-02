@@ -6,13 +6,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { currentProcessIdentity, type ProcessProbe } from "../../governor/process/identity.ts";
 import { canonicalSessionPath } from "../../governor/session/paths.ts";
-import { RecoveryLeaseHeld, type RecoveryLeaseRecord, SessionRegistry, type SessionRegistryOptions, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "../../governor/session/registry.ts";
+import {
+	RecoveryLeaseHeld,
+	type RecoveryLeaseRecord,
+	RecoveryReclaimBlocked,
+	SessionRegistry,
+	type SessionRegistryOptions,
+	StaleCursorError,
+	StaleIncarnationError,
+	UnknownSessionError,
+} from "../../governor/session/registry.ts";
 
 function fresh(options: SessionRegistryOptions = {}) {
 	const stateDir = mkdtempSync(join(tmpdir(), "cg-registry-"));
@@ -117,6 +126,89 @@ describe("SessionRegistry (D1)", () => {
 		assert.throws(() => registry.acquireRecoveryLease("s", "owner-g"), (e: unknown) => e instanceof RecoveryLeaseHeld && e.holderIdentity === "unknown");
 		writeFileSync(join(registry.dir, "s.json.recovery.lock"), JSON.stringify({ sessionId: "s", ownerToken: 7 }));
 		assert.throws(() => registry.acquireRecoveryLease("s", "owner-h"), (e: unknown) => e instanceof RecoveryLeaseHeld && e.holderIdentity === "unknown");
+	});
+
+	it("reclaim is a compare-and-swap: a reclaimer that inspected a dead lease cannot delete the lease another reclaimer published meanwhile", () => {
+		// The interleaving the independent review of 50762f4 demonstrated: R1 and R2 both classify the dead lease;
+		// R1 completes its reclaim inside R2's window; the old code then unlinked R1's live lease by name.
+		const startIds = new Map<number, string | undefined>([[1001, "s1"], [1002, "s2"]]);
+		let interleaved = false;
+		const probe: ProcessProbe = {
+			alive: (pid) => pid !== 2147483646,
+			startId: (pid) => startIds.get(pid),
+		};
+		const { registry: r1, stateDir, path } = fresh({ processProbe: probe, self: { pid: 1001, processStartId: "s1" } });
+		r1.create({ sessionId: "s", sessionPath: path("s.jsonl"), lifecycle: "resident", activeSessionId: "act-1", openedBy: "o" });
+		const r2 = new SessionRegistry(stateDir, {
+			self: { pid: 1002, processStartId: "s2" },
+			processProbe: {
+				alive: (pid) => {
+					// R2 is classifying the dead holder (the liveness probe runs first); R1 reclaims and publishes right here.
+					if (!interleaved && pid === 2147483646) {
+						interleaved = true;
+						const taken = r1.acquireRecoveryLease("s", "R1");
+						assert.equal(taken.reclaimedFrom?.ownerToken, "ghost");
+					}
+					return probe.alive(pid);
+				},
+				startId: probe.startId,
+			},
+		});
+		lease(r1, "s", { ownerToken: "ghost", pid: 2147483646, processStartId: "gone" });
+		assert.throws(() => r2.acquireRecoveryLease("s", "R2"), (e: unknown) => e instanceof RecoveryLeaseHeld && e.holder.ownerToken === "R1" && e.holderIdentity === "current");
+		assert.equal(interleaved, true, "the interleaving happened");
+		const onDisk = JSON.parse(readFileSync(join(r1.dir, "s.json.recovery.lock"), "utf8")) as RecoveryLeaseRecord;
+		assert.equal(onDisk.ownerToken, "R1", "R1 still holds; R2 deleted nothing");
+		assert.equal(existsSync(join(r1.dir, "s.json.recovery.reclaim")), false, "the reclaim mutex was released");
+	});
+
+	it("the reclaim mutex is never taken over: contention, a stale mutex and an unreadable one all block, and nothing is dispatched", () => {
+		const { registry, path } = fresh();
+		registry.create({ sessionId: "s", sessionPath: path("s.jsonl"), lifecycle: "resident", activeSessionId: "act-1", openedBy: "o" });
+		const mutex = join(registry.dir, "s.json.recovery.reclaim");
+		lease(registry, "s", { ownerToken: "ghost", pid: 2147483646, processStartId: "gone" });
+		// Stale: a Governor died inside the critical section.
+		writeFileSync(mutex, `${JSON.stringify({ sessionId: "s", ownerToken: "crashed", pid: 2147483646, processStartId: "x", acquiredAt: "2026-01-01T00:00:00Z", stage: "reclaim" })}\n`);
+		assert.throws(() => registry.acquireRecoveryLease("s", "me"), (e: unknown) => e instanceof RecoveryReclaimBlocked && e.holder.ownerToken === "crashed" && e.holderIdentity === "gone");
+		assert.equal(existsSync(mutex), true, "a stale mutex is reported, not removed");
+		// Contention: a live reclaimer.
+		writeFileSync(mutex, `${JSON.stringify({ sessionId: "s", ownerToken: "busy", pid: process.pid, processStartId: currentProcessIdentity().processStartId, acquiredAt: "2026-01-01T00:00:00Z" })}\n`);
+		assert.throws(() => registry.acquireRecoveryLease("s", "me"), (e: unknown) => e instanceof RecoveryReclaimBlocked && e.holderIdentity === "current");
+		// Unreadable.
+		writeFileSync(mutex, "garbage");
+		assert.throws(() => registry.acquireRecoveryLease("s", "me"), (e: unknown) => e instanceof RecoveryReclaimBlocked && e.holderIdentity === "unknown");
+		const ghost = JSON.parse(readFileSync(join(registry.dir, "s.json.recovery.lock"), "utf8")) as RecoveryLeaseRecord;
+		assert.equal(ghost.ownerToken, "ghost", "the dead lease was not touched while the mutex was blocked");
+		// Operator clears the mutex: the reclaim proceeds.
+		rmSync(mutex);
+		const taken = registry.acquireRecoveryLease("s", "me");
+		assert.equal(taken.reclaimedFrom?.ownerToken, "ghost");
+		taken.release();
+	});
+
+	it("a fresh acquirer that takes the name while a reclaimer has it absent wins; the reclaimer re-inspects and yields", () => {
+		const startIds = new Map<number, string | undefined>([[1001, "s1"]]);
+		const probe: ProcessProbe = { alive: (pid) => pid !== 2147483646, startId: (pid) => startIds.get(pid) };
+		const { registry, path } = fresh({ processProbe: probe, self: { pid: 1002, processStartId: "s2" } });
+		registry.create({ sessionId: "s", sessionPath: path("s.jsonl"), lifecycle: "resident", activeSessionId: "act-1", openedBy: "o" });
+		lease(registry, "s", { ownerToken: "ghost", pid: 2147483646, processStartId: "gone" });
+		// Stage: the dead lease is replaced by a fresh live holder between inspection and the critical section.
+		let staged = false;
+		const staging = new SessionRegistry(registry.dir.replace(/\/sessions$/, ""), {
+			self: { pid: 1002, processStartId: "s2" },
+			processProbe: {
+				alive: (pid) => {
+					if (!staged && pid === 2147483646) {
+						staged = true;
+						rmSync(join(registry.dir, "s.json.recovery.lock"));
+						lease(registry, "s", { ownerToken: "fresh", pid: 1001, processStartId: "s1" });
+					}
+					return probe.alive(pid);
+				},
+				startId: probe.startId,
+			},
+		});
+		assert.throws(() => staging.acquireRecoveryLease("s", "me"), (e: unknown) => e instanceof RecoveryLeaseHeld && e.holder.ownerToken === "fresh" && e.holderIdentity === "current");
 	});
 
 	it("with a fabricated probe: a live pid whose start id cannot be read is unknown and honoured; a mismatch is replaced and reclaimed", () => {

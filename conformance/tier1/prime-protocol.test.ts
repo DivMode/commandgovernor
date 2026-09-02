@@ -133,17 +133,24 @@ describe("PROTO: the protocol facts the Governor relies on match the pinned buil
 		assert.match(dist("core", "session-cwd.js"), /export function assertSessionCwdExists[\s\S]{0,200}throw new MissingSessionCwdError\(issue\)/);
 		assert.match(dist("modes", "daemon", "daemon-errors.js"), /error instanceof MissingSessionCwdError[\s\S]{0,80}code: "missing_session_cwd"/);
 
-		// create + session_already_active is PRE-effect: thrown by the supervisor's reuse path, which returns before launchWorker.
+		// create + session_already_active is AMBIGUOUS: the supervisor's reuse path throws it before launchWorker, but the
+		// worker throws the same class from acquireSessionLease inside createRuntime -- after launchWorker spawned it and after
+		// reclaimStaleLease may have renamed/removed another process's lease directory -- and the supervisor re-serialises it
+		// identically (independent review of 50762f4 produced the worker-side response against the pinned daemon).
 		const supervisor = dist("modes", "daemon", "daemon-supervisor.js");
 		const createBody = bodyOf(supervisor, "createOrReuseWorker");
 		const reuse = indexOfOrFail(createBody, "return this.reuseWorkerForCreate(", "createOrReuseWorker");
 		const launch = indexOfOrFail(createBody, "this.launchWorker(", "createOrReuseWorker");
 		assert.ok(reuse < launch, "reuseWorkerForCreate is consulted before launchWorker in createOrReuseWorker");
-		const reuseBody = bodyOf(supervisor, "reuseWorkerForCreate");
-		assert.match(reuseBody, /throw new SessionAlreadyActiveError\(sessionPath, worker\.descriptor\.rootActiveSessionId\)/);
-		assert.ok(!/launchWorker|copyFileSync|writeFileSync|spawn\(/.test(reuseBody), "reuseWorkerForCreate launches and writes nothing");
-		assert.match(supervisor, /case "create": \{\s*const worker = await this\.createOrReuseWorker\(/, "the supervisor's create handler goes through createOrReuseWorker");
-		assert.equal(PRE_EFFECT_PROOF_MATRIX.lookup("create", "session_already_active")?.timing, "pre_effect");
+		assert.match(bodyOf(supervisor, "reuseWorkerForCreate"), /throw new SessionAlreadyActiveError\(sessionPath, worker\.descriptor\.rootActiveSessionId\)/);
+		const sessionLease = dist("core", "session-lease.js");
+		const acquireBody = bodyOf(sessionLease, "acquireSessionLease");
+		assert.match(acquireBody, /throw new SessionAlreadyActiveError\(/, "the worker-side site: acquireSessionLease throws the same class");
+		assert.match(acquireBody, /reclaimStaleLease\(/, "and may reclaim (rename/remove) a stale lease directory before it does");
+		const worker = dist("modes", "daemon", "daemon-mode.js");
+		assert.match(bodyOf(worker, "createRuntime"), /acquireSessionLease\(/, "the worker's createRuntime acquires the session lease");
+		assert.match(bodyOf(supervisor, "launchWorker"), /throw deserializeDaemonError\(response\)/, "launchWorker rethrows the worker's typed failure, which the supervisor catch re-serialises");
+		assert.equal(PRE_EFFECT_PROOF_MATRIX.lookup("create", "session_already_active")?.timing, "ambiguous");
 
 		// Nothing else is reviewed. If a pair is added, its source fact must be pinned above.
 		assert.equal(REVIEWED_PROOFS.length, 3, "a new reviewed pair needs its own source-fact assertion in this test");
