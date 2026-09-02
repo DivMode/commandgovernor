@@ -67,6 +67,7 @@ export interface DurableFs {
 	readFileSync: (path: string, encoding: "utf8") => string;
 	/** Non-recursive `mkdir(2)`: throws `EEXIST` when the name exists. */
 	mkdirSync: (path: string, mode: number) => void;
+	existsSync: (path: string) => boolean;
 }
 
 export const NODE_FS: DurableFs = {
@@ -81,6 +82,7 @@ export const NODE_FS: DurableFs = {
 	mkdirSync: (path, mode) => {
 		nodeFs.mkdirSync(path, { mode });
 	},
+	existsSync: nodeFs.existsSync,
 };
 
 let tempCounter = 0;
@@ -109,8 +111,12 @@ export function fsyncDirectory(dir: string, fs: DurableFs = NODE_FS): void {
 export function writeAllSync(fd: number, data: Uint8Array, fs: DurableFs = NODE_FS): void {
 	let offset = 0;
 	while (offset < data.length) {
-		const accepted = fs.writeSync(fd, data, offset, data.length - offset);
-		if (!Number.isInteger(accepted) || accepted <= 0) {
+		const remaining = data.length - offset;
+		const accepted = fs.writeSync(fd, data, offset, remaining);
+		// No progress, or more progress than was asked for: neither is a write
+		// this loop can account for, and a record it cannot account for is not
+		// published.
+		if (!Number.isInteger(accepted) || accepted <= 0 || accepted > remaining) {
 			throw new ShortWrite(offset, data.length, accepted);
 		}
 		offset += accepted;
@@ -216,8 +222,12 @@ export function createFileExclusiveDurable(path: string, contents: string, optio
  * already exist are left alone and not fsynced. Returns the directories
  * created, outermost first.
  *
- * A component that exists but is not a directory surfaces as the error the
- * next `mkdir` under it raises (`ENOTDIR`/`ENOENT`); nothing is removed.
+ * A directory that another creator made between this call's existence check
+ * and its `mkdir` (`EEXIST`) is not reported as created, but its parent IS
+ * fsynced here: the loser must not publish records under a directory whose
+ * entry it never confirmed. A component that exists but is not a directory
+ * surfaces as the error the next `mkdir` under it raises
+ * (`ENOTDIR`/`ENOENT`); nothing is removed.
  */
 export function mkdirDurable(dir: string, options: { mode?: number; fs?: DurableFs } = {}): string[] {
 	const fs = options.fs ?? NODE_FS;
@@ -227,18 +237,22 @@ export function mkdirDurable(dir: string, options: { mode?: number; fs?: Durable
 	// Collect the missing suffix of the path, then create it top-down so every
 	// parent exists (and is fsynced) before its child is made.
 	const missing: string[] = [];
-	for (let current = absolute; !nodeFs.existsSync(current) && dirname(current) !== current; current = dirname(current)) {
+	for (let current = absolute; !fs.existsSync(current) && dirname(current) !== current; current = dirname(current)) {
 		missing.unshift(current);
 	}
 	for (const path of missing) {
+		let made = true;
 		try {
 			fs.mkdirSync(path, mode);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-			throw error;
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			// A concurrent creator won the name. Its fsync of the parent is not
+			// something this caller synchronised with, so fsync the parent here
+			// too before anything is written under the directory.
+			made = false;
 		}
 		fsyncDirectory(dirname(path), fs);
-		created.push(path);
+		if (made) created.push(path);
 	}
 	return created;
 }

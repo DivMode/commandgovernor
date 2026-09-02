@@ -41,6 +41,7 @@
  *   received the original, it will run whatever the probe carries.
  */
 
+import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -73,7 +74,7 @@ export interface DispatcherIdentity extends ProcessIdentity {
 	readonly ownerToken: string;
 }
 
-/** Command fields that carry environment values and are never stored in a record. */
+/** Field names that carry environment values, at any depth, and are never stored in a record. */
 export const WITHHELD_COMMAND_FIELDS: readonly string[] = ["launchEnv", "env"];
 
 export interface MutationRecord {
@@ -83,7 +84,7 @@ export interface MutationRecord {
 	readonly commandType: string;
 	/** The wire command less `withheld` fields. Complete when `withheld` is empty. */
 	readonly command: DaemonCommand;
-	/** Names of fields removed from `command` before storage. */
+	/** Dotted paths of fields removed from `command` before storage. */
 	readonly withheld: readonly string[];
 	/** `sha256:` digest of the canonical JSON of the COMPLETE wire command. */
 	readonly commandDigest: string;
@@ -140,17 +141,30 @@ function writeAtomic(path: string, contents: string): void {
 	writeFileDurable(path, contents, { mode: 0o600 });
 }
 
-/** The command as stored: complete unless it carries environment values. */
-function storableCommand(command: DaemonCommand): { command: DaemonCommand; withheld: string[] } {
-	const stored: Record<string, unknown> = { ...command };
-	const withheld: string[] = [];
-	for (const field of WITHHELD_COMMAND_FIELDS) {
-		if (field in stored) {
-			delete stored[field];
-			withheld.push(field);
+/**
+ * `value` with every environment-bearing field removed at any depth; the
+ * dotted paths of what was removed are appended to `withheld`.
+ */
+function withholdEnv(value: unknown, path: string, withheld: string[]): unknown {
+	if (Array.isArray(value)) return value.map((item, index) => withholdEnv(item, `${path}[${index}]`, withheld));
+	if (typeof value !== "object" || value === null) return value;
+	const out: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+		const here = path === "" ? key : `${path}.${key}`;
+		if (WITHHELD_COMMAND_FIELDS.includes(key)) {
+			withheld.push(here);
+			continue;
 		}
+		out[key] = withholdEnv(item, here, withheld);
 	}
-	return { command: stored as DaemonCommand, withheld };
+	return out;
+}
+
+/** The command as stored: complete unless it carries environment values somewhere. */
+function storableCommand(command: DaemonCommand): { command: DaemonCommand; withheld: string[] } {
+	const withheld: string[] = [];
+	const stored = withholdEnv(command, "", withheld) as DaemonCommand;
+	return { command: stored, withheld };
 }
 
 export class MutationLedger {
@@ -163,7 +177,10 @@ export class MutationLedger {
 		mkdirDurable(this.dir, { mode: 0o700 });
 		this.#probe = options.processProbe ?? LIVE_PROBE;
 		const self = options.self ?? { pid: process.pid };
-		this.#self = { ...self, ownerToken: options.ownerToken ?? `pid#${self.pid}` };
+		// The default token carries randomness: a token derived from the pid
+		// alone would let a successor that recycled a dead dispatcher's pid call
+		// that dispatcher's record its own and never inspect it.
+		this.#self = { ...self, ownerToken: options.ownerToken ?? `pid#${self.pid}#${randomUUID().slice(0, 8)}` };
 	}
 
 	/** The identity this ledger writes as dispatcher. */

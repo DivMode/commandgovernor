@@ -67,6 +67,16 @@ describe("D2: adoption of abandoned DISPATCHED records", () => {
 		assert.equal(record.transitions[record.transitions.length - 1]!.adoption?.verdict, "replaced");
 	});
 
+	it("a recycled pid with DEFAULT owner tokens is still adopted: the token shortcut cannot mask the identity verdict", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-adopt-"));
+		const dead = new MutationLedger(dir, { processProbe: world({ 5000: "start:old" }), self: { pid: 5000, processStartId: "start:old" } });
+		dispatch(dead, "cg-reuse");
+		const successor = new MutationLedger(dir, { processProbe: world({ 5000: "start:new" }), self: { pid: 5000, processStartId: "start:new" } });
+		const report = successor.adoptAbandoned();
+		assert.deepEqual(report.adopted.map((r) => r.commandId), ["cg-reuse"]);
+		assert.equal(successor.require("cg-reuse").state, "UNCERTAIN");
+	});
+
 	it("a live dispatcher's record is fenced: not adopted, not on the attention surface, and its own completion still lands", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cg-adopt-"));
 		const probe = world({ 1001: "start:1001", 2002: "start:2002" });

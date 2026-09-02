@@ -83,6 +83,20 @@ describe("MutationLedger (D2)", () => {
 		assert.equal(record.commandDigest, commandDigest(command), "the digest covers the withheld field too");
 		const onDisk = JSON.stringify(ledger.require("cg-env"));
 		assert.ok(!onDisk.includes("hunter2"), "the secret is not on disk");
+		// At any depth, not only the top level: dispatchMutation takes an arbitrary command.
+		const nested = { type: "prompt", message: "x", options: { deep: { env: { NESTED: "nested-secret" } }, list: [{ launchEnv: { A: "listed-secret" } }] } };
+		const deep = ledger.recordDispatch({ ...identity("cg-nested"), command: nested });
+		assert.deepEqual(deep.withheld, ["options.deep.env", "options.list[0].launchEnv"]);
+		const deepOnDisk = JSON.stringify(ledger.require("cg-nested"));
+		assert.ok(!deepOnDisk.includes("nested-secret") && !deepOnDisk.includes("listed-secret"), "no nested environment value reaches the ledger");
+		assert.equal(deep.commandDigest, commandDigest(nested));
+	});
+
+	it("the default owner token is not derived from the pid alone", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-ledger-"));
+		const a = new MutationLedger(dir, { self: { pid: 5000, processStartId: "old" } });
+		const b = new MutationLedger(dir, { self: { pid: 5000, processStartId: "new" } });
+		assert.notEqual(a.self.ownerToken, b.self.ownerToken, "a recycled pid must not inherit the dead dispatcher's token");
 	});
 
 	it("survives a re-open: a second ledger over the same dir reads the same states", () => {

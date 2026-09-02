@@ -169,8 +169,9 @@ live Governor sharing the state directory, whose in-flight record is left
 alone so that its own completion remains a legal transition; `unknown` is
 reported and left, never adopted. The Governor runs adoption at
 construction (`startupAdoption`) and `awaitingReconciliation()` runs it
-before listing, so the obligation is on the surface whichever way a
-successor looks. `conformance/tier1/governor-crash-recovery.test.ts` is a
+before listing, so a record whose dispatcher is proven over is on the
+surface whichever way a successor looks; an `unknown` dispatcher's record
+is only in the adoption report's `undecidable` list (see *Known limits*). `conformance/tier1/governor-crash-recovery.test.ts` is a
 real child-process Governor SIGKILLed after its DISPATCHED write: a
 second Governor is fenced while the child lives, adopts once it is dead,
 and probes under the original id, identity and command;
@@ -185,9 +186,9 @@ receipt, and whatever the probe carries under the old id is admitted as
 new work -- correctly, from Prime's side. The record therefore stores
 `commandDigest`, the SHA-256 of the canonical JSON (keys sorted
 recursively) of the COMPLETE wire command, and `command`, the command
-itself less any field that carries environment values (`launchEnv`,
-`env`; `withheld` names what was removed, and no environment value is
-ever written to the ledger). `probeStoredResult` refuses with
+itself less any field named `launchEnv` or `env` at any depth
+(`withheld` lists the dotted paths removed, and no value under such a
+field is ever written to the ledger). `probeStoredResult` refuses with
 `command_mismatch` before any I/O unless the offered command's digest
 equals the record's: a different body of the same type, a different
 incarnation id, an added or removed field, or a different environment.
@@ -416,6 +417,13 @@ would have truncated the record.
   an operator who has confirmed the process is over resolves it. On macOS
   the start identity has one-second resolution, the same limit Prime's
   own lease accepts.
+- **Abandonment inside a live process is not adopted.** If the Governor
+  process survives but its own dispatch path fails after DISPATCHED
+  (the send throws something other than transport loss or timeout, or
+  the result write itself fails, e.g. `ENOSPC`), the record stays
+  DISPATCHED with a `current` dispatcher for the life of that process.
+  The fence is process-level by design; the record is adopted by the
+  next Governor once this one is over.
 - **A `create` record cannot be re-presented from the ledger alone.**
   `launchEnv` is withheld from the stored command, so probing an uncertain
   `create` needs the command supplied again, and it must digest the same

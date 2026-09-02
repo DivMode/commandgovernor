@@ -77,6 +77,7 @@ function recorder(failAt?: { op: string; path?: RegExp }): { fs: DurableFs; call
 			calls.push({ op: "mkdir", path });
 			NODE_FS.mkdirSync(path, mode);
 		},
+		existsSync: NODE_FS.existsSync,
 	};
 	return { fs, calls };
 }
@@ -261,6 +262,22 @@ describe("DUR: short writes", () => {
 		assert.notEqual(readFileSync(join(dir, "naive"), "utf8"), contents);
 	});
 
+	it("a write that reports MORE bytes than were offered is refused, not trusted", () => {
+		// write(2) never does this; the helper exists for kernels that do not behave as assumed.
+		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(dir, "record.json");
+		const fs: DurableFs = {
+			...NODE_FS,
+			writeSync: (fd, data, offset, length) => {
+				NODE_FS.writeSync(fd, data, offset, Math.min(3, length));
+				return 1000;
+			},
+		};
+		assert.throws(() => writeFileDurable(target, "0123456789", { fs }), (e: unknown) => e instanceof ShortWrite && e.written === 0);
+		assert.equal(existsSync(target), false, "the 3-byte record was never published");
+		assert.deepEqual(readdirSync(dir), []);
+	});
+
 	it("writeAllSync writes a zero-length buffer without calling write", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
 		const { fs, writes } = shortWriter(1);
@@ -287,6 +304,23 @@ describe("DUR: mkdirDurable", () => {
 		const again = recorder();
 		assert.deepEqual(mkdirDurable(target, { fs: again.fs }), []);
 		assert.deepEqual(ops(again.calls), []);
+	});
+
+	it("the loser of a concurrent mkdir still fsyncs the parent before returning", () => {
+		const root = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(root, "state");
+		const { fs, calls } = recorder();
+		const racing: DurableFs = {
+			...fs,
+			mkdirSync: (path, mode) => {
+				// Another Governor creates the directory between our existence check and our mkdir.
+				NODE_FS.mkdirSync(path, mode);
+				fs.mkdirSync(path, mode); // records the call, then throws EEXIST
+			},
+		};
+		assert.deepEqual(mkdirDurable(target, { fs: racing }), [], "not reported as created by this caller");
+		assert.deepEqual(ops(calls), ["mkdir", "open", "fsync", "close"], "but the parent was fsynced anyway");
+		assert.equal(calls[1]!.path, root);
 	});
 
 	it("a failed parent fsync is an error: the directory exists but was not reported durable", () => {
