@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { canonicalSessionPath } from "../../governor/session/paths.ts";
-import { RecoveryLeaseHeld, SessionRegistry, StaleIncarnationError, UnknownSessionError } from "../../governor/session/registry.ts";
+import { RecoveryLeaseHeld, SessionRegistry, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "../../governor/session/registry.ts";
 
 function fresh() {
 	const stateDir = mkdtempSync(join(tmpdir(), "cg-registry-"));
@@ -45,6 +45,21 @@ describe("SessionRegistry (D1)", () => {
 		assert.throws(() => registry.assertCurrent("s", "act-1"), (e: unknown) => e instanceof StaleIncarnationError && e.presented === "act-1" && e.current === "act-2");
 		assert.throws(() => registry.assertCurrent("s", "never"), StaleIncarnationError);
 		assert.throws(() => registry.assertCurrent("unknown", "act-2"), UnknownSessionError);
+	});
+
+	it("the cursor fence: a generation binds to one incarnation once, and only the current one passes", () => {
+		const { registry, path } = fresh();
+		registry.create({ sessionId: "s", sessionPath: path("s.jsonl"), lifecycle: "resident", activeSessionId: "act-1", openedBy: "o" });
+		assert.throws(() => registry.assertCurrentGeneration("s", "gen-1"), (e: unknown) => e instanceof StaleCursorError && e.current === undefined, "nothing observed yet: refuse");
+		assert.equal(registry.recordGeneration("s", "act-1", "gen-1").generation, "gen-1");
+		assert.equal(registry.recordGeneration("s", "act-1", "gen-1").generation, "gen-1", "idempotent");
+		assert.throws(() => registry.recordGeneration("s", "act-1", "gen-other"), /refusing to rebind/);
+		assert.throws(() => registry.recordGeneration("s", "act-never", "gen-1"), StaleIncarnationError);
+		assert.equal(registry.assertCurrentGeneration("s", "gen-1").activeSessionId, "act-1");
+		registry.recordIncarnation({ sessionId: "s", activeSessionId: "act-2", cause: "reopen", openedBy: "o" });
+		registry.recordGeneration("s", "act-2", "gen-2");
+		assert.throws(() => registry.assertCurrentGeneration("s", "gen-1"), (e: unknown) => e instanceof StaleCursorError && e.presented === "gen-1" && e.current === "gen-2");
+		assert.equal(registry.assertCurrentGeneration("s", "gen-2").index, 1);
 	});
 
 	it("the recovery lease: exclusive while held, released on release, reclaimed only from a dead holder", () => {

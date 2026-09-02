@@ -118,6 +118,11 @@ export class MutationLedger {
 			.sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt));
 	}
 
+	/** Records that need a human: UNCERTAIN, oldest first. */
+	awaitingReconciliation(): MutationRecord[] {
+		return this.list().filter((record) => record.state === "UNCERTAIN");
+	}
+
 	/**
 	 * Durably record intent. Must be called, and must return, before the
 	 * envelope is written to the socket. Refuses an id that already exists:

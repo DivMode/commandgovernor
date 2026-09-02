@@ -56,6 +56,16 @@ describe("MutationLedger (D2)", () => {
 		assert.equal(ledger.recordDispatch({ ...identity("cg-7"), supersedes: "cg-6" }).supersedes, "cg-6");
 	});
 
+	it("awaitingReconciliation lists exactly the UNCERTAIN records", () => {
+		const ledger = new MutationLedger(mkdtempSync(join(tmpdir(), "cg-ledger-")));
+		ledger.recordDispatch(identity("cg-9"));
+		ledger.markUncertain("cg-9", "transport_lost");
+		ledger.recordDispatch(identity("cg-10"));
+		ledger.markCompleted("cg-10", ok);
+		ledger.recordDispatch(identity("cg-11"));
+		assert.deepEqual(ledger.awaitingReconciliation().map((r) => r.commandId), ["cg-9"]);
+	});
+
 	it("survives a re-open: a second ledger over the same dir reads the same states", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cg-ledger-"));
 		const first = new MutationLedger(dir);

@@ -33,6 +33,7 @@ import {
 } from "./prime/protocol.ts";
 import { expectedSubstrate } from "./prime/substrate.ts";
 import { assertProductionPolicy, classifyMutationOutcome, type ClassificationPolicy, DEFAULT_POLICY, type Verdict } from "./mutation/classify.ts";
+import type { DaemonEventCursor } from "./prime/protocol.ts";
 import { MutationLedger, type MutationRecord, type ResolutionEvidence } from "./mutation/ledger.ts";
 import { canonicalSessionPath, type CanonicalSessionPath } from "./session/paths.ts";
 import { type Incarnation, RecoveryLeaseHeld, type SessionRecord, SessionRegistry } from "./session/registry.ts";
@@ -60,8 +61,6 @@ export interface GovernorOptions {
 	readonly sourceEnv?: Readonly<Record<string, string | undefined>>;
 	/** Wire evidence log path; env values are never written to it. */
 	readonly wireLog?: string;
-	/** Injected only by the conformance suite's negative controls. */
-	readonly classificationPolicy?: ClassificationPolicy;
 	/** Disable the recovery lease. Exists ONLY so the suite can show the fence matters. */
 	readonly unsafeDisableRecoveryFence?: boolean;
 }
@@ -147,8 +146,11 @@ export class Governor {
 		this.ownerToken = `${this.clientId}#${process.pid}#${randomUUID().slice(0, 8)}`;
 		this.registry = new SessionRegistry(options.stateDir);
 		this.ledger = new MutationLedger(options.stateDir);
-		this.#policy = options.classificationPolicy ?? DEFAULT_POLICY;
-		if (!options.classificationPolicy) assertProductionPolicy(this.#policy);
+		// The policy is not injectable. The naive policy exists for the pure
+		// classifier tests only; a Governor always runs the production one, and
+		// says so every time it is constructed.
+		this.#policy = DEFAULT_POLICY;
+		assertProductionPolicy(this.#policy);
 	}
 
 	get client(): DaemonClient {
@@ -450,7 +452,7 @@ export class Governor {
 		}
 	}
 
-	/** Wait until the supervisor reports the worker `ready`, then attach and record its generation. */
+	/** Wait until the supervisor reports the worker `ready`. Attach separately to record the generation. */
 	async waitReady(sessionId: string, timeoutMs = 60_000): Promise<SessionSummary> {
 		const deadline = Date.now() + timeoutMs;
 		for (;;) {
@@ -472,11 +474,36 @@ export class Governor {
 		}
 	}
 
-	/** Attach the Governor's connection to the current incarnation (read-only). */
+	/**
+	 * Attach the Governor's connection to the current incarnation (read-only)
+	 * and record the event-cursor generation the supervisor reports for it, so
+	 * a cursor from an earlier incarnation can be refused by {@link assertCurrentCursor}.
+	 */
 	async attach(sessionId: string): Promise<DaemonResponse> {
 		const current = this.registry.current(sessionId);
 		const launch = this.#launchEnv();
-		return this.read({ type: "attach", activeSessionId: current.activeSessionId, clientId: this.clientId, telemetryDisabled: true, launchEnv: launch.env }, 60_000);
+		const response = await this.read({ type: "attach", activeSessionId: current.activeSessionId, clientId: this.clientId, telemetryDisabled: true, launchEnv: launch.env }, 60_000);
+		if (response.success) {
+			const data = response.data as { replay?: { toCursor?: DaemonEventCursor } } | undefined;
+			const generation = data?.replay?.toCursor?.generation;
+			if (typeof generation === "string") this.registry.recordGeneration(sessionId, current.activeSessionId, generation);
+		}
+		return response;
+	}
+
+	/**
+	 * The cursor fence: a cursor whose generation belongs to an earlier
+	 * incarnation of `sessionId` is refused. Prime already restarts replay at
+	 * the new generation for such a cursor (Issue #15 D3); this makes the
+	 * Governor refuse to act on one at all rather than rely on that.
+	 */
+	assertCurrentCursor(sessionId: string, cursor: DaemonEventCursor): Incarnation {
+		return this.registry.assertCurrentGeneration(sessionId, cursor.generation);
+	}
+
+	/** Mutations awaiting human reconciliation: UNCERTAIN records, oldest first. */
+	awaitingReconciliation(): MutationRecord[] {
+		return this.ledger.awaitingReconciliation();
 	}
 }
 

@@ -39,7 +39,12 @@ session leases, command journal, schedules, RLM children, sessions, ACP
 Every mutation names `(sessionId, activeSessionId)`. The registry refuses a
 stale `activeSessionId` before any I/O with a typed `stale_incarnation`
 error, which is the port of the Rust oracle's WRK-018
-`stale_session_incarnation` fence.
+`stale_session_incarnation` fence. `attach` records the event-cursor
+generation the supervisor reports for the incarnation; a generation binds
+to one incarnation once, and `assertCurrentCursor` refuses a cursor from
+an earlier one with `stale_cursor`. Prime itself never honours a dead
+generation as a position (Issue #15 D3, re-proved in the D1 test), so
+this fence is belt to Prime's braces rather than the only thing holding.
 
 ## D2 — worker-loss mutation ambiguity
 
@@ -97,6 +102,14 @@ record it supersedes, and is refused if that record is no longer
 uncertain. `probeStoredResult` re-presents the same `clientId + commandId`
 to fetch Prime's stored result; a stored untyped failure is still
 UNCERTAIN, a stored success resolves the record from exact evidence.
+
+`awaitingReconciliation()` is the attention surface: the UNCERTAIN records,
+oldest first. There is no automatic consumer of it by design.
+
+The classification policy is not injectable. `NAIVE_POLICY` exists for the
+pure classifier tests and the D2 test's re-classification of a captured
+response; a `Governor` always constructs with `DEFAULT_POLICY` and asserts
+it is a production policy every time.
 
 The Governor's `clientId` is stable per state directory (`<stateDir>/client-id`),
 because Prime's idempotency key is `clientId + commandId`; a Governor that
@@ -173,6 +186,28 @@ the mechanism, and the tests plant a sentinel whose name contains none of
 TOKEN/SECRET/PASSWORD/KEY and prove from a worker's `env` that it did not
 arrive while an explicitly granted control variable did. The wire evidence
 log records `launchEnv` as key names only.
+
+## Known limits, recorded rather than discovered later
+
+- **The fences are properties of the Governor's API, not of the process.**
+  `DaemonClient` is exported and `Governor.client` is public, because the
+  conformance suite needs the raw protocol for its negative controls. A
+  caller that speaks to the socket directly bypasses D8 preflight, the
+  ledger and the incarnation fence. Nothing automatic does so.
+- **One state directory per fleet.** The recovery lease and the stable
+  client id both live in the state directory. Two Governors with different
+  state directories are two clients to Prime: Prime converges their
+  reopens, but each would ledger its own `create`.
+- **An UNCERTAIN `create` leaves no registry record.** If the create
+  succeeded and only the response was lost, Prime holds a session the
+  registry does not know; a repeat create on the same path converges
+  rather than duplicates, so recovery is a manual reopen, not a hazard.
+- **`assertCurrent` and the send are two steps.** A reopen by another
+  process between them is caught by Prime's own active-session addressing
+  rather than by the Governor.
+- **UNCERTAIN means unknown.** A worker killed before the effect and one
+  killed after it produce the same record, on purpose. Nothing may infer
+  which from the record.
 
 ## What this layer deliberately does not do
 

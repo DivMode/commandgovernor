@@ -22,7 +22,7 @@ import { after, before, describe, it } from "node:test";
 
 import { join } from "node:path";
 
-import { StaleIncarnationError } from "../../governor/session/registry.ts";
+import { StaleCursorError, StaleIncarnationError } from "../../governor/session/registry.ts";
 import { type PrimeFixture, startPrimeFixture } from "../lib/prime-fixture.ts";
 
 let fixture: PrimeFixture;
@@ -51,12 +51,17 @@ describe("D1: a dead resident root is reopened exactly once under the same logic
 		const first = created.record.incarnations[0]!;
 		await governor.attach(sessionId);
 
+		const firstGeneration = governor.registry.current(sessionId).generation;
+		assert.ok(firstGeneration, "attach recorded the first incarnation's event-cursor generation");
+
 		// Observable work before the crash.
 		const prompt = await governor.dispatchMutation(sessionId, first.activeSessionId, { type: "prompt", message: "ECHO:d1-before" });
 		assert.equal(prompt.verdict.verdict, "completed");
 		const idle = await governor.read({ type: "wait_for_idle", activeSessionId: first.activeSessionId }, 60_000);
 		assert.ok(idle.success);
 		assert.match(await messagesText(governor, sessionId), /d1-before/);
+		const staleCursor = governor.client.lastCursor;
+		assert.ok(staleCursor && staleCursor.generation === firstGeneration, "a cursor observed before the crash belongs to the first incarnation's generation");
 
 		// Healthy root: recovery is a no-op and says so.
 		const healthy = await governor.recoverResidentRoot(sessionId);
@@ -82,6 +87,8 @@ describe("D1: a dead resident root is reopened exactly once under the same logic
 
 		await governor.waitReady(sessionId);
 		await governor.attach(sessionId);
+		const secondGeneration = governor.registry.current(sessionId).generation;
+		assert.ok(secondGeneration && secondGeneration !== firstGeneration, "the reopened incarnation has a new generation");
 		const text = await messagesText(governor, sessionId);
 		assert.match(text, /d1-before/, "history survived the reopen");
 		assert.match(text, /worker_recovery|recovery/i, "the transcript carries Prime's visible recovery marker");
@@ -98,6 +105,16 @@ describe("D1: a dead resident root is reopened exactly once under the same logic
 			(error: unknown) => error instanceof StaleIncarnationError && error.presented === first.activeSessionId,
 		);
 		assert.equal(governor.ledger.list().length, ledgerBefore, "a refused stale dispatch writes no ledger record");
+
+		// Scenario 6, cursor half: a cursor from the dead generation is refused by the Governor ...
+		assert.throws(() => governor.assertCurrentCursor(sessionId, staleCursor), (error: unknown) => error instanceof StaleCursorError && error.presented === firstGeneration && error.current === secondGeneration);
+		assert.equal(governor.assertCurrentCursor(sessionId, { generation: secondGeneration, sequence: 0 }).activeSessionId, outcome.incarnation.activeSessionId);
+		// ... and Prime itself does not honour it as a position (Issue #15 D3): replay restarts at the new generation.
+		const replayed = await governor.read({ type: "attach", activeSessionId: outcome.incarnation.activeSessionId, clientId: governor.clientId, telemetryDisabled: true, resumeCursor: staleCursor }, 60_000);
+		assert.ok(replayed.success);
+		const replay = (replayed.data as { replay?: { toCursor?: { generation: string; sequence: number }; toSequence?: number } }).replay;
+		assert.equal(replay?.toCursor?.generation, secondGeneration, "the substrate answers in the new generation");
+		assert.equal(replay?.toSequence, 0, "and restarts replay at its baseline rather than honouring the dead sequence");
 		assert.ok(!(await messagesText(governor, sessionId)).includes("ECHO:stale"), "the stale prompt never reached the new incarnation");
 
 		// The new incarnation serves work.

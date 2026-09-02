@@ -29,6 +29,7 @@ import {
 	type DaemonHello,
 	type DaemonProtocolInfo,
 	type DaemonResponse,
+	eventCursor,
 	isDaemonEvent,
 	isDaemonHello,
 	isDaemonResponse,
@@ -219,7 +220,8 @@ export class DaemonClient {
 			}
 		}
 		if (isDaemonEvent(message)) {
-			if (message.cursor) this.lastCursor = message.cursor;
+			const cursor = eventCursor(message);
+			if (cursor) this.lastCursor = cursor;
 			this.#events.push(message);
 			for (const listener of this.#listeners) listener(message);
 		}

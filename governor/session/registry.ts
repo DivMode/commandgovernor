@@ -62,6 +62,20 @@ export class StaleIncarnationError extends Error {
 	}
 }
 
+export class StaleCursorError extends Error {
+	readonly code = "stale_cursor" as const;
+	readonly sessionId: string;
+	readonly presented: string;
+	readonly current: string | undefined;
+	constructor(sessionId: string, presented: string, current: string | undefined) {
+		super(`event-cursor generation ${presented} belongs to a previous incarnation of ${sessionId}; current is ${current ?? "not yet observed"}`);
+		this.name = "StaleCursorError";
+		this.sessionId = sessionId;
+		this.presented = presented;
+		this.current = current;
+	}
+}
+
 export class UnknownSessionError extends Error {
 	readonly code = "unknown_session" as const;
 	readonly sessionId: string;
@@ -171,6 +185,37 @@ export class SessionRegistry {
 		const current = this.current(sessionId);
 		if (current.activeSessionId !== activeSessionId) {
 			throw new StaleIncarnationError(sessionId, activeSessionId, current.activeSessionId);
+		}
+		return current;
+	}
+
+	/**
+	 * Bind the event-cursor generation observed on attach to an incarnation.
+	 * Idempotent for the same value; a different generation for the same
+	 * incarnation is refused, because a generation belongs to one worker
+	 * process and an incarnation is one worker process.
+	 */
+	recordGeneration(sessionId: string, activeSessionId: string, generation: string): Incarnation {
+		const record = this.require(sessionId);
+		const index = record.incarnations.findIndex((inc) => inc.activeSessionId === activeSessionId);
+		const known = record.incarnations[index];
+		if (!known) throw new StaleIncarnationError(sessionId, activeSessionId, this.current(sessionId).activeSessionId);
+		if (known.generation === generation) return known;
+		if (known.generation !== undefined) {
+			throw new Error(`incarnation ${activeSessionId} of ${sessionId} already has generation ${known.generation}; refusing to rebind it to ${generation}`);
+		}
+		const bound: Incarnation = { ...known, generation };
+		const incarnations = [...record.incarnations];
+		incarnations[index] = bound;
+		writeAtomic(this.#recordPath(sessionId), `${JSON.stringify({ ...record, incarnations }, null, 2)}\n`);
+		return bound;
+	}
+
+	/** The cursor fence: the presented generation must be the current incarnation's. */
+	assertCurrentGeneration(sessionId: string, generation: string): Incarnation {
+		const current = this.current(sessionId);
+		if (current.generation !== generation) {
+			throw new StaleCursorError(sessionId, generation, current.generation);
 		}
 		return current;
 	}

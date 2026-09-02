@@ -10,5 +10,5 @@ export { MutationLedger, MutationLedgerError } from "./mutation/ledger.ts";
 export type { MutationRecord, MutationState, ResolutionEvidence } from "./mutation/ledger.ts";
 export { SessionPathError, canonicalSessionPath, isAcceptableSessionPath } from "./session/paths.ts";
 export type { CanonicalSessionPath } from "./session/paths.ts";
-export { RecoveryLeaseHeld, SessionRegistry, StaleIncarnationError, UnknownSessionError } from "./session/registry.ts";
+export { RecoveryLeaseHeld, SessionRegistry, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "./session/registry.ts";
 export type { Incarnation, SessionRecord } from "./session/registry.ts";

@@ -107,15 +107,35 @@ export interface DaemonEventCursor {
 	readonly sequence: number;
 }
 
-export interface DaemonEventEnvelope {
-	readonly type: "event";
+/**
+ * Unsolicited frames. Session-scoped ones arrive as `session_event` (with a
+ * cursor); supervisor-scoped ones as `event`. Both are events to a client.
+ */
+export interface DaemonEventMeta {
 	readonly id?: string;
 	readonly activeSessionId?: string;
 	readonly sequence?: number;
 	readonly cursor?: DaemonEventCursor;
 	readonly emittedAt?: string;
+}
+
+export interface DaemonEventEnvelope {
+	readonly type: "event" | "session_event";
+	readonly id?: string;
+	readonly activeSessionId?: string;
+	readonly sequence?: number;
+	/** Supervisor-scoped `event` frames carry the cursor here ... */
+	readonly cursor?: DaemonEventCursor;
+	/** ... session-scoped `session_event` frames carry it under `meta`. */
+	readonly meta?: DaemonEventMeta;
+	readonly emittedAt?: string;
 	readonly event?: { readonly type?: string; readonly [extra: string]: unknown };
 	readonly [extra: string]: unknown;
+}
+
+/** The generation-scoped cursor of an event frame, wherever the pin puts it. */
+export function eventCursor(event: DaemonEventEnvelope): DaemonEventCursor | undefined {
+	return event.cursor ?? event.meta?.cursor;
 }
 
 /** Resident session-host process state, as the supervisor reports it. */
@@ -239,7 +259,7 @@ export function isDaemonResponse(value: unknown): value is DaemonResponse {
 }
 
 export function isDaemonEvent(value: unknown): value is DaemonEventEnvelope {
-	return isRecord(value) && value.type === "event";
+	return isRecord(value) && (value.type === "event" || value.type === "session_event");
 }
 
 export function isSessionSummary(value: unknown): value is SessionSummary {
