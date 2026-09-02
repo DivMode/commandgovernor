@@ -1,0 +1,39 @@
+{
+  "$comment": [
+    "Typechecking only. Nothing here is built: Prime loads the harness .ts files",
+    "through jiti and the conformance suite runs them under Node's native type",
+    "stripping, so the emitted output would never be used and `noEmit` makes",
+    "that explicit rather than leaving a dist/ nobody reads.",
+    "",
+    "`erasableSyntaxOnly` is the load-bearing option. Node's type stripping",
+    "erases types without transforming, so enums, parameter properties and",
+    "namespaces are syntax errors at runtime rather than downlevelled. Without",
+    "this flag tsc would happily accept code that Node refuses to run, which is",
+    "precisely the class of error a typecheck is supposed to catch here.",
+    "",
+    "`verbatimModuleSyntax` for the same reason: type-only imports must be",
+    "written as such, because the stripper does not do import elision."
+  ],
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["governor/**/*.ts", "harness/**/*.ts", "conformance/**/*.ts"],
+  "exclude": ["node_modules", "pins", "target", "crates"]
+}

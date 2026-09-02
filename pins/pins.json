@@ -1,0 +1,110 @@
+{
+  "$comment": [
+    "Command Governor component manifest and pin record (ADR 0009 §11).",
+    "This file is the single source of truth for which runtime substrate the",
+    "distribution targets; nothing else may hardcode a version string.",
+    "",
+    "Prime Agent is not published to the npm registry. Its wrapper package",
+    "declares its three sibling packages as bare URLs on a Cloudflare R2 bucket",
+    "with no integrity hash, so a URL is never a pin here. Every release asset",
+    "is recorded by name, sha256 (matching the release's own SHA256SUMS) and",
+    "sha512 (the npm integrity form the lockfile enforces). scripts/bootstrap.sh",
+    "downloads the assets from the immutable GitHub release, verifies both",
+    "hashes against this record before npm is allowed to run, and refuses to",
+    "proceed if pins/SHA256SUMS and this record disagree.",
+    "",
+    "Prime republishes upstream Pi's package names (@earendil-works/pi-agent-core,",
+    "pi-ai, pi-tui) at its own 0.8.1 line. One node_modules tree cannot hold",
+    "both Pi 0.84.4 and Prime 0.8.1, so the upstream-Pi fallback below is a",
+    "record, never a co-install; the conformance suite asserts the install root",
+    "contains no @earendil-works/pi-coding-agent.",
+    "",
+    "Third-party package policy (packages[]): an entry MUST carry either an",
+    "exact npm version (exactVersion) or a 40-character git commit SHA",
+    "(resolvedSha), a license, a review date and the authority it owns. A bare",
+    "name, a branch, or a tag is not a pin and the conformance suite rejects it."
+  ],
+  "schemaVersion": 2,
+  "substrate": {
+    "name": "prime-agent",
+    "displayName": "Prime Agent",
+    "version": "0.8.1",
+    "tag": "v0.8.1",
+    "repository": "https://github.com/PrimeIntellect-ai/prime-agent",
+    "commit": "514633727bf26d74f39f3119c2b0e31a5ceb2a9d",
+    "commitNote": "Tag v0.8.1 resolves to this commit; verified via the GitHub API during Gate S0 (Issue #15) and again when this manifest was written.",
+    "license": "MIT",
+    "licenseNote": "MIT License, Copyright (c) 2025 Mario Zechner, Copyright (c) 2026 Prime Intellect (LICENSE at the pinned commit). No distribution restriction blocks shipping it as the substrate.",
+    "releaseBaseUrl": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.8.1/",
+    "installRoot": "pins/prime-0.8.1",
+    "vendorDir": "pins/prime-0.8.1/vendor",
+    "binary": "pins/prime-0.8.1/node_modules/.bin/prime-agent",
+    "daemonProtocol": { "name": "prime-agent.daemon", "version": 7, "schemaRevision": 22 },
+    "engines": { "node": ">=22.19.0" },
+    "assets": [
+      {
+        "name": "prime-agent-0.8.1.tgz",
+        "role": "wrapper",
+        "npmName": "prime-agent",
+        "sha256": "46c24db1782dd31adc35d5c6cbcc75564faba6ced3bf2ccf03d836ee77134475",
+        "sha512": "sha512-KM5zKMOG1tVCYbpqe+vjzUIL9vYl7Wy2qfrmykgVmIx2e48/D/PTqVA3q1ZqF+B0sYEDmj2i7JKfTGcSulGTHQ==",
+        "bytes": 9616163
+      },
+      {
+        "name": "prime-agent-core-0.8.1.tgz",
+        "role": "sibling",
+        "npmName": "@earendil-works/pi-agent-core",
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.8.1/prime-agent-core-0.8.1.tgz",
+        "sha256": "0cc3660953545f8ac9a7e704fcb9875f954d58c3085304080ef615c280aa5748",
+        "sha512": "sha512-5UDt+8xrX7XmlHUNTkrDuO13eOBTTydDzKCf7sjvbYsCjeKXpkyRECCyxykYe6pCskfYxnn7HnKEP0nP3snYag==",
+        "bytes": 59520
+      },
+      {
+        "name": "prime-agent-ai-0.8.1.tgz",
+        "role": "sibling",
+        "npmName": "@earendil-works/pi-ai",
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.8.1/prime-agent-ai-0.8.1.tgz",
+        "sha256": "f6c3bdb6093bc24a327546fe865ef9a4a172c734fcd4c4093e30c19476f0134d",
+        "sha512": "sha512-d0p72C8xYe4i3ktmIfbaWmftgT9U5UZiLvHhyWmVhXhubKAFI6lNJt1l4qxeKbfagFBTwvkDWfqny1Os87rY7Q==",
+        "bytes": 552864
+      },
+      {
+        "name": "prime-agent-tui-0.8.1.tgz",
+        "role": "sibling",
+        "npmName": "@earendil-works/pi-tui",
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.8.1/prime-agent-tui-0.8.1.tgz",
+        "sha256": "bd07bccee0ca495565b1d62e9411f3fdebe49e3dfa52870564f08af5e61fde15",
+        "sha512": "sha512-Pr9XuhRNN8NihzSxHvoTUTXg/o7HbJEJXSnGM/PU7D2FaUenF3tMmaRbroqmsfcFl27nP5SQ30U0ipl/USMy/A==",
+        "bytes": 427328
+      }
+    ],
+    "checksumAsset": "SHA256SUMS",
+    "requirements": {
+      "node": ">=22.19.0",
+      "npm": "lockfile v3 (npm >= 9)",
+      "python": "CPython 3.11 via uv, bootstrapped lazily on first tool use into <agentDir>/kernel-venv (~270 MB, network required). Not needed by the credential-free conformance tier, which never triggers a tool call.",
+      "network": "GitHub release download at bootstrap; npm registry for transitive dependencies; R2 mirror for the three sibling tarballs (bytes verified against the sha512 above).",
+      "installScripts": "ignored (npm ci --ignore-scripts). Prime's postinstall is a no-op unless PRIME_AGENT_BOOTSTRAP_* opt-ins are set; zeromq and koffi ship prebuilt binaries for darwin-arm64 and linux-x64."
+    },
+    "authority": {
+      "processes": "detached supervisor plus one resident worker process per root session (each may spawn a Python kernel and bash subprocesses)",
+      "filesystem": "<agentDir> (sessions, daemon-workers, session-leases, session-artifacts, rlm-ledger, logs, kernel-venv) and <TMPDIR>/prime-agent-<uid>/ for Unix sockets",
+      "network": "model providers as configured; telemetry disabled by the Governor (PRIME_AGENT_TELEMETRY=0)",
+      "credentials": "create/attach forward launchEnv to the supervisor and worker; the Governor client sends a positive allowlist only (governor/prime/env.ts)"
+    },
+    "updatePolicy": "Re-pin only through docs/prime-distribution.md's ritual: new tag -> commit verified via API -> assets downloaded and hashed -> pins.json, pins/SHA256SUMS and the install-root lockfile updated together -> scripts/conformance.sh green locally AND in the merge-gating harness job -> independent re-run of D1/D2/D8.",
+    "conformance": "scripts/conformance.sh (Tier 1 credential-free, including the runtime tier under conformance/runtime that drives the pinned daemon in isolation).",
+    "reviewedAt": "2026-09-01",
+    "reviewedBy": "docs/research/2026-09-01-agent-harness-landscape-and-substrate-bakeoff.md; Issue #15 (Gate S0/S1 real-machine evidence); Issue #17 (this adaptation layer)"
+  },
+  "fallback": {
+    "$comment": "Recorded, not installed. ADR 0009 §2 names upstream Pi v0.84.4 as the first fallback if Prime fails; frozen PR #16 carries the working bootstrap for it.",
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "0.84.4",
+    "commit": "b79e4cc834970cca69daebffab7df1da7d1e52c4",
+    "donor": "PR #16 @ 9e9b892271a1dc09a9b2215875754b39a750183b (tag preserve/pi-native-foundation-9e9b892)",
+    "coInstall": "forbidden"
+  },
+  "packages": [],
+  "authorities": "harness/authorities.json"
+}

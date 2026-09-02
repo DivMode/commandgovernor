@@ -1,0 +1,23 @@
+{
+  "name": "@divmode/command-governor",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Command Governor — a curated, pinned Prime-native harness distribution",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DivMode/commandgovernor.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "bootstrap": "scripts/bootstrap.sh",
+    "test": "scripts/conformance.sh"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2"
+  }
+}
