@@ -418,8 +418,21 @@ cut must be one of the two; none may depend on a write that never came.
 | recovery lease | after the lease, before the reopen | lease held by a dead pid | repaired: reclaimed by compare-and-swap of the exact dead bytes under the reclaim mutex |
 | recovery lease reclaim | inside the reclaim mutex | mutex held by a dead pid | not repaired automatically (a stealable mutex would reintroduce the race); reported `reclaim_blocked`, operator clears it |
 | registry create | after `mkdir`, before `v1` | empty record directory | safe: invisible to listings, reported as `empty`, healed by the next create of that id |
-| any version write | after the temp file, before the link | a `.tmp` beside the versions | safe: ignored by every reader, overwritten by the next writer's temp |
+| any version write | after the temp file, before the link | a `.tmp` beside the versions | safe, not repaired: ignored by every reader (only `v<N>.json` is a version); the next writer uses a temp name of its own, so the leaked file stays until an operator removes it |
 | client identity | after the link, before the parent fsync | the name exists, not yet known durable | safe: the next reader fsyncs the parent before using it |
+
+Two caveats the table's "repaired" column carries implicitly. A dispatcher
+whose identity is `unknown`, or a replacement whose original cannot be
+read, is a third outcome: the record is reported (`undecidable`) and left
+for an operator, exactly as the reclaim-mutex row is; such a replacement
+may appear on `awaitingReconciliation` but is never probeable, because
+the probe refuses anything but a confirmed backlink. And the settle of a
+never-sent replacement is itself fenced: while the claimant could still
+confirm (original UNCERTAIN with its unconfirmed claim), the sweep first
+releases the claim on the original by compare-and-swap and settles the
+replacement only if that release landed; the confirm and the release both
+write the original, so a claimant that wins the confirm sends, and a
+sweep that wins the release settles, never both.
 
 The rule that makes the supersede rows hold is **the backlink is the
 authority**: a replacement R with `supersedes: O` may have been sent only

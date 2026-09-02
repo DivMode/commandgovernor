@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { chmodSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -629,6 +629,104 @@ describe("D2: ledger writes are compare-and-swap", () => {
 		const late = three.recordProbeOutcome("cg-1", { response: { type: "response", command: "x", success: true } }, { verdict: "completed", response: { type: "response", command: "x", success: true } }, "late");
 		assert.equal(late.state, resolvedElsewhere.state);
 		assert.equal(late.probes?.length, 2);
+	});
+
+	it("the settle is fenced by the original: a sweep that misclassifies a live claimant and cannot win the release does not settle R, and the claimant's confirm then sends an authorized R", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const dead = { alive: (pid: number) => pid !== 1001, startId: (pid: number) => `start:${pid}` }; // wrong about 1001: it is alive, paused at its confirm
+		const setup = new MutationLedger(dir, { self: { pid: 9, processStartId: "start:9" } });
+		setup.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		setup.markUncertain("cg-1", "transport_lost");
+		let paused = false;
+		const claimant = new MutationLedger(dir, {
+			self: { pid: 1001, processStartId: "start:1001" },
+			hooks: {
+				beforeCommit: (id, from) => {
+					if (id !== "cg-1" || from !== 3 || paused) return; // the confirm write
+					paused = true;
+					// A sweep runs now, with a probe that calls the claimant gone and a release that keeps losing its CAS.
+					const interloper = new MutationLedger(dir, { self: { pid: 7, processStartId: "start:7" } });
+					const sweep = new MutationLedger(dir, {
+						processProbe: dead,
+						self: { pid: 2002, processStartId: "start:2002" },
+						maxAttempts: 2,
+						hooks: { beforeCommit: (sid) => { if (sid === "cg-1") interloper.recordProbe("cg-1", { detail: "noise" }); } },
+					});
+					const report = sweep.adoptAbandoned();
+					assert.deepEqual(report.settledNeverSent, [], "no release landed on O, so R was not settled");
+					assert.deepEqual(report.releasedClaims, []);
+					assert.equal(setup.require("cg-R").state, "DISPATCHED");
+				},
+			},
+		});
+		const R = claimant.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" });
+		assert.ok(paused);
+		assert.equal(R.state, "DISPATCHED", "the claimant's confirm landed (after re-deriving past the interloper's versions) and R is sendable");
+		assert.equal(setup.replacementAuthority(setup.require("cg-R")), "authorized");
+		assert.ok(setup.require("cg-1").supersededBy?.confirmedAt);
+		// And the reverse: a sweep that DOES win the release settles R, and the claimant's confirm is refused.
+		const dir2 = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const setup2 = new MutationLedger(dir2, { self: { pid: 9, processStartId: "start:9" } });
+		setup2.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		setup2.markUncertain("cg-1", "transport_lost");
+		let paused2 = false;
+		const claimant2 = new MutationLedger(dir2, {
+			self: { pid: 1001, processStartId: "start:1001" },
+			hooks: {
+				beforeCommit: (id, from) => {
+					if (id !== "cg-1" || from !== 3 || paused2) return;
+					paused2 = true;
+					const report = new MutationLedger(dir2, { processProbe: dead, self: { pid: 2002, processStartId: "start:2002" } }).adoptAbandoned();
+					assert.deepEqual(report.releasedClaims.map((r) => r.commandId), ["cg-1"]);
+					assert.deepEqual(report.settledNeverSent.map((r) => r.commandId), ["cg-R"]);
+				},
+			},
+		});
+		assert.throws(() => claimant2.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), (e: unknown) => e instanceof MutationLedgerError && e.code === "claim_lost");
+		assert.equal(setup2.require("cg-R").state, "FAILED");
+		assert.equal(setup2.require("cg-1").supersededBy, undefined);
+	});
+
+	it("settledNeverSent names only settles this sweep performed; a missing original is undecidable, never a false proof; contradicting evidence is marked", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const probe = { alive: (pid: number) => pid !== 1001, startId: (pid: number) => `start:${pid}` };
+		const setup = new MutationLedger(dir, { processProbe: probe, self: { pid: 9, processStartId: "start:9" } });
+		setup.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		setup.markUncertain("cg-1", "transport_lost");
+		const dying = new MutationLedger(dir, { processProbe: probe, self: { pid: 1001, processStartId: "start:1001" }, hooks: { beforeCommit: (id, from) => { if (id === "cg-1" && from === 3) throw new Error("SIGKILL"); } } });
+		assert.throws(() => dying.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /SIGKILL/);
+		// Two sweeps: B settles inside A's window; A must not report the settle.
+		const B = new MutationLedger(dir, { processProbe: probe, self: { pid: 3003, processStartId: "start:3003" } });
+		let competed = false;
+		const A = new MutationLedger(dir, {
+			processProbe: probe,
+			self: { pid: 2002, processStartId: "start:2002" },
+			hooks: { beforeCommit: (id) => { if (id === "cg-R" && !competed) { competed = true; B.adoptAbandoned(); } } },
+		});
+		const reportA = A.adoptAbandoned();
+		assert.ok(competed);
+		assert.equal(setup.require("cg-R").state, "FAILED");
+		assert.equal(setup.require("cg-R").transitions.filter((t) => t.neverSent).length, 1);
+		assert.deepEqual(reportA.settledNeverSent, [], "A wrote nothing on R");
+		// A missing original: undecidable, not settled, not probeable.
+		const dir3 = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const s3 = new MutationLedger(dir3, { processProbe: probe, self: { pid: 9, processStartId: "start:9" } });
+		s3.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		s3.markUncertain("cg-1", "transport_lost");
+		new MutationLedger(dir3, { processProbe: probe, self: { pid: 1001, processStartId: "start:1001" } }).recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" });
+		assert.equal(s3.replacementAuthority(s3.require("cg-R")), "authorized");
+		rmSync(join(s3.dir, "cg-1"), { recursive: true });
+		assert.equal(s3.replacementAuthority(s3.require("cg-R")), "original_missing");
+		const report3 = new MutationLedger(dir3, { processProbe: probe, self: { pid: 4004, processStartId: "start:4004" } }).adoptAbandoned();
+		assert.deepEqual(report3.settledNeverSent, []);
+		assert.deepEqual(report3.undecidable.map((u) => u.record.commandId), ["cg-R"]);
+		assert.equal(s3.require("cg-R").state, "DISPATCHED", "no false proof of absence was written");
+		// Contradicting exact evidence on an already-resolved record is kept and marked.
+		const { ledger } = uncertain();
+		ledger.resolveUncertain("cg-1", absent);
+		const marked = ledger.recordProbeOutcome("cg-1", { response: { type: "response", command: "x", success: true } }, { verdict: "completed", response: { type: "response", command: "x", success: true } }, "substrate stored result");
+		assert.equal(marked.state, "FAILED");
+		assert.equal(marked.probes?.[0]?.conflictsWith, "FAILED");
 	});
 
 	it("negative control: the pre-review rename-in-place write loses A's evidence from a stale snapshot", () => {
