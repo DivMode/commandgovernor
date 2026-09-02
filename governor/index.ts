@@ -21,3 +21,14 @@ export { SessionPathError, canonicalSessionPath, isAcceptableSessionPath } from 
 export type { CanonicalSessionPath } from "./session/paths.ts";
 export { RecoveryLeaseContended, RecoveryLeaseHeld, RecoveryReclaimBlocked, SessionRegistry, StaleCursorError, StaleIncarnationError, UnknownSessionError } from "./session/registry.ts";
 export type { Incarnation, RecoveryLease, RecoveryLeaseRecord, SessionRecord } from "./session/registry.ts";
+
+// Substrate-neutral composition contracts. These adapt useful DeepSeek Harness
+// patterns without copying its runtime or weakening Prime's durability authority.
+export * from "./composition/capabilities.ts";
+export * from "./composition/child.ts";
+export * from "./composition/component.ts";
+export * from "./composition/events.ts";
+export * from "./composition/lifecycle.ts";
+export * from "./composition/mailbox.ts";
+export * from "./composition/sandbox.ts";
+export * from "./composition/workflow.ts";
