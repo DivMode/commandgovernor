@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 
-import { ClientIdentityMismatch, CommandMismatch, Governor } from "../../governor/governor.ts";
+import { ClientIdentityMismatch, CommandMismatch, Governor, ReplacementUnauthorized } from "../../governor/governor.ts";
 import { clientIdentityPath, loadOrCreateClientIdentity, readClientIdentity } from "../../governor/prime/client-identity.ts";
 import { expectedSubstrate } from "../../governor/prime/substrate.ts";
 
@@ -30,7 +30,15 @@ before(async () => {
 	const expected = expectedSubstrate();
 	server = createServer((socket) => {
 		socket.write(`${JSON.stringify({ type: "daemon_hello", socketPath, protocol: expected.protocol, appVersion: expected.appVersion, schemaRevision: expected.schemaRevision })}\n`);
-		socket.on("data", (chunk: Buffer) => received.push(chunk.toString("utf8")));
+		socket.on("data", (chunk: Buffer) => {
+			const text = chunk.toString("utf8");
+			received.push(text);
+			// The fake daemon answers exactly one id with a stored success, as Prime's journal would for a completed command.
+			for (const line of text.split("\n").filter(Boolean)) {
+				const envelope = JSON.parse(line) as { id?: string; command?: { type?: string } };
+				if (envelope.id === "cg-stored-success") socket.write(`${JSON.stringify({ type: "response", id: envelope.id, command: envelope.command?.type, success: true, data: { replayed: true } })}\n`);
+			}
+		});
 	});
 	await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 });
@@ -180,6 +188,39 @@ describe("IDENT: probeStoredResult fails closed on any client-identity doubt, be
 		const again = await governor.probeStoredResult("cg-create", create, 300);
 		assert.equal(again.verdict.verdict, "uncertain");
 		assert.ok(received.length > before);
+		governor.close();
+	});
+
+	it("a replacement whose original carries no confirmed claim for it is refused before any I/O: it was never sent, and Prime would run it as new work", async () => {
+		const governor = governorOver(join(root, "g9"));
+		await governor.connect(5000);
+		uncertainRecord(governor, governor.clientId, "cg-O");
+		// A claimant that died between its create of R and its confirm (the confirm write is refused here).
+		const dying = new (await import("../../governor/mutation/ledger.ts")).MutationLedger(governor.stateDir, { hooks: { beforeCommit: (id, from) => { if (id === "cg-O" && from === 3) throw new Error("SIGKILL before confirm"); } } });
+		assert.throws(() => dying.recordDispatch({ commandId: "cg-R", clientId: governor.clientId, command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-O" }), /SIGKILL/);
+		// Make R probeable by the pre-fix rules: UNCERTAIN, exact command, same identity.
+		governor.ledger.markUncertain("cg-R", "dispatcher_lost");
+		const before = received.length;
+		await assert.rejects(governor.probeStoredResult("cg-R"), (e: unknown) => e instanceof ReplacementUnauthorized && e.supersedes === "cg-O");
+		assert.equal(received.length, before, "zero wire frames");
+		governor.close();
+	});
+
+	it("a stored success resolves the record in the same version that records the response", async () => {
+		const governor = governorOver(join(root, "g10"));
+		await governor.connect(5000);
+		uncertainRecord(governor, governor.clientId, "cg-stored-success");
+		const before = governor.ledger.require("cg-stored-success").version;
+		const probe = await governor.probeStoredResult("cg-stored-success", command, 5000);
+		assert.equal(probe.verdict.verdict, "completed");
+		assert.equal(probe.record.state, "COMPLETED");
+		assert.equal(probe.record.version, before + 1, "one version: response and completion together");
+		assert.ok(probe.record.probes?.[0]?.response?.success);
+		assert.equal(probe.record.transitions[probe.record.transitions.length - 1]!.evidence?.kind, "effect_observed");
+		for (const version of governor.ledger.history("cg-stored-success")) {
+			assert.ok(!(version.state === "UNCERTAIN" && version.probes?.some((p) => p.response?.success)), "no version is UNCERTAIN with a success response on it");
+		}
+		await assert.rejects(governor.probeStoredResult("cg-stored-success"), /only an UNCERTAIN command may be probed/);
 		governor.close();
 	});
 

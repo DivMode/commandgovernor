@@ -170,7 +170,7 @@ describe("D2: ledger writes are compare-and-swap", () => {
 		assert.equal(completed.state, "COMPLETED");
 		assert.equal(completed.transitions[completed.transitions.length - 1]!.evidence?.by, "dispatcher's own response");
 		assert.equal(completed.probes?.length, 1);
-		assert.deepEqual(ok.history("cg-1").map((v) => v.state), ["DISPATCHED", "UNCERTAIN", "UNCERTAIN", "COMPLETED"]);
+		assert.deepEqual(ok.history("cg-1").map((v) => v.state), ["DISPATCHED", "UNCERTAIN", "COMPLETED"], "the response and the resolution are one version");
 		// A typed pre-effect rejection is exact evidence the other way: UNCERTAIN -> FAILED.
 		const failed = setup().recordOutcome("cg-1", {
 			verdict: "failed",
@@ -439,10 +439,13 @@ describe("D2: ledger writes are compare-and-swap", () => {
 					new MutationLedger(dir, { processProbe: probe, self: { pid: 3003, processStartId: "start:3003" } }).adoptAbandoned(); // releases the claim
 				},
 				beforeCommit: (commandId) => {
-					// Between the never-sent derive and its publish, a rogue adopter (to whom the claimant is gone) adopts R as UNCERTAIN.
+					// Between the never-sent derive and its publish, a rogue sweep (to which the claimant is gone) acts on R first.
+					// Under the backlink rule it settles R never sent rather than adopting it UNCERTAIN; the claimant's own mark then lands on a FAILED record.
 					if (commandId !== "cg-R" || rogueAdopted) return;
 					rogueAdopted = true;
-					assert.equal(new MutationLedger(dir, { processProbe: probe, self: { pid: 4004, processStartId: "start:4004" } }).adoptAbandoned().adopted.length, 1);
+					const rogue = new MutationLedger(dir, { processProbe: probe, self: { pid: 4004, processStartId: "start:4004" } }).adoptAbandoned();
+					assert.equal(rogue.settledNeverSent.length, 1);
+					assert.equal(rogue.adopted.length, 0);
 				},
 			},
 		});
@@ -451,9 +454,10 @@ describe("D2: ledger writes are compare-and-swap", () => {
 			(e: unknown) => e instanceof MutationLedgerError && e.code === "claim_lost",
 		);
 		const R = setup.require("cg-R");
-		assert.equal(R.state, "FAILED", "resolved from the dispatcher's proof on top of the adoption");
-		assert.deepEqual(setup.history("cg-R").map((v) => v.state), ["DISPATCHED", "UNCERTAIN", "FAILED"]);
+		assert.equal(R.state, "FAILED", "settled by the sweep; the claimant's own mark found it already FAILED and left it");
+		assert.deepEqual(setup.history("cg-R").map((v) => v.state), ["DISPATCHED", "FAILED"], "never UNCERTAIN at any version");
 		assert.equal(R.transitions[R.transitions.length - 1]!.evidence?.kind, "effect_absent_proven");
+		assert.ok(rogueAdopted);
 	});
 
 	it("only a record's own dispatcher may mark it never sent", () => {
@@ -508,6 +512,123 @@ describe("D2: ledger writes are compare-and-swap", () => {
 		});
 		assert.deepEqual(s2.adoptAbandoned().releasedClaims, [], "s2 did not release anything; s1 did");
 		assert.equal(setup.require("cg-1").transitions.filter((t) => t.claim?.action === "released").length, 1);
+	});
+
+	it("crash cut: recovery dies after releasing O's claim and before settling R; on restart R is settled never sent, never UNCERTAIN, and O may be superseded again", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const probe = { alive: (pid: number) => pid !== 1001 && pid !== 2002, startId: (pid: number) => `start:${pid}` };
+		const setup = new MutationLedger(dir, { processProbe: probe, self: { pid: 9, processStartId: "start:9" } });
+		setup.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		setup.markUncertain("cg-1", "transport_lost");
+		// Claimant 1001 creates R and dies before confirming.
+		const dying = new MutationLedger(dir, { processProbe: probe, self: { pid: 1001, processStartId: "start:1001" }, hooks: { beforeCommit: (id, from) => { if (id === "cg-1" && from === 3) throw new Error("SIGKILL before confirm"); } } });
+		assert.throws(() => dying.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /SIGKILL/);
+		// Recovery Governor 2002 releases the claim, then dies before its write on R.
+		const recovery = new MutationLedger(dir, { processProbe: probe, self: { pid: 2002, processStartId: "start:2002" }, hooks: { beforeCommit: (id) => { if (id === "cg-R") throw new Error("SIGKILL after release, before settling R"); } } });
+		assert.throws(() => recovery.adoptAbandoned(), /SIGKILL after release/);
+		assert.equal(setup.require("cg-1").supersededBy, undefined, "the cut: O is unclaimed");
+		assert.equal(setup.require("cg-R").state, "DISPATCHED", "and R is DISPATCHED with a dead dispatcher and no claim pointing at it");
+		// Restart: the backlink is the authority. R's original has no confirmed claim for R, so R was never sent.
+		const restarted = new MutationLedger(dir, { processProbe: probe, self: { pid: 3003, processStartId: "start:3003" } });
+		const report = restarted.adoptAbandoned();
+		assert.deepEqual(report.settledNeverSent.map((r) => r.commandId), ["cg-R"]);
+		assert.deepEqual(report.adopted, [], "R was NOT adopted as uncertain");
+		const R = setup.require("cg-R");
+		assert.equal(R.state, "FAILED");
+		assert.equal(R.transitions[R.transitions.length - 1]!.evidence?.kind, "effect_absent_proven");
+		assert.ok(!setup.history("cg-R").some((v) => v.state === "UNCERTAIN"), "at no version was R uncertain or probeable");
+		assert.deepEqual(restarted.awaitingReconciliation().map((r) => r.commandId), ["cg-1"]);
+		assert.equal(restarted.recordDispatch({ commandId: "cg-R2", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }).state, "DISPATCHED");
+		assert.equal(restarted.replacementAuthorized(restarted.require("cg-R2")), true);
+		assert.equal(restarted.replacementAuthorized(restarted.require("cg-R")), false);
+	});
+
+	it("crash cut: O resolves between R's create and confirm, the claimant dies before its never-sent mark; on restart R is settled never sent even though O is resolved", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const probe = { alive: (pid: number) => pid !== 1001, startId: (pid: number) => `start:${pid}` };
+		const setup = new MutationLedger(dir, { processProbe: probe, self: { pid: 9, processStartId: "start:9" } });
+		setup.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		setup.markUncertain("cg-1", "transport_lost");
+		let resolved = false;
+		const dying = new MutationLedger(dir, {
+			processProbe: probe,
+			self: { pid: 1001, processStartId: "start:1001" },
+			hooks: {
+				beforeCommit: (id, from) => {
+					if (id === "cg-1" && from === 3 && !resolved) {
+						resolved = true;
+						setup.resolveUncertain("cg-1", observed); // O COMPLETED with the unconfirmed claim on it
+						return; // the confirm publish now loses (EEXIST) and re-derives to NO_CHANGE
+					}
+					if (id === "cg-R") throw new Error("SIGKILL before the never-sent mark");
+				},
+			},
+		});
+		assert.throws(() => dying.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /SIGKILL before the never-sent/);
+		assert.equal(setup.require("cg-1").state, "COMPLETED");
+		assert.equal(setup.require("cg-1").supersededBy?.confirmedAt, undefined, "the claim is on the resolved record, unconfirmed");
+		assert.equal(setup.require("cg-R").state, "DISPATCHED", "the cut: R is DISPATCHED, its dispatcher dead");
+		const restarted = new MutationLedger(dir, { processProbe: probe, self: { pid: 3003, processStartId: "start:3003" } });
+		const report = restarted.adoptAbandoned();
+		assert.deepEqual(report.settledNeverSent.map((r) => r.commandId), ["cg-R"]);
+		assert.deepEqual(report.adopted, []);
+		assert.equal(setup.require("cg-R").state, "FAILED");
+		assert.ok(!setup.history("cg-R").some((v) => v.state === "UNCERTAIN"));
+		assert.deepEqual(restarted.awaitingReconciliation(), [], "nothing is left for a human: O proved the effect, R was never sent");
+	});
+
+	it("crash cut: an UNCERTAIN replacement left by an older sweep is settled too, and a live claimant between create and confirm is left in flight", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const probe = { alive: (pid: number) => pid !== 1001, startId: (pid: number) => `start:${pid}` };
+		const setup = new MutationLedger(dir, { processProbe: probe, self: { pid: 9, processStartId: "start:9" } });
+		setup.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		setup.markUncertain("cg-1", "transport_lost");
+		const dying = new MutationLedger(dir, { processProbe: probe, self: { pid: 1001, processStartId: "start:1001" }, hooks: { beforeCommit: (id, from) => { if (id === "cg-1" && from === 3) throw new Error("SIGKILL"); } } });
+		assert.throws(() => dying.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /SIGKILL/);
+		// Someone who does not know the backlink rule adopted R as UNCERTAIN (what the pre-fix sweep did).
+		assert.equal(setup.markUncertain("cg-R", "dispatcher_lost").state, "UNCERTAIN");
+		const restarted = new MutationLedger(dir, { processProbe: probe, self: { pid: 3003, processStartId: "start:3003" } });
+		assert.deepEqual(restarted.adoptAbandoned().settledNeverSent.map((r) => r.commandId), ["cg-R"]);
+		assert.equal(setup.require("cg-R").state, "FAILED");
+		// A LIVE claimant between create and confirm is in flight, not settled.
+		assert.equal(setup.require("cg-1").supersededBy, undefined, "the dead claim was released by the same sweep");
+		assert.equal(setup.require("cg-1").version, 4);
+		// v5 will be 5005's claim; the confirm is the write from v5, where it stalls (alive, between create and confirm).
+		const live = new MutationLedger(dir, { processProbe: { alive: () => true, startId: (pid) => `start:${pid}` }, self: { pid: 5005, processStartId: "start:5005" }, hooks: { beforeCommit: (id, from) => { if (id === "cg-1" && from === 5) throw new Error("stall"); } } });
+		assert.throws(() => live.recordDispatch({ commandId: "cg-R5", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /stall/);
+		const other = new MutationLedger(dir, { processProbe: { alive: () => true, startId: (pid) => `start:${pid}` }, self: { pid: 6006, processStartId: "start:6006" } });
+		const report = other.adoptAbandoned();
+		assert.deepEqual(report.settledNeverSent, []);
+		assert.deepEqual(report.inFlight.map((r) => r.commandId), ["cg-R5"]);
+		assert.equal(setup.require("cg-R5").state, "DISPATCHED");
+	});
+
+	it("exact evidence and completion are one version: a probe's stored success cannot be on the record without the record being COMPLETED", () => {
+		const { ledger } = uncertain();
+		const before = ledger.require("cg-1").version;
+		const completed = ledger.recordProbeOutcome("cg-1", { response: { type: "response", command: "x", success: true } }, { verdict: "completed", response: { type: "response", command: "x", success: true } }, "substrate stored result");
+		assert.equal(completed.state, "COMPLETED");
+		assert.equal(completed.version, before + 1, "exactly one version: the response and the resolution landed together");
+		assert.equal(completed.probes?.length, 1);
+		assert.equal(completed.transitions[completed.transitions.length - 1]!.evidence?.kind, "effect_observed");
+		for (const version of ledger.history("cg-1")) {
+			assert.ok(!(version.probes?.some((p) => p.response?.success) && version.state === "UNCERTAIN"), `no version holds a success response while UNCERTAIN (v${version.version})`);
+		}
+		assert.throws(() => ledger.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /not UNCERTAIN/);
+		// A typed pre-effect rejection resolves FAILED in one version too; an uncertain probe changes nothing but the probes.
+		const { ledger: two } = uncertain();
+		const failed = two.recordProbeOutcome("cg-1", { response: stored }, { verdict: "failed", proof: { kind: "typed_pre_effect_rejection", commandType: "import_jsonl", code: "session_import_file_not_found" }, response: stored }, "substrate stored result");
+		assert.equal(failed.state, "FAILED");
+		assert.equal(failed.version, 3);
+		const { ledger: three } = uncertain();
+		const still = three.recordProbeOutcome("cg-1", { response: stored }, { verdict: "uncertain", reason: "untyped_failure", response: stored }, "substrate stored result");
+		assert.equal(still.state, "UNCERTAIN");
+		assert.equal(still.probes?.length, 1);
+		// Already resolved by someone else: the probe is kept, the state is theirs.
+		const resolvedElsewhere = three.resolveUncertain("cg-1", absent);
+		const late = three.recordProbeOutcome("cg-1", { response: { type: "response", command: "x", success: true } }, { verdict: "completed", response: { type: "response", command: "x", success: true } }, "late");
+		assert.equal(late.state, resolvedElsewhere.state);
+		assert.equal(late.probes?.length, 2);
 	});
 
 	it("negative control: the pre-review rename-in-place write loses A's evidence from a stale snapshot", () => {

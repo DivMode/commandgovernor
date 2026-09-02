@@ -201,7 +201,9 @@ claimant whose confirmation finds its claim gone marks R **never sent**
 (DISPATCHED → FAILED, or UNCERTAIN → FAILED if an adopter got there
 first; the dispatcher's own proof, fenced to the dispatcher) and reports
 `claim_lost` instead of a record to dispatch, whatever happened to the
-mark; a claimant whose create fails releases the claim it took. At most one replacement is ever
+mark; a claimant whose create fails releases the claim it took. None of
+these marks is what keeps a never-sent replacement from being probed: the
+backlink rule does (see *Crash cuts*), and the marks are the repair. At most one replacement is ever
 sent for one uncertain record. A claim is reported as `pendingClaims`
 while the claimant is alive or cannot be told. `ledger-cas.test.ts` stages claim-vs-resolution, claim-vs-claim and
 the dying claimant; `ledger-race.test.ts` releases six real superseders
@@ -236,6 +238,14 @@ and probes under the original id, identity and command;
 `ledger-adoption.test.ts` stages `gone`, `replaced`, `current`, `unknown`,
 this process's own record, two concurrent adopters, and a record with no
 dispatcher identity through the injectable process probe.
+
+**Evidence and resolution are one write.** A probe's stored success is
+exact evidence that the effect happened, and a stored typed pre-effect
+rejection is exact evidence that it did not. `recordProbeOutcome` writes
+the response and the resolution it proves as ONE version, so there is no
+durable state in which a record holds proof of its own completion while
+still UNCERTAIN and supersedable. The dispatcher's late outcome after an
+adoption goes through the same write.
 
 **The exact command.** Prime answers a repeated `clientId + commandId`
 from its stored result only if the supervisor received the original. If
@@ -383,6 +393,41 @@ one.
 
 No production code writes an authority file by `rename`; `writeFileDurable`
 remains for the suite's negative controls.
+
+### Crash cuts
+
+The audit above asks what serialises competing processes. This table asks
+the other question: for every protocol with more than one durable write,
+what does a restart find if the process dies after write N and before
+write N+1, and is that state either safe for ever or repaired
+deterministically? "Repaired" means the next `adoptAbandoned` (run at
+construction and before every listing) settles it without a human. Every
+cut must be one of the two; none may depend on a write that never came.
+
+| protocol | cut | what a restart finds | safe / repaired by |
+| --- | --- | --- | --- |
+| dispatch | after DISPATCHED, before send | record DISPATCHED, dispatcher gone | repaired: adopted UNCERTAIN ("may have been sent" is the truth) |
+| dispatch | after send, before outcome | same as above | repaired: adopted UNCERTAIN; probe fetches the stored result |
+| supersede | after take, before create | O claimed (unconfirmed), no R | repaired: claim released once the claimant is proven over |
+| supersede | after create, before confirm | O claimed (unconfirmed), R DISPATCHED | repaired: R settled never sent (no confirmed claim names it), claim released; O supersedable again |
+| supersede | O resolved between create and confirm, claimant dies before its never-sent mark | O resolved with an unconfirmed claim, R DISPATCHED | repaired: R settled never sent by the backlink rule (the original carries no confirmed claim for R), whatever O's state |
+| supersede | after confirm, before send | O confirmed for R, R DISPATCHED | repaired: R adopted UNCERTAIN; that is correct, R may have been sent |
+| supersede recovery | after releasing O's claim, before settling R | O unclaimed, R DISPATCHED with no claim pointing at it | repaired: the backlink rule settles R never sent on the next sweep; it is never adopted UNCERTAIN, and `probeStoredResult` refuses it (`replacement_unauthorized`) regardless |
+| probe | after the response is stored, before completion | (no such cut) | safe by construction: `recordProbeOutcome` writes the response and the resolution it proves as one version |
+| late dispatcher outcome after adoption | after the response is stored, before completion | (no such cut) | same |
+| recovery lease | after the lease, before the reopen | lease held by a dead pid | repaired: reclaimed by compare-and-swap of the exact dead bytes under the reclaim mutex |
+| recovery lease reclaim | inside the reclaim mutex | mutex held by a dead pid | not repaired automatically (a stealable mutex would reintroduce the race); reported `reclaim_blocked`, operator clears it |
+| registry create | after `mkdir`, before `v1` | empty record directory | safe: invisible to listings, reported as `empty`, healed by the next create of that id |
+| any version write | after the temp file, before the link | a `.tmp` beside the versions | safe: ignored by every reader, overwritten by the next writer's temp |
+| client identity | after the link, before the parent fsync | the name exists, not yet known durable | safe: the next reader fsyncs the parent before using it |
+
+The rule that makes the supersede rows hold is **the backlink is the
+authority**: a replacement R with `supersedes: O` may have been sent only
+if O carries a *confirmed* claim naming R, because the confirm is the last
+durable write before a replacement can go out. Everything else about R is
+derived from that at read time: adoption settles an unauthorized R as
+never sent once its dispatcher is proven over (never as UNCERTAIN), and a
+probe of an unauthorized R is refused before any I/O.
 
 ## D8 — explicit session paths
 

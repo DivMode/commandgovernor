@@ -1,4 +1,4 @@
-export { ClientIdentityMismatch, CommandMismatch, Governor, NotRecoverable, SessionIdentityMismatch } from "./governor.ts";
+export { ClientIdentityMismatch, CommandMismatch, Governor, NotRecoverable, ReplacementUnauthorized, SessionIdentityMismatch } from "./governor.ts";
 export type { ClientIdentityMismatchReason, CommandMismatchReason, CreateSessionSpec, CreatedSession, DispatchResult, GovernorOptions, RecoveryOutcome } from "./governor.ts";
 export { DaemonClient, RequestTimeout, SubstrateMismatch, TransportLost, connectWithRetry } from "./prime/daemon-client.ts";
 export { DEFAULT_LAUNCH_ENV_ALLOWLIST, buildLaunchEnv, launchEnvIsWithinAllowlist } from "./prime/env.ts";

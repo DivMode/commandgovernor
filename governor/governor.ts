@@ -175,6 +175,24 @@ export class CommandMismatch extends Error {
 
 export type CommandMismatchReason = "type_differs" | "digest_differs" | "command_not_stored";
 
+/**
+ * The record is a replacement whose original carries no confirmed claim for
+ * it: it was provably never sent (a replacement goes out only after its
+ * claim is confirmed), so re-presenting it would run it as new work. Thrown
+ * before any socket I/O; nothing was sent.
+ */
+export class ReplacementUnauthorized extends Error {
+	readonly code = "replacement_unauthorized" as const;
+	readonly commandId: string;
+	readonly supersedes: string;
+	constructor(commandId: string, supersedes: string) {
+		super(`refusing to probe ${commandId}: it replaces ${supersedes}, which carries no confirmed claim for it; the replacement was never sent and must not be presented as new work; nothing was sent`);
+		this.name = "ReplacementUnauthorized";
+		this.commandId = commandId;
+		this.supersedes = supersedes;
+	}
+}
+
 function summaryOf(value: unknown, what: string): SessionSummary {
 	if (!isSessionSummary(value)) throw new Error(`${what}: response data is not a session summary`);
 	return value;
@@ -483,34 +501,37 @@ export class Governor {
 		if (record.state !== "UNCERTAIN") {
 			throw new Error(`${commandId} is ${record.state}; only an UNCERTAIN command may be probed`);
 		}
+		if (!this.ledger.replacementAuthorized(record)) {
+			throw new ReplacementUnauthorized(commandId, record.supersedes!);
+		}
 		command = this.#assertProbeCommand(record, command);
 		// The journal identity is `clientId + commandId`. The record's clientId is
 		// the authority; the probe goes out only if the identity on disk, this
 		// Governor, and the connection that would carry the envelope all agree
 		// with it. Any doubt fails closed before the socket is touched.
 		const client = this.#assertProbeIdentity(record);
+		// What the probe observed and what it proves are written as ONE version:
+		// a stored success is exact evidence and resolves the record in the same
+		// write that records the response, so no crash can leave the proof on the
+		// record with the record still uncertain (and supersedable).
 		let verdict: Verdict;
+		let updated: MutationRecord;
 		try {
 			const response = await client.request(command, commandId, timeoutMs);
-			this.ledger.recordProbe(commandId, { response });
 			verdict = classifyMutationOutcome({ kind: "response", commandType: command.type, response }, this.#policy);
+			updated = this.ledger.recordProbeOutcome(commandId, { response }, verdict, "substrate stored result");
 		} catch (error) {
 			if (error instanceof TransportLost || error instanceof RequestTimeout) {
-				this.ledger.recordProbe(commandId, { detail: error.message });
 				verdict =
 					error instanceof TransportLost
 						? classifyMutationOutcome({ kind: "transport_lost", commandType: command.type, detail: error.message }, this.#policy)
 						: classifyMutationOutcome({ kind: "timeout", commandType: command.type, timeoutMs }, this.#policy);
+				updated = this.ledger.recordProbeOutcome(commandId, { detail: error.message }, verdict, "probe");
 			} else {
 				throw error;
 			}
 		}
-		// A probe that comes back `completed` is a substrate-stored success:
-		// exact evidence, resolvable without another dispatch.
-		if (verdict.verdict === "completed") {
-			return { record: this.ledger.resolveUncertain(commandId, { kind: "effect_observed", by: "substrate stored result", detail: "journal replayed a success response", observedAt: new Date().toISOString() }), verdict };
-		}
-		return { record: this.ledger.require(commandId), verdict };
+		return { record: updated, verdict };
 	}
 
 	/** Resolve an UNCERTAIN command with exact external evidence. No dispatch happens. */

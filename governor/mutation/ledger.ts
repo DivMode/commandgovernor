@@ -181,6 +181,8 @@ export interface AdoptionReport {
 	readonly releasedClaims: readonly MutationRecord[];
 	/** Supersede claims whose replacement was never created but whose claimant is alive or cannot be told. Left. */
 	readonly pendingClaims: readonly { readonly record: MutationRecord; readonly verdict: ProcessIdentityVerdict }[];
+	/** Replacements whose original carries no confirmed claim for them, dispatched by a process proven over: resolved never sent. */
+	readonly settledNeverSent: readonly MutationRecord[];
 	/** Entries under `mutations/` that are not record directories. Ignored by every listing and reported here. */
 	readonly strays: readonly string[];
 	/** Record directories with no published version (a creator died before its link). Invisible to listings; reported here. */
@@ -366,8 +368,30 @@ export class MutationLedger {
 		const undecidable: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
 		const releasedClaims: MutationRecord[] = [];
 		const pendingClaims: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
+		const settledNeverSent: MutationRecord[] = [];
 		const { strays, empty } = this.#store.entries();
 		for (const record of this.list()) {
+			// The backlink is the authority: a replacement is potentially sent ONLY
+			// if its original carries a confirmed claim naming it. Any other
+			// replacement was never sent, whatever the state of the two records a
+			// crash left behind, and is settled as such once its dispatcher is
+			// proven over. A live dispatcher may be between its create and its
+			// confirm; that is in flight.
+			if (record.supersedes !== undefined && (record.state === "DISPATCHED" || record.state === "UNCERTAIN") && !this.replacementAuthorized(record)) {
+				const dispatcher = record.dispatchedBy;
+				const verdict = dispatcher.ownerToken === this.#self.ownerToken ? "current" : classifyProcessIdentity(dispatcher, this.#probe);
+				if (verdict === "current") {
+					inFlight.push(record);
+					continue;
+				}
+				if (!identityProvesProcessOver(verdict)) {
+					undecidable.push({ record, verdict });
+					continue;
+				}
+				const settled = this.#markNeverSentFor(record.commandId, dispatcher, `its original ${record.supersedes} carries no confirmed claim for it, and its dispatcher (pid ${dispatcher.pid}) is ${verdict}; a replacement is sent only after its claim is confirmed`);
+				if (settled && settled.version > record.version) settledNeverSent.push(settled);
+				continue;
+			}
 			if (record.state === "UNCERTAIN" && record.supersededBy) {
 				const claim = record.supersededBy;
 				if (claim.confirmedAt !== undefined) continue; // confirmed: the replacement exists and may have gone out; never released
@@ -433,7 +457,20 @@ export class MutationLedger {
 				if (!(error instanceof MutationLedgerError) || error.code !== "illegal_transition") throw error;
 			}
 		}
-		return { adopted, inFlight, undecidable, releasedClaims, pendingClaims, strays, empty };
+		return { adopted, inFlight, undecidable, releasedClaims, pendingClaims, settledNeverSent, strays, empty };
+	}
+
+	/**
+	 * Whether `record`, if it is a replacement, may have been sent: only when
+	 * its original carries a CONFIRMED claim naming it. A non-replacement is
+	 * always "authorized" in this sense. Read-time truth that survives any
+	 * crash cut between the two records' writes: the confirm is the last
+	 * durable write before a replacement can go out.
+	 */
+	replacementAuthorized(record: MutationRecord): boolean {
+		if (record.supersedes === undefined) return true;
+		const original = this.get(record.supersedes);
+		return original?.supersededBy?.commandId === record.commandId && original.supersededBy.confirmedAt !== undefined;
 	}
 
 	/**
@@ -688,17 +725,36 @@ export class MutationLedger {
 		} catch (error) {
 			if (!(error instanceof MutationLedgerError) || error.code !== "illegal_transition" || this.require(commandId).state !== "UNCERTAIN") throw error;
 		}
-		const observedAt = new Date().toISOString();
-		switch (verdict.verdict) {
-			case "completed":
-				this.recordProbe(commandId, { response: verdict.response, detail: "the dispatcher's own response, after adoption" });
-				return this.resolveUncertain(commandId, { kind: "effect_observed", by: "dispatcher's own response", detail: "the substrate returned success to the dispatcher after an adopter marked the record uncertain", observedAt });
-			case "failed":
-				this.recordProbe(commandId, { response: verdict.response, detail: "the dispatcher's own response, after adoption" });
-				return this.resolveUncertain(commandId, { kind: "effect_absent_proven", by: "dispatcher's own response", detail: `typed pre-effect rejection ${verdict.proof.commandType} + ${verdict.proof.code}, returned to the dispatcher after an adopter marked the record uncertain`, observedAt });
-			case "uncertain":
-				return this.recordProbe(commandId, { ...(verdict.response ? { response: verdict.response } : {}), detail: `the dispatcher's own outcome after adoption: ${verdict.reason}${verdict.detail ? ` (${verdict.detail})` : ""}` });
-		}
+		const response = verdict.verdict === "uncertain" ? verdict.response : verdict.response;
+		return this.recordProbeOutcome(commandId, { ...(response ? { response } : {}), detail: `the dispatcher's own outcome, after adoption: ${verdict.verdict}${verdict.verdict === "uncertain" ? ` (${verdict.reason})` : ""}` }, verdict, "dispatcher's own response");
+	}
+
+	/**
+	 * Record what a probe (or a late dispatcher outcome) observed AND, if it is
+	 * exact evidence, the resolution it implies, in ONE version: a success
+	 * response resolves UNCERTAIN -> COMPLETED, a typed pre-effect rejection
+	 * resolves UNCERTAIN -> FAILED, anything else is appended as a probe with
+	 * the state unchanged. There is no durable state in which the evidence is
+	 * on the record but the resolution is not: a crash between "stored the
+	 * response" and "completed" cannot leave a record that holds proof of its
+	 * own completion while still supersedable. A record already resolved by
+	 * someone else keeps its state and gains the probe.
+	 */
+	recordProbeOutcome(commandId: string, probe: { response?: DaemonResponse; detail?: string }, verdict: Verdict, by: string): MutationRecord {
+		const at = new Date().toISOString();
+		return this.#update(commandId, (current) => {
+			const probes = [...(current.probes ?? []), { at, ...probe }];
+			if (current.state !== "UNCERTAIN") return { ...current, probes };
+			if (verdict.verdict === "completed") {
+				const evidence: ResolutionEvidence = { kind: "effect_observed", by, detail: "a success response for this command id is the substrate's own statement that the effect happened", observedAt: at };
+				return { ...current, probes, state: "COMPLETED", transitions: [...current.transitions, { at, to: "COMPLETED", reason: `resolved by effect_observed (${by})`, evidence, response: verdict.response }] };
+			}
+			if (verdict.verdict === "failed") {
+				const evidence: ResolutionEvidence = { kind: "effect_absent_proven", by, detail: `typed pre-effect rejection ${verdict.proof.commandType} + ${verdict.proof.code}`, observedAt: at };
+				return { ...current, probes, state: "FAILED", transitions: [...current.transitions, { at, to: "FAILED", reason: `resolved by effect_absent_proven (${by})`, evidence, proof: verdict.proof, response: verdict.response }] };
+			}
+			return { ...current, probes };
+		});
 	}
 
 	/**
