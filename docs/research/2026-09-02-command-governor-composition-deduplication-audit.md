@@ -4,121 +4,211 @@ Status: **post-merge architecture correction and salvage research**
 
 This document is the source of truth for one question:
 
-> After adopting Prime Agent as the runtime substrate, which Command Governor
-> capabilities should be provided by Prime/Pi as-is, which should be composed
-> from existing packages, which genuinely require a small Command Governor
-> extension, which are temporary compatibility workarounds, and which custom
-> code should be removed?
+> After choosing Prime Agent as the runtime substrate, which Command Governor
+> capabilities should come from Prime/Pi as-is, which should be composed from
+> existing packages, which genuinely require a small Command Governor extension,
+> which are temporary compatibility workarounds, and which custom code should be
+> removed?
 
-This is deliberately not another general architecture proposal. It consolidates
-and corrects the practical consequences of ADR-0008, ADR-0009, the Pi/Prime
-research, and merged PR #18.
+This is deliberately not another general framework proposal. It consolidates the
+research already done, refreshes the fast-moving external evidence, and applies it
+to the code that is actually in the repository now.
+
+---
 
 ## Executive conclusion
 
 Command Governor should be a **curated Prime Agent package/distribution**, not a
 second orchestration runtime wrapped around Prime.
 
-The target shape is:
+Target shape:
 
 ```text
 Prime Agent
   + selected existing Pi/Prime packages
   + @commandgovernor/harness
-      - small policy extension(s)
+      - small product-specific policy extension(s)
       - roles / skills / prompts
       - compatibility shim only for a proven Prime defect that still matters
         on the chosen integration path
-      - conformance tests
+      - focused conformance tests
 ```
 
-The correct default for a capability is therefore:
+Every capability gets one of four implementation outcomes:
 
-1. **USE PRIME/PI** when the substrate already provides it.
-2. **USE AN EXISTING PACKAGE** when a reviewed package provides it.
-3. **SMALL COMMAND GOVERNOR EXTENSION** only for product-specific policy that
-   remains missing.
-4. **TEMPORARY WORKAROUND** only for a proven upstream defect that is exercised
-   by the chosen product path.
-5. Otherwise **REMOVE / DO NOT BUILD**.
+```text
+USE EXISTING
+PLUGIN (small, product-specific)
+TEMP WORKAROUND (proven upstream defect only)
+DELETE / DO NOT BUILD
+```
 
-There is no sixth outcome called “build a parallel Governor subsystem because we
+There is no fifth outcome called “build a parallel Governor subsystem because we
 can make it safer ourselves.”
 
-## Repository state this audit starts from
+---
 
-PR #18 (`Prime-native foundation: Gate S1b adaptation layer`) was merged to
-`main` on 2026-09-02.
+# 1. Repository state this audit starts from
 
-- reviewed PR head: `5801a029d3b2be784f641246d9f181f4c61ac953`
-- merge commit on `main`: `d9e5ab04b2037b2d2c5ac7c104780a4f6fd4a6a2`
-- PR size: 84 changed files, 18,396 additions, 15 deletions
-- ADR-0009 remained `Proposed` after that merge.
+PR #18 (`Prime-native foundation: Gate S1b adaptation layer`) is already merged.
 
-The merged code is therefore real repository state. This audit does **not**
-pretend #18 can simply be ignored. It decides what to retain, shrink, move into
-an extension, upstream, or remove in a follow-up salvage PR.
+- reviewed #18 head: `5801a029d3b2be784f641246d9f181f4c61ac953`
+- #18 merge commit on `main`: `d9e5ab04b2037b2d2c5ac7c104780a4f6fd4a6a2`
+- #18 size: 84 changed files, 18,396 additions, 15 deletions
+- ADR-0009 is still `Proposed` after that merge.
 
-## Prior Command Governor sources reviewed
+The merged code is real repository state. The salvage job is therefore to retain,
+shrink, move into a package/extension, or remove it in follow-up work. Passing a
+correctness review does not automatically make every component permanent product
+architecture.
 
-The audit incorporates:
+There is also an open **draft PR #19**, stacked on the old #18 branch:
 
-- `docs/adr/0008-adopt-pi-native-command-governor-harness.md`
-- `docs/adr/0009-prime-agent-substrate-and-acp-boundary.md`
+- title: `Adopt DeepSeek Harness architecture patterns without weakening Prime durability`
+- head: `7861fb39dc413cdca164c1f429c16d8ef0fd865e`
+- 14 changed files, 2,823 additions
+- adds DeepSeek donor research + ADR-0010 + new `governor/composition/*` contracts
+
+PR #19 must **not** be blindly retargeted and merged now. Its research is useful;
+its new custom Governor contracts must pass this same de-duplication test first.
+
+---
+
+# 2. Research lineage consolidated here
+
+The audit incorporates the existing Command Governor research instead of treating
+this as a clean-slate opinion:
+
+## Original durable-control-plane research
+
+- `docs/research/2026-08-31-technology-review.md`
+- `docs/research/2026-08-31-durable-orchestration-pattern-review.md`
+- ADRs 0001–0006
+
+These established the reliability requirements but predate the Pi-native pivot.
+Their bespoke-daemon implementation direction is no longer controlling.
+
+## Pi-config / session / memory / Stanford research
+
+- `docs/research/2026-08-31-session-memory-and-analytics-review.md`
+- ADR-0007
+- `amosblomqvist/pi-config`
+- `pi-interactive-subagents`
+- `pi-observational-memory`
+- Stanford `Agent Memory: Characterization and System Implications of Stateful Long-Horizon Workloads`
+- Stanford MemoryArena
+- compaction research cited by ADR-0007
+
+The requirements retained from this work are valuable: durable lineage, explicit
+loadouts, memory that is advisory rather than exact authority, and downstream-action
+memory evaluation. The old decision to independently reimplement those mechanisms
+in Rust was superseded by ADR-0008.
+
+## Pi-native pivot research
+
 - `docs/research/2026-09-01-pi-native-command-governor-harness-review.md`
+- ADR-0008
+
+This got the strategic rule right: **use Pi core, compose packages, extend only for
+real gaps, do not own another general runtime.**
+
+## Harness landscape / substrate bake-off
+
 - `docs/research/2026-09-01-agent-harness-landscape-and-substrate-bakeoff.md`
+- ADR-0009
+
+This selected Prime Agent because its durable long-running runtime was a better fit
+than plain upstream Pi for the hardest session/worker/recovery requirements.
+
+## Rust invariant catalog / S1b adaptation work
+
 - `docs/research/2026-09-01-rust-invariant-catalog.md`
 - `docs/prime-native/adaptation-layer.md`
 - `docs/upstream/2026-09-01-prime-worker-loss-journal.md`
-- `harness/authorities.json`
-- merged PR #18 and its review history.
+- merged PR #18
 
-ADR-0008 had the important strategic direction right: Command Governor should be
-Pi-native, composition-first, and should not own another general provider /
-session / subagent / memory / browser runtime. ADR-0009 correctly selected Prime
-as the stronger runtime substrate, but some of its later gates and the S1b
-implementation allowed a compatibility problem to grow into a substantial
-external adaptation layer. This document corrects that implementation direction
-without discarding the reliability requirements themselves.
+This found real Prime edge cases and built a large external adaptation layer. The
+failure evidence remains valuable; whether all of the implementation should remain
+is the question this audit now answers.
 
-## External snapshots used
+## DeepSeek Harness donor research
 
-Research was refreshed on 2026-09-02 rather than relying only on the 2026-09-01
-survey.
+Draft PR #19 adds:
 
-### Prime Agent
+- `docs/research/2026-09-01-deepseek-harness-architecture-donor-review.md`
+- ADR-0010 `deepseek-pattern-adoption`
 
-Selected production pin from ADR-0009 / #18:
+The research reviewed DeepSeek Harness at:
+
+```text
+4e84901e6471b79ec0338099867ebb4606d12bb5
+0.1.2-alpha.4
+```
+
+DeepSeek Harness had already moved again by this audit. Current `master` checked
+2026-09-02:
+
+```text
+49a606bc5b5934603f22a26957a07dc799ab0291
+0.1.2-alpha.5 line
+```
+
+The donor research remains useful for capability seams, typed events, workflow
+composition, provenance, provider-neutral children, explicit approvals and
+component metadata. But PR #19 made the same risky move as #18: it translated donor
+patterns into another layer of custom `governor/composition/*` code before proving
+Prime/current packages did not already supply the needed product behavior.
+
+**Disposition for PR #19:** preserve the research; freeze the implementation slice
+until this audit's package bake-offs decide what, if anything, still needs custom
+code. In particular, do not merge another Governor event spine, child runtime,
+mailbox, workflow IR, or sandbox contract simply because DeepSeek has a good version
+of the idea.
+
+---
+
+# 3. External snapshots refreshed for this audit
+
+## Prime Agent selected pin
 
 ```text
 Prime Agent v0.8.1
 514633727bf26d74f39f3119c2b0e31a5ceb2a9d
 ```
 
-Current upstream `main` checked during this audit:
+## Prime current upstream at research time
 
 ```text
 0ba0423c5c18805c72ad03d03aaf1d9e0cc622d0
 ```
 
-Source: <https://github.com/PrimeIntellect-ai/prime-agent>
+Repository: <https://github.com/PrimeIntellect-ai/prime-agent>
 
-### Upstream Pi
-
-Current upstream `main` checked during this audit:
+## Upstream Pi current at research time
 
 ```text
 e266507b606b9552fa277252644054afd4384b11
 ```
 
-Source: <https://github.com/earendil-works/pi>
+Repository: <https://github.com/earendil-works/pi>
 
-The current snapshots are research inputs, not silent dependency updates. Any
-actual re-pin remains a deliberate compatibility change.
+## DeepSeek Harness current at research time
 
-## Finding 1 — Prime already has the runtime we were trying to govern externally
+```text
+49a606bc5b5934603f22a26957a07dc799ab0291
+```
 
-At the selected pin Prime already provides the important runtime mechanics:
+Repository: <https://github.com/deepseek-ai/deepseek-harness>
+
+These current heads are research inputs, not silent dependency updates. Any re-pin
+still requires deliberate compatibility testing.
+
+---
+
+# 4. Prime already owns the general runtime
+
+At the selected pin Prime already provides the runtime mechanics Command Governor
+was previously preparing to own externally:
 
 - daemon supervisor and resident workers;
 - persistent session JSONL;
@@ -130,38 +220,43 @@ At the selected pin Prime already provides the important runtime mechanics:
 - autonomous continuation / quality gates;
 - RLM children and persistent Python state;
 - direct agent-to-agent messaging;
+- continual-harness refinement;
 - ACP mode;
 - extensions and packages.
 
-Prime's long-running-agent model explicitly makes the resident worker, not a
-terminal client, the owner of the queue, schedules, session, kernel, and
-children. These are not Command Governor implementation targets.
+Prime's long-running architecture explicitly makes the resident worker—not the TUI
+client—the owner of queue, schedules, session, kernel, and children.
 
-Primary docs:
+Primary Prime docs:
 
 - `packages/coding-agent/docs/long-running-agents.md`
 - `packages/coding-agent/docs/daemon.md`
 - `packages/coding-agent/docs/extensions.md`
 - `packages/coding-agent/docs/packages.md`
 
-## Finding 2 — the Governor-specific layer can be a Prime package
+**Disposition:** Command Governor does not build another generic runtime, session
+manager, scheduler, goal engine, subagent runtime, or process supervisor.
 
-Prime packages bundle extensions, skills, prompts, and themes and can be
-installed from npm, Git, or a local path. For compatibility with the inherited Pi
-ecosystem they use the `pi` package manifest key.
+---
 
-At the selected 0.8.1 pin an extension can:
+# 5. The Governor-specific layer can be a Prime package
+
+At Prime 0.8.1 an extension can:
 
 - subscribe to lifecycle events;
 - intercept/block tool calls;
 - inject or modify context;
 - register tools and commands;
 - persist custom session entries with `pi.appendEntry()`;
-- perform asynchronous initialization;
-- use normal Node dependencies and built-ins;
+- initialize asynchronously;
+- use npm dependencies and Node built-ins;
 - perform external integrations.
 
-Therefore the default product artifact should be a package like:
+Prime packages bundle extensions, skills, prompts, and themes and can be installed
+from npm, Git, or a local path. They intentionally retain compatibility with the
+inherited Pi package manifest.
+
+Therefore the default product artifact should look like:
 
 ```text
 @commandgovernor/harness
@@ -170,29 +265,28 @@ Therefore the default product artifact should be a package like:
     [only other genuinely necessary extensions]
   skills/
   prompts/
-  agents-or-role-resources/
   package.json
 ```
-
-A separate Governor daemon is not required merely to express review policy,
-role policy, user-decision gates, or ChatGPT integration.
 
 Primary sources:
 
 - <https://github.com/PrimeIntellect-ai/prime-agent/blob/514633727bf26d74f39f3119c2b0e31a5ceb2a9d/packages/coding-agent/docs/extensions.md>
 - <https://github.com/PrimeIntellect-ai/prime-agent/blob/514633727bf26d74f39f3119c2b0e31a5ceb2a9d/packages/coding-agent/docs/packages.md>
 
-## Finding 3 — current package ecosystem duplicates more of Governor than the old research captured
+**Disposition:** default to Prime package/extension implementation. A separate
+Governor service/daemon needs a proven requirement, not architectural inertia.
 
-The package ecosystem moved quickly enough that a one-day-old architecture review
-is already incomplete. The following packages are current candidates, not automatic
-adoptions.
+---
 
-### Work/evidence state: `pi-tasks`
+# 6. Refreshed package ecosystem — major Governor overlap
 
-Current package checked: `pi-tasks` 0.2.4.
+The ecosystem moved quickly enough that the previous day's survey already missed
+important options. These are **candidates to bake**, not instructions to install all
+of them together.
 
-It already provides:
+## `pi-tasks` 0.2.4 — work/evidence contract
+
+Provides:
 
 - evidence-gated completion;
 - acceptance criteria;
@@ -201,141 +295,133 @@ It already provides:
 - scope-drift detection;
 - branch-aware persistent events;
 - compaction-safe resume;
-- completion refusal while evidence/criteria/blockers are incomplete.
-
-This overlaps directly with the old Governor “durable obligation + evidence”
-concept. It does not provide subagent orchestration by itself, so it should be
-bake-tested as a work/evidence component, not mistaken for the whole product.
+- refusal to complete while evidence/criteria/blockers are incomplete.
 
 Source: <https://pi.dev/packages/pi-tasks>
 
-### Independent acceptance semantics: `pi-squad`
+**Overlap:** old Governor durable obligations, evidence, completion gates, decisions.
 
-`pi-squad` is especially relevant because its agents cannot mark a squad
-accepted. When candidates finish, status becomes `review`; main Pi must
-independently inspect the original contract, actual source/diff, and verification,
-then submit `squad_review`. Failed review remains review-blocked and rework occurs
-inside the same authoritative squad; pending/failed review gates survive restart.
+## `pi-squad` — independent acceptance semantics
 
-That is extremely close to the core Command Governor distinction:
+Especially relevant because squad agents cannot mark their candidate accepted.
+After candidate tasks finish:
+
+- persisted state becomes `review`, not `done`;
+- main Pi must independently re-read the contract and inspect actual diff/source;
+- it must rerun verification and submit `squad_review`;
+- failed review stays review-blocked and rework happens in the same authoritative
+  squad;
+- pending/failed review gates survive restart.
+
+Source: <https://pi.dev/packages/pi-squad>
+
+This is the closest package found so far to the core Governor rule:
 
 ```text
 worker finished != work accepted
 ```
 
-This package deserves a focused source/security/runtime bake-off before we write
-our own review state machine.
+## `pi-subagents` 0.57.0 — generic delegation/review
 
-Source: <https://pi.dev/packages/pi-squad>
-
-### General delegation/review: `pi-subagents`
-
-Current package checked: `pi-subagents` 0.57.0.
-
-It ships worker, reviewer, oracle, scout, and researcher roles; foreground and
-background runs; parallel reviewers; review loops; and implement-then-review
-workflows. It is extremely popular relative to most packages and is a natural
-candidate for generic delegation.
-
-Its ordinary review policy is still prompt/config driven, so it must not be
-confused with a hard acceptance authority by itself.
+Ships worker, reviewer, oracle, scout, and researcher roles; foreground/background
+runs; parallel reviewers; review loops; and implement-then-review workflows.
 
 Source: <https://pi.dev/packages/pi-subagents>
 
-### GitHub PR review: `pi-pr-review`
+**Use:** strong generic delegation candidate. Its ordinary review policy is still
+prompt/config driven, so do not confuse it alone with a hard acceptance authority.
 
-Current package checked: `pi-pr-review` 1.17.5 (published 2026-09-01).
+## `pi-pr-review` 1.17.5 — GitHub PR review
 
-It already supplies multi-lane parallel PR review, host-owned structured
-findings, exact reviewed-head/staleness checks, optional verification, and gated
-COMMENT/APPROVE publishing to GitHub. It is a much stronger candidate for the
-GitHub review surface than building custom reviewer plumbing.
+Provides multi-lane parallel review, host-owned structured findings, exact
+reviewed-head/staleness checks, optional verification, and gated COMMENT/APPROVE
+publishing.
 
 Source: <https://pi.dev/packages/pi-pr-review>
 
-### Multi-model governance pipeline: `pi-governance-pipeline`
+**Overlap:** much of the planned Governor GitHub reviewer plumbing.
 
-Current package checked: 1.0.14.
+## `pi-governance-pipeline` 1.0.14 — multi-model governance
 
-It already separates implementation from independent reviewers, routes roles to
-different models/providers, severity-gates findings, enforces a minimum reviewer
-panel, and keeps hard run budgets outside model context.
-
-It is more opinionated than Command Governor may want. Treat it as a candidate /
-donor and bake it against our workflow; do not install it merely because its name
-sounds aligned.
+Separates implementation from independent reviewers, routes roles across models
+/providers, severity-gates findings, enforces a minimum reviewer panel, and keeps
+hard run budgets outside model context.
 
 Source: <https://pi.dev/packages/pi-governance-pipeline>
 
-### Other review/workflow donors
+**Disposition:** candidate/donor; likely more opinionated than our minimal product.
+Do not adopt merely because the name sounds aligned.
 
-Additional packages found in the refreshed search include:
+## Other current donors found
 
-- `@agwab/pi-workflow` — deep review, spec review, impact review with audited
-  final reports;
-- `gentle-pi` — adversarial review/finalization and release receipts;
-- `@misunders2d/pi-goal` — autonomous goal execution with independent completion
-  audit;
-- `pi-team`, `pi-agentteam`, `pi-agents-team`, `pi-teams` — overlapping multi-agent
-  coordination models.
+- `@agwab/pi-workflow` — deep review / spec review / impact review;
+- `gentle-pi` — adversarial review/finalization and receipts;
+- `@misunders2d/pi-goal` — goal execution with independent completion audit;
+- `pi-team`, `pi-agentteam`, `pi-agents-team`, `pi-teams` — alternative team models;
+- `pi-background-tasks` — evidence-oriented background work and validation.
 
-These reinforce the composition direction; they are not a recommendation to load
-multiple overlapping authorities at once.
+These reinforce the composition direction. They are **not** a recommendation to
+load overlapping task/review authorities simultaneously.
 
-## Finding 4 — do not build a Command Governor ChatGPT browser runtime
+---
 
-Two existing Pi-native transports remain the leading candidates.
+# 7. ChatGPT transport — use an existing Pi-native implementation first
 
-### `pi-oracle` — preferred first exact-thread bake-off
+## `pi-oracle` — first exact-thread candidate
 
 `pi-oracle` already supports:
 
-- an explicit user/browser-created `https://chatgpt.com/c/<id>` conversation;
-- normalized exact conversation IDs;
+- a user/browser-created exact `https://chatgpt.com/c/<id>` conversation;
+- normalized conversation IDs;
 - same-conversation leases;
 - detached background workers;
 - isolated per-job browser profiles;
 - durable job state, response text, and artifacts;
 - persisted same-thread follow-ups;
-- best-effort Pi wake-up while preserving the result if the wake is missed.
-
-This is materially more complete than the browser transport Command Governor was
-planning to build.
+- best-effort Pi wake-up while preserving the result when wake-up is missed.
 
 Source:
 <https://github.com/fitchmultz/pi-oracle/blob/main/docs/ORACLE_DESIGN.md>
 
-### `pi-gpt` — direct/private transport candidate
+This directly invalidates old assumptions that a Pi extension cannot coordinate a
+detached durable browser worker.
 
-Current package checked: `pi-gpt` 0.4.2.
+## `pi-gpt` 0.4.2 — direct/private candidate
 
-It exposes ChatGPT/Codex account, model, chat, conversation, and message operations
-inside Pi and can continue conversations. It uses undocumented ChatGPT backend
-interfaces, so it should remain capability-gated and replaceable rather than the
-only supported path.
+Exposes ChatGPT/Codex account, model, chat, conversation, and message operations
+inside Pi and can continue conversations.
 
 Source: <https://pi.dev/packages/pi-gpt>
 
-### Consequence for the merged `cg-foreman` transport stub
+Because it relies on undocumented ChatGPT backend interfaces, keep it
+capability-gated and replaceable.
 
-`harness/extensions/cg-foreman/transport.ts` should not be treated as settled
-architecture. Its comments were written from an older candidate analysis and
-contain assumptions that no longer survive the refreshed evidence. In particular,
-`pi-oracle` demonstrates that a Pi extension can coordinate detached background
-workers and durable external job state.
+## Consequence for `harness/extensions/cg-foreman/transport.ts`
 
-The next transport work should therefore be **adapter/bake-off work around an
-existing package**, not implementation of another Chrome/CDP stack.
+The merged transport file is a types-only stub from an older candidate analysis.
+Its comments must not become permanent architecture authority. It assumes a custom
+durable sidecar/background arrangement before the current ecosystem was fully
+accounted for.
 
-## Finding 5 — memory/refinement should not become a Governor subsystem
+**Disposition:** preserve the semantic requirements (exact thread, stale revision
+rejection, ambiguous send is not blind retry) but test `pi-oracle`/`pi-gpt` first.
+Do not build another standalone Chrome/CDP transport.
 
-Prime itself now has a continual-harness refinement system covering prompt notes,
-memories, skills, and subagent specs. That already implements the major direction
-we researched from Continual Harness / ACE.
+---
 
-For observational memory, `pi-observational-memory` 3.0.4 is a current mature
-candidate with observation-centered memory, durable reflections, background
-memory work, source-backed recall, and compaction integration.
+# 8. Memory and continual refinement — compose, do not rebuild
+
+Prime itself now has continual-harness refinement over prompt notes, memories,
+skills, and subagent specs.
+
+Current observational-memory candidate:
+
+```text
+pi-observational-memory 3.0.4
+```
+
+It provides observation-centered memory, durable reflections, background memory
+work, source-backed recall, and compaction integration.
 
 Sources:
 
@@ -343,213 +429,258 @@ Sources:
 - <https://pi.dev/packages/pi-observational-memory>
 - <https://pi.dev/packages/pi-continual-harness> as a smaller upstream-Pi donor.
 
-Command Governor should choose/configure at most one owner for each memory concern
-and evaluate downstream action quality. It should not implement another memory
-engine.
+**Disposition:** no Governor memory engine. Choose/configure at most one owner for a
+memory concern and evaluate downstream action quality using the requirements from
+ADR-0007 / Stanford research.
 
-## Finding 6 — upstream Pi has a stronger settled lifecycle event than Prime
+---
 
-Current upstream Pi exposes `agent_settled`, defined as the point where a run is
-fully settled and no automatic retry, compaction retry, or queued continuation
-remains.
+# 9. Lifecycle seam — upstream Pi has `agent_settled`
 
-Current Prime source search on 2026-09-02 found no `agent_settled` equivalent by
-that name; the selected Prime 0.8.1 extension docs expose `agent_end` once per
-prompt.
+Current upstream Pi exposes `agent_settled`: fully settled means no automatic
+retry, compaction retry, or queued continuation remains.
 
-This is the kind of generic gap that should be proposed upstream to Prime (or
-adapted through an existing public Prime lifecycle surface), not replaced with a
-new provider-specific Governor lifecycle detector.
+Current Prime source search on 2026-09-02 found no `agent_settled` by that name;
+Prime 0.8.1 extension docs expose `agent_end` once per prompt.
 
 Pi source:
 <https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md>
 
-## Finding 7 — the Prime worker-loss journal defect is real, but its product relevance depends on architecture
+**Disposition:** generic missing lifecycle primitives should be upstreamed/adapted
+through Prime, not replaced by another Governor provider-specific detector.
 
-The S1b research found a real defect: a worker socket can close after an effect,
+---
+
+# 10. Prime worker-loss journal defect — real defect, conditional workaround
+
+The S1b work found a real Prime defect: a worker socket can close after an effect,
 and the supervisor catch path can persist the ordinary failure response in the
-command journal. Current Prime `main` still contains the worker-socket-close path
-and the supervisor path that records ordinary caught failures into the command
-journal, so this is not invented work.
+command journal.
 
-However, the huge architectural question is **who consumes that response and what
-they do next**.
+Current Prime `main` still contains:
 
-The #18 D2 adaptation is required when Command Governor is an external raw daemon
-client that interprets outcomes and may create replacement commands. If the
-product becomes an in-process Prime package that does not implement an external
-mutation/re-dispatch authority, the duplicate-effect risk may no longer require a
-separate Governor mutation ledger at all.
+- worker socket close -> `Daemon worker socket closed`;
+- supervisor catch path that records ordinary caught failures into the command
+  journal.
 
-That must be proved with a small black-box spike:
-
-1. run the same real worker-loss reproducer through the intended Prime-package
-   product path;
-2. prove whether stock Prime or any selected package automatically issues a new
-   mutation after the uncertain worker loss;
-3. if no automatic replacement exists, remove the external D2 control-plane path;
-4. if a real duplicate remains possible on the product path, keep only the
-   minimum compatibility shim and retain the reproducer;
-5. upstream the generic defect where practical and define the shim's removal
-   condition.
-
-Current Prime source checked:
+Relevant current source:
 
 - `packages/coding-agent/src/modes/daemon/daemon-worker-client.ts`
 - `packages/coding-agent/src/modes/daemon/daemon-supervisor.ts`
 
-The durable command journal correctly refuses replay of a still-pending command
-under the same identity via `command_result_uncertain`; the residual problem is
-how a worker-close failure gets finalized and how a higher-level caller reacts.
+Prime also correctly refuses to replay a still-pending command under the same
+identity using `command_result_uncertain`.
 
-## Capability disposition matrix
+The crucial product question is **who consumes a finalized worker-close failure and
+whether they automatically create a replacement mutation**.
 
-| Concern | Preferred owner now | Disposition |
+PR #18's large D2 ledger/classifier exists because Command Governor chose to be an
+external raw daemon client that interprets outcomes and may issue replacements.
+If the final product is an in-process Prime package and does not implement that
+external mutation/re-dispatch authority, the duplicate-effect problem may no longer
+need a separate Governor mutation ledger.
+
+Do not guess. Prove it with a small black-box package-path spike:
+
+1. run the same real worker-loss reproducer through the intended package product;
+2. observe whether stock Prime/selected package automatically issues a new mutation;
+3. if there is no automatic duplicate, remove the external D2 control-plane path;
+4. if a duplicate remains possible, retain only the smallest compatibility shim;
+5. keep the real reproducer and define the shim's upstream-removal condition.
+
+---
+
+# 11. DeepSeek Harness — research donor, not permission to build another Governor runtime
+
+The DeepSeek donor review found valuable patterns:
+
+- capability/service seams;
+- append-only typed event projections;
+- explicit Session vs Activation identity;
+- provider-neutral child capability negotiation;
+- provenance/source relationships;
+- workflows and PTC/tool composition;
+- explicit approvals/credentials/policy seams;
+- component model/token/cache metadata;
+- ACP specialist-worker potential.
+
+Those are legitimate research findings.
+
+But draft PR #19 immediately turned many of those patterns into new custom
+Governor code:
+
+```text
+governor/composition/events.ts
+governor/composition/capabilities.ts
+governor/composition/lifecycle.ts
+governor/composition/child.ts
+governor/composition/mailbox.ts
+governor/composition/workflow.ts
+governor/composition/sandbox.ts
+governor/composition/component.ts
+```
+
+That is exactly the move this audit is designed to challenge.
+
+Examples:
+
+- Do not build a new child runtime before testing Prime RLM / `pi-subagents` /
+  `pi-squad`.
+- Do not build another workflow runtime before testing Prime autonomous/goals and
+  current workflow packages.
+- Do not build a new generic event spine just because DSH has one; Prime/Pi session
+  state plus selected package state may already be enough.
+- Do not make DSH sandbox patterns a mandatory product feature; trusted-local
+  Command Governor does not require a sandbox.
+- Do not build generic capability registries merely to re-express Prime package
+  composition unless a concrete collision cannot be solved by the selected stack.
+
+**PR #19 disposition now:**
+
+```text
+DeepSeek research document     KEEP / REFRESH AS NEEDED
+ADR-0010                       DO NOT ACCEPT YET
+DSH specialist ACP worker      OPTIONAL FUTURE BAKE-OFF
+new governor/composition code  FREEZE; DE-DUP FIRST
+sandbox contract               NOT CORE PRODUCT REQUIREMENT
+```
+
+DeepSeek Harness is changing rapidly; the reviewed alpha.4 source is already one
+release behind alpha.5. Treat it as a donor/candidate, not another thing Command
+Governor must mirror.
+
+---
+
+# 12. Capability disposition matrix
+
+| Concern | Preferred owner/candidate | Disposition |
 | --- | --- | --- |
-| agent/model runtime | Prime | **USE PRIME** |
-| daemon supervisor / resident workers | Prime | **USE PRIME** |
-| session JSONL / resume / tree | Prime | **USE PRIME** |
-| worker/session leases | Prime | **USE PRIME** |
-| schedules / heartbeats | Prime | **USE PRIME** |
-| goals / autonomous continuation | Prime | **USE PRIME** |
-| RLM / recursive children | Prime | **USE PRIME** |
-| agent-to-agent messaging | Prime | **USE PRIME** |
-| continual-harness refinement | Prime | **USE PRIME** |
-| generic delegation | Prime RLM and/or `pi-subagents` | **BAKE-OFF; DO NOT BUILD** |
-| durable work/evidence contract | `pi-tasks` candidate | **BAKE-OFF; DO NOT BUILD YET** |
-| independent candidate acceptance | `pi-squad` candidate | **BAKE-OFF FIRST** |
-| GitHub PR review | `pi-pr-review` candidate | **BAKE-OFF FIRST** |
-| multi-model governance | `pi-governance-pipeline` donor/candidate | **BAKE-OFF; MAY BE TOO OPINIONATED** |
-| exact ChatGPT existing-thread transport | `pi-oracle` | **FIRST CANDIDATE** |
-| direct ChatGPT transport | `pi-gpt` | **SECOND / EXPERIMENTAL CANDIDATE** |
-| observational memory | `pi-observational-memory` candidate | **OPTIONAL BAKE-OFF** |
-| generic settled lifecycle | upstream Pi has `agent_settled` | **UPSTREAM/ADAPT, DO NOT REBUILD** |
-| user-owned high-risk decisions | small policy extension if packages do not cover it | **POSSIBLY GOVERNOR-SPECIFIC** |
-| stale task/revision/foreman correlation | small policy extension if needed after transport bake-off | **POSSIBLY GOVERNOR-SPECIFIC** |
-| raw Prime mutation classifier/ledger | only if raw external daemon-client path remains | **CONDITIONAL TEMP WORKAROUND** |
-| sandbox | none by default | **OPTIONAL PROFILE ONLY; NOT A PRODUCT PREREQUISITE** |
-| ACP | Prime stable ACP | **INTEROP SURFACE, NOT INTERNAL AUTHORITY** |
+| agent/model runtime | Prime | **USE EXISTING** |
+| daemon supervisor / resident workers | Prime | **USE EXISTING** |
+| session JSONL / resume / tree | Prime | **USE EXISTING** |
+| worker/session leases | Prime | **USE EXISTING** |
+| schedules / heartbeats | Prime | **USE EXISTING** |
+| goals / autonomous continuation | Prime | **USE EXISTING** |
+| RLM / recursive children | Prime | **USE EXISTING** |
+| agent-to-agent messaging | Prime | **USE EXISTING** |
+| continual-harness refinement | Prime | **USE EXISTING** |
+| generic delegation | Prime RLM / `pi-subagents` | **BAKE FIRST; DO NOT BUILD** |
+| durable work/evidence | `pi-tasks` | **BAKE FIRST** |
+| independent candidate acceptance | `pi-squad` | **BAKE FIRST** |
+| GitHub PR review | `pi-pr-review` | **BAKE FIRST** |
+| multi-model governance | `pi-governance-pipeline` | **DONOR/CANDIDATE** |
+| exact existing ChatGPT thread | `pi-oracle` | **FIRST CANDIDATE** |
+| direct ChatGPT transport | `pi-gpt` | **SECOND/EXPERIMENTAL CANDIDATE** |
+| observational memory | `pi-observational-memory` | **OPTIONAL BAKE** |
+| generic settled lifecycle | upstream Pi `agent_settled` | **UPSTREAM/ADAPT** |
+| user-owned decision gate | selected package or small policy extension | **PROVE GAP FIRST** |
+| stale task/revision/foreman correlation | transport/package or small policy extension | **PROVE GAP FIRST** |
+| raw Prime mutation classifier/ledger | only if raw external daemon path remains | **CONDITIONAL TEMP WORKAROUND** |
+| DeepSeek event/child/workflow contracts | Prime/packages unless proven gap | **FREEZE PR #19 IMPLEMENTATION** |
+| sandbox | none by default | **OPTIONAL PROFILE ONLY** |
+| ACP | Prime stable ACP / optional other ACP workers | **INTEROP, NOT INTERNAL AUTHORITY** |
 
-## PR #18 salvage disposition
+---
+
+# 13. PR #18 salvage by file family
 
 PR #18 was correctly reviewed for the architecture it implemented. The salvage
-question is different: **which of those components should remain once the product
-stops acting like an external competing control plane?**
+question is whether that architecture remains necessary after composition.
 
-### Preserve as evidence until the replacement path is proven
+## Preserve as evidence until replacement behavior is proven
 
-Do not immediately delete the valuable real reproducers and specifications:
+High-value real reproducers/specifications include:
 
 - `conformance/runtime/d2-worker-loss-uncertain.test.ts`
 - `conformance/runtime/d2-import-jsonl-post-effect.test.ts`
 - `conformance/runtime/d1-resident-root-recovery.test.ts`
 - `conformance/runtime/d8-explicit-session-path.test.ts`
 - pin/protocol drift tests;
-- crash/restart negative controls that describe a real required product behavior.
+- crash/restart negative controls that encode a real product requirement.
 
-During salvage, convert surviving requirements into black-box package-level
-conformance tests wherever possible. Tests of code that is intentionally removed
-should be removed with that code after equivalent product-level evidence exists;
-we do not keep thousands of internal tests merely to preserve sunk cost.
+As the implementation shrinks, convert surviving requirements to **black-box
+package-level conformance**. Delete tests whose only purpose is proving machinery we
+intentionally remove after equivalent product-level evidence exists.
 
-### `governor/prime/*`
+## `governor/prime/*`
 
-Current role: external raw daemon protocol client, substrate launcher, client
-identity, protocol types, environment handling.
+External raw daemon client, protocol types, launcher, client identity, environment.
 
-Preferred disposition:
+**Preferred:** remove from normal product path if the package can operate through
+Prime's normal extension/session APIs. Retain only pin/protocol conformance or a
+truly necessary narrow adapter.
 
-- **REMOVE from the product path** if the Prime package can run entirely through
-  Prime's normal extension/session APIs;
-- retain only pin/protocol conformance or a truly necessary narrow adapter;
-- do not maintain a second generic Prime client just because it exists now.
+## `governor/session/*`
 
-### `governor/session/*`
+Custom registry/path/incarnation/recovery authority.
 
-Current role: custom session registry, canonical path policy, incarnation/recovery
-logic.
+**Preferred:** re-run D1/D8 through the package path. If Prime high-level lifecycle
+already satisfies the requirement, remove registry/reopen authority. If one
+preflight policy remains useful, make it a small extension policy.
 
-Preferred disposition:
+## `governor/mutation/*`
 
-- re-run D1/D8 through the intended package path;
-- if Prime's normal high-level lifecycle already supplies the needed behavior,
-  **REMOVE registry/reopen authority**;
-- if one product-specific preflight policy is still useful (for example refusing
-  an unsafe path shape), implement it as a small extension policy rather than a
-  parallel session authority.
+D2 classifier/digest/ledger/proof matrix.
 
-### `governor/mutation/*`
+**Preferred:** do not assume permanent ownership. First prove whether the package
+product ever needs to interpret raw daemon failure and create replacements. If not,
+remove the ledger/classifier from the normal path. If yes, retain the minimum shim
+needed by the reproducer.
 
-Current role: D2 classification, digest, durable ledger, proof matrix.
+## `governor/fs/*` and `governor/process/*`
 
-Preferred disposition:
+Exist mainly to support custom authoritative stores and fences. Remove if those
+authorities disappear, unless the surviving minimal compatibility shim needs them.
 
-- **do not assume it remains**;
-- first prove whether the package product path ever needs to interpret raw daemon
-  failure and create replacements;
-- if not, remove the mutation ledger/classifier from the normal product path and
-  keep the Prime defect as an upstream/conformance concern;
-- if yes, retain the smallest compatibility module that closes the reproduced
-  duplicate-effect path and nothing more.
+## `harness/agents/*`
 
-### `governor/fs/*` and `governor/process/*`
+Compatible with a package-shaped product, but generic roles may be duplicated by
+`pi-subagents`, `pi-squad`, `pi-pr-review`, etc. Keep only product-specific roles or
+roles that win a measured bake-off.
 
-These exist primarily to make the custom authoritative registries/ledgers
-process-safe. If those authorities disappear, these helpers should disappear too
-unless a surviving compatibility shim demonstrably needs them.
+## `harness/extensions/cg-foreman/transport.ts`
 
-### `harness/agents/*`
+Keep only the semantic contract worth preserving. Test `pi-oracle`/`pi-gpt` before
+building transport implementation or durable browser plumbing.
 
-Role definitions are compatible with a package-shaped product, but do not assume
-we need our own generic worker/reviewer definitions when selected packages already
-ship good ones. Keep only roles that encode genuinely Command Governor-specific
-policy or outperform package defaults in a measured bake-off.
+## `harness/authorities.json`
 
-### `harness/extensions/cg-foreman/transport.ts`
+Keep one-owner-per-concern as a useful inventory. Update actual owners to Prime /
+selected packages. Existing `governor/*` ownership is not permanent simply because
+#18 assigned it first.
 
-Keep the high-level semantic requirements (exact thread, stale revision rejection,
-ambiguous send is not blind retry). Rework or replace the transport abstraction
-after testing `pi-oracle` and `pi-gpt`; do not implement the old standalone
-browser plan.
+## pins/bootstrap/conformance
 
-### `harness/authorities.json`
+Keep a deliberate Prime pin and a **small distribution conformance suite**. Gate the
+assembled Command Governor package, not every internal implementation detail of
+Prime.
 
-Keep the concept of one owner per concern, but update the actual ownership map so
-Prime and selected packages own their real concerns. It must not make existing
-`governor/*` files permanent merely because #18 assigned them first.
+---
 
-### `pins/*`, bootstrap, and conformance runner
+# 14. What may actually remain custom
 
-Keep a deliberate Prime pin and a small compatibility/conformance suite. The
-suite should gate **our distribution and selected packages**, not attempt to
-retest every Prime internal implementation detail.
+The final Command Governor-specific code may be very small:
 
-## The minimum Command Governor-specific product that may remain
+1. package manifest / curated dependency profile;
+2. only genuinely missing policy extension(s);
+3. a thin foreman adapter around an existing ChatGPT transport if necessary;
+4. product-specific roles/skills/prompts;
+5. temporary compatibility code for a reproduced Prime defect only while needed;
+6. focused conformance tests for the assembled behavior.
 
-After composition, custom Command Governor behavior may be as small as:
+Candidate unique semantics still requiring a **gap proof**:
 
-1. a package manifest / curated dependency profile;
-2. a policy extension that enforces only genuinely missing Command Governor
-   rules;
-3. a foreman adapter around an existing ChatGPT transport if no package already
-   exposes the exact structured disposition we need;
-4. role/skill/prompt resources that are actually product-specific;
-5. compatibility code for a proven Prime defect only while it remains necessary;
-6. focused conformance tests proving the assembled product behavior.
-
-Candidate product-specific rules that still require proof of a gap:
-
-- an implementer cannot satisfy the exact independent-acceptance requirement by
-  self-certification;
+- implementer cannot self-satisfy the exact independent acceptance requirement;
 - stale task/revision foreman responses cannot close newer work;
-- explicitly user-owned decisions are routed back to the user;
-- the exact chosen ChatGPT foreman conversation is used.
+- explicitly user-owned decisions route back to the user;
+- the exact chosen ChatGPT conversation is used.
 
-Even these are **not automatically custom code**. `pi-squad`, `pi-tasks`,
-`pi-pr-review`, and governance packages now cover parts of them and must be tested
-first.
+`pi-squad`, `pi-tasks`, `pi-pr-review`, and governance packages now cover parts of
+these, so none is automatically custom code.
 
-## What should NOT be on the roadmap unless this audit is disproven
+---
+
+# 15. What should not be on the roadmap unless this audit is disproven
 
 Do not build:
 
@@ -561,143 +692,146 @@ Do not build:
 - another general memory/refinement engine;
 - another Chrome/CDP ChatGPT automation stack;
 - mandatory MCP merely to return a foreman disposition;
-- mandatory sandboxing for trusted local Command Governor use;
-- a second durable authority simply because the previous architecture already
-  wrote one.
+- mandatory sandboxing for trusted-local Command Governor;
+- another generic event/child/workflow runtime merely because DeepSeek has good
+  architectural patterns;
+- a second durable authority simply because merged code already created one.
 
-A sandbox can remain an optional hardened profile for users who intentionally run
-untrusted code. It is not a prerequisite for the core product described here.
+A sandbox may remain an optional hardened profile for users intentionally running
+untrusted code. It is not a core prerequisite for the trusted-local product.
 
-## Next work — one small evidence-driven salvage sequence
+---
 
-Do **not** start another broad implementation phase from the merged #18 state.
-Run this sequence instead.
+# 16. Next work — one small evidence-driven salvage sequence
 
-### 1. Create the smallest installable Command Governor Prime package skeleton
+Do **not** start another broad implementation phase from merged #18 or draft #19.
 
-Use Prime's documented package format. It should load under the selected Prime pin
-without a parallel Governor daemon.
+## Step 1 — smallest installable Prime package skeleton
 
-The first version should contain almost no behavior; its purpose is to prove the
-product shape.
+Create a minimal `@commandgovernor/harness` package using Prime's documented package
+format. No parallel Governor daemon. Almost no behavior. Prove the product shape.
 
-### 2. Bake existing packages under Prime, not only upstream Pi
+## Step 2 — bake alternatives under Prime, separately
 
-A Pi package being good on upstream Pi does not automatically prove it is safe on
-Prime. For each candidate, test install/load, lifecycle compatibility, state
-ownership, restart behavior, and clean removal.
+A package working on upstream Pi is not automatically proven on Prime.
 
-Priority order:
+Priority:
 
 1. `pi-squad` — independent acceptance semantics;
-2. `pi-tasks` — durable work/evidence contract;
+2. `pi-tasks` — work/evidence contract;
 3. `pi-pr-review` — GitHub review;
 4. `pi-subagents` — generic delegation/reviewer roles;
 5. `pi-oracle` — exact existing ChatGPT thread;
 6. `pi-gpt` — direct ChatGPT alternative;
-7. `pi-observational-memory` only if Prime's own refinement/memory behavior leaves
-   a measured gap;
-8. `pi-governance-pipeline` as a comparison/donor rather than a default stack.
+7. `pi-observational-memory` only if a measured gap remains;
+8. `pi-governance-pipeline` / DeepSeek / other donors as comparisons, not default
+   stack.
 
-Do not install overlapping task/review authorities together during the first
-bake-off. Test alternatives separately, then select one owner per concern.
+Do not install overlapping authorities simultaneously during the first bake-off.
 
-### 3. Re-run the #18 failure scenarios through the package path
+## Step 3 — re-run #18 D1/D2/D8 through the package path
 
-Especially D1, D2, and D8.
+Especially determine whether the raw external D2 ledger is needed at all.
 
-The key D2 question is no longer “is the external ledger correct?” It is:
+Key question:
 
-> Does the intended Prime package product path create a duplicate external effect
-> after the real worker-loss scenario without that external ledger?
+> Does the intended Prime-package product path duplicate an external effect after
+> the real worker-loss scenario without our external Governor ledger?
 
-If no, delete the unnecessary ledger architecture. If yes, keep the smallest
-workaround required by the reproducer.
+No -> delete unnecessary control-plane machinery.
+Yes -> keep the smallest workaround proven by the reproducer.
 
-### 4. Prove the foreman loop with existing transport
+## Step 4 — prove exact foreman loop using existing transport
 
-Target a user-created exact `https://chatgpt.com/c/<id>` using `pi-oracle` first.
+Use `pi-oracle` first against a user-created exact `https://chatgpt.com/c/<id>`.
 Prove:
 
 ```text
-candidate work/review
+candidate/review
   -> correlated request
-  -> exact existing ChatGPT thread
-  -> response is durably retrievable
-  -> stale/wrong correlation is rejected
-  -> disposition affects the intended current work exactly once
+  -> exact ChatGPT conversation
+  -> durable response retrieval
+  -> stale/wrong correlation rejected
+  -> intended current work affected exactly once
 ```
 
-Only after that test should we decide whether a tiny Governor foreman-policy
-extension is required.
+Only then decide whether a tiny Governor foreman policy extension is still needed.
 
-### 5. Produce a deletion/shrink PR
+## Step 5 — deletion/shrink PR
 
-The success metric for the next implementation PR is **less custom production
-code**, not more.
+Success metric: **less custom production code**.
 
-Every merged #18 component should end in one of four final buckets:
+Every #18/#19 component must end in:
 
 ```text
 USE EXISTING
-PLUGIN (small and product-specific)
+PLUGIN
 TEMP WORKAROUND
 DELETE
 ```
 
-The PR should report before/after custom production LOC and exactly which Prime or
-package owner replaced each removed subsystem.
+Report before/after custom production LOC and which Prime/package owner replaces
+each removed subsystem.
 
-## ADR consequences
+---
 
-Do not simply flip ADR-0009 from Proposed to Accepted without incorporating this
-audit.
+# 17. ADR consequences
 
-A focused ADR correction should preserve:
+Do not simply flip ADR-0009 Proposed -> Accepted without incorporating this audit.
 
-- Prime as the selected runtime substrate;
-- upstream Pi as architectural upstream/fallback;
-- stable ACP as optional/public interoperability where useful;
-- the Command Governor reliability semantics.
+Keep:
 
-It should clarify:
+- Prime as selected runtime substrate;
+- upstream Pi as upstream/fallback;
+- Command Governor reliability semantics;
+- ACP as useful interoperability where needed.
 
-- Command Governor's default implementation is a Prime package/distribution;
+Clarify:
+
+- Command Governor defaults to a Prime package/distribution;
 - existing Prime/Pi packages are preferred over new Governor subsystems;
-- compatibility workarounds are temporary and tied to a reproduced upstream
-  defect/product path;
-- ChatGPT transport is composed from existing Pi-native transports when they pass
+- workarounds are temporary and tied to a reproduced upstream defect on the actual
+  product path;
+- ChatGPT transport composes existing Pi-native implementations when they pass
   conformance;
-- sandboxing is optional hardening for intentionally untrusted workloads, not a
-  core prerequisite;
-- S2/S3-style gates must not block getting a usable trusted-local product when
-  they are not required by that product profile.
+- sandboxing is optional hardening, not a core trusted-local prerequisite;
+- DeepSeek is a donor/specialist candidate, not permission to mirror its runtime;
+- S2/S3-style future gates must not prevent a usable trusted-local product when
+  those gates are irrelevant to that profile.
 
-ADR-0008's no-parallel-runtime decision remains the controlling principle.
+ADR-0008's **no parallel general-purpose runtime** rule remains controlling.
 
-## Freshness rule for future architecture work
+ADR-0010 from draft PR #19 should not be accepted until the DeepSeek donor findings
+are reclassified under this composition audit.
 
-The package ecosystem is changing fast enough that yesterday's survey was already
-missing relevant packages. Before implementing a new **category** of production
-capability, refresh current Prime/Pi/package evidence for that category.
+---
 
-This is not a request for perpetual broad research or another bureaucracy. It is
-a narrow rule:
+# 18. Freshness rule — narrow, not bureaucratic
 
-> If we are about to write a new subsystem, first search whether Prime/Pi/current
-> packages already ship that subsystem.
+The ecosystem moves fast enough that a one-day-old survey missed material packages
+and DeepSeek advanced a release line during the same day.
 
-If an existing implementation is found, test it before writing ours.
+Before implementing a new **category** of production subsystem:
 
-## Final recommendation
+> Search current Prime, current Pi, and current packages for that category; test a
+> credible existing implementation before writing ours.
+
+This is not a request for perpetual research. It is the minimum check required
+before committing to another custom subsystem.
+
+---
+
+# Final recommendation
 
 The next milestone is **not** “finish the Governor control plane.”
 
 It is:
 
 > Make Command Governor a usable Prime package with the smallest possible custom
-> policy surface, while deleting or demoting merged #18 machinery that the
-> package architecture makes unnecessary.
+> policy surface, while deleting or demoting merged #18 and draft #19 machinery
+> that Prime/current packages make unnecessary.
 
-The #18 engineering remains useful as failure evidence and a compatibility oracle.
-It does not get permanent ownership merely because it passed review and merged.
+The #18 engineering remains valuable failure evidence and a compatibility oracle.
+The #19 DeepSeek research remains valuable donor evidence. Neither receives
+permanent product ownership merely because substantial implementation work already
+exists.
