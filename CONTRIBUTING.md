@@ -4,7 +4,9 @@ Thank you for helping build Command Governor. The project is design-first: archi
 
 ## Before proposing or retaining production code
 
-Read `AGENTS.md` and ADRs 0008–0010.
+Read ADRs 0008–0010 and the current composition/de-duplication research.
+
+Global Claude Code and Codex instructions are managed declaratively outside this repository by the user's Nix configuration. Do not add repo-local `CLAUDE.md` or `AGENTS.md` copies of global policy here.
 
 For each meaningful custom capability, answer before implementation:
 
