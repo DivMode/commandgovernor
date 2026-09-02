@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 
 import { DaemonClient } from "../../governor/prime/daemon-client.ts";
@@ -51,7 +51,7 @@ describe("D8: explicit sessionPath on every created session", () => {
 		const governor = await fixture.governor("d8-resident");
 		const sessionPath = join(fixture.sessionDir, "sub", "..", "d8-resident.jsonl"); // non-canonical spelling on purpose
 		const created = await governor.createSession({ sessionPath });
-		assert.equal(created.record.sessionPath, join(fixture.sessionDir, "d8-resident.jsonl").replace(/^\/tmp\//, "/private/tmp/"), "the recorded path is canonical");
+		assert.equal(created.record.sessionPath, join(realpathSync(fixture.sessionDir), "d8-resident.jsonl"), "the recorded path is canonical (realpath of the directory, no ../ segment)");
 		assert.equal(created.summary.sessionFile, created.record.sessionPath, "Prime's sessionFile is the canonical path we asked for");
 		const { sessionId } = created.record;
 		const active = created.record.incarnations[0]!.activeSessionId;
