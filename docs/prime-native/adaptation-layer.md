@@ -202,7 +202,9 @@ reviewed pre-effect FAILED with nothing written. The runtime tier and the
 `harness` CI job run both on every pull request.
 
 **Upstream.** The worker-loss journal defect is filed as
-[PrimeIntellect-ai/prime-agent#1974](https://github.com/PrimeIntellect-ai/prime-agent/issues/1974);
+[PrimeIntellect-ai/prime-agent discussion #1978](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1978)
+(issue #1974 was auto-closed by their contribution gate; Discussions are
+the intake);
 the proposal text is in
 [`../upstream/2026-09-01-prime-worker-loss-journal.md`](../upstream/2026-09-01-prime-worker-loss-journal.md).
 The Governor-side guard is sufficient on its own and does not depend on

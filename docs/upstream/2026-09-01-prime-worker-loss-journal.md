@@ -1,8 +1,14 @@
 # Upstream proposal: do not journal a worker-transport loss as a definite result
 
 Status: **filed** by the repository owner as
-[PrimeIntellect-ai/prime-agent#1974](https://github.com/PrimeIntellect-ai/prime-agent/issues/1974).
-The text below is what was proposed. Command Governor's own guard
+[PrimeIntellect-ai/prime-agent discussion #1978](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1978)
+(Bug reports category) on 2026-09-02. It was first filed as
+[issue #1974](https://github.com/PrimeIntellect-ai/prime-agent/issues/1974),
+which Prime's contribution gate closed automatically: their
+`CONTRIBUTING.md` routes all external bug reports through Discussions,
+and maintainers promote a Discussion to an Issue only once they accept it.
+Nobody at Prime has reviewed the report yet. The text below is what was
+proposed. Command Governor's own guard
 (`governor/mutation/classify.ts` with the reviewed proof matrix in
 `governor/mutation/proof.ts`) does not depend on this landing.
 

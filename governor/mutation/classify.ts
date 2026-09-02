@@ -11,7 +11,7 @@
  * The pinned Prime supervisor records a worker's death mid-command as a
  * definite failure ("Daemon worker socket closed") in its command journal and
  * replays that failure on retry, even when the effect is already on disk
- * (Issue #15 D2; upstream PrimeIntellect-ai/prime-agent#1974). The Governor
+ * (Issue #15 D2; upstream PrimeIntellect-ai/prime-agent discussion #1978). The Governor
  * therefore does NOT ask "does the error text say the socket closed?". It
  * asks two structural questions, in order:
  *
