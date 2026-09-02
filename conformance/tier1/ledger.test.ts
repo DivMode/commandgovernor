@@ -9,18 +9,25 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { COMMAND_DIGEST_PATTERN, commandDigest } from "../../governor/mutation/digest.ts";
 import { MutationLedger, MutationLedgerError } from "../../governor/mutation/ledger.ts";
 import type { DaemonResponse } from "../../governor/prime/protocol.ts";
 
 const ok: DaemonResponse = { type: "response", command: "x", success: true };
 const bad: DaemonResponse = { type: "response", command: "x", success: false, error: "Daemon worker socket closed" };
-const identity = (commandId: string) => ({ commandId, clientId: "cg:test", commandType: "execute_bash_and_wait", sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+const identity = (commandId: string) => ({ commandId, clientId: "cg:test", command: { type: "execute_bash_and_wait", activeSessionId: "a", command: "true" }, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
 
 describe("MutationLedger (D2)", () => {
 	it("records intent as DISPATCHED and refuses to reuse a command id", () => {
 		const ledger = new MutationLedger(mkdtempSync(join(tmpdir(), "cg-ledger-")));
 		const record = ledger.recordDispatch(identity("cg-1"));
 		assert.equal(record.state, "DISPATCHED");
+		assert.equal(record.commandType, "execute_bash_and_wait", "the type is taken from the command, not declared separately");
+		assert.match(record.commandDigest, COMMAND_DIGEST_PATTERN);
+		assert.deepEqual(record.command, identity("cg-1").command, "the complete command is stored when it carries no environment");
+		assert.deepEqual(record.withheld, []);
+		assert.equal(typeof record.dispatchedBy.pid, "number");
+		assert.equal(typeof record.dispatchedBy.ownerToken, "string");
 		assert.throws(() => ledger.recordDispatch(identity("cg-1")), (e: unknown) => e instanceof MutationLedgerError && e.code === "duplicate_command_id");
 	});
 
@@ -64,6 +71,18 @@ describe("MutationLedger (D2)", () => {
 		ledger.markCompleted("cg-10", ok);
 		ledger.recordDispatch(identity("cg-11"));
 		assert.deepEqual(ledger.awaitingReconciliation().map((r) => r.commandId), ["cg-9"]);
+	});
+
+	it("withholds environment-bearing fields from the stored command but digests the complete one", () => {
+		const ledger = new MutationLedger(mkdtempSync(join(tmpdir(), "cg-ledger-")));
+		const command = { type: "create", sessionPath: "/s/root.jsonl", launchEnv: { HOME: "/h", SECRET_TOKEN: "hunter2" }, config: { cwd: "/w" } };
+		const record = ledger.recordDispatch({ ...identity("cg-env"), command });
+		assert.deepEqual(record.withheld, ["launchEnv"]);
+		assert.equal("launchEnv" in record.command, false, "no environment value reaches the ledger");
+		assert.deepEqual(record.command, { type: "create", sessionPath: "/s/root.jsonl", config: { cwd: "/w" } });
+		assert.equal(record.commandDigest, commandDigest(command), "the digest covers the withheld field too");
+		const onDisk = JSON.stringify(ledger.require("cg-env"));
+		assert.ok(!onDisk.includes("hunter2"), "the secret is not on disk");
 	});
 
 	it("survives a re-open: a second ledger over the same dir reads the same states", () => {

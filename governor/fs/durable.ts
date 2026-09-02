@@ -32,35 +32,55 @@
  * readers (they see old or new, never a mix) on both platforms; the helper
  * does not add anything to that. Nothing here is safe over NFS.
  *
+ * Two more things the contract needs that a naive helper gets wrong:
+ *
+ * - `write(2)` may accept fewer bytes than asked. A helper that issues one
+ *   `writeSync` and ignores its return value can fsync and publish a
+ *   truncated record. `writeTemp` therefore writes a byte buffer in a loop
+ *   until every byte has been accepted, and fails without publishing if the
+ *   kernel makes no progress.
+ * - `mkdir(2)` creates a directory entry in the PARENT, and that entry is no
+ *   more durable than a `rename`'s until the parent is fsynced. Fsyncing
+ *   `mutations/` after creating a record inside it makes the record's name
+ *   durable in `mutations/`; it says nothing about whether `mutations/`
+ *   itself survived in the state directory. `mkdirDurable` fsyncs the parent
+ *   of every directory it creates.
+ *
  * Every function is synchronous on purpose. The callers are on the path
  * between "decide" and "send", and an `await` there would be a place for the
  * send to happen first.
  */
 
 import * as nodeFs from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 
 /** The subset of `node:fs` the helpers use, injectable so a test can record the exact sequence. */
 export interface DurableFs {
 	openSync: typeof nodeFs.openSync;
-	writeSync: (fd: number, data: string) => number;
+	/** `write(2)` semantics: returns the number of bytes accepted, which may be fewer than `length`. */
+	writeSync: (fd: number, data: Uint8Array, offset: number, length: number) => number;
 	fsyncSync: typeof nodeFs.fsyncSync;
 	closeSync: typeof nodeFs.closeSync;
 	renameSync: typeof nodeFs.renameSync;
 	linkSync: typeof nodeFs.linkSync;
 	unlinkSync: typeof nodeFs.unlinkSync;
 	readFileSync: (path: string, encoding: "utf8") => string;
+	/** Non-recursive `mkdir(2)`: throws `EEXIST` when the name exists. */
+	mkdirSync: (path: string, mode: number) => void;
 }
 
 export const NODE_FS: DurableFs = {
 	openSync: nodeFs.openSync,
-	writeSync: (fd, data) => nodeFs.writeSync(fd, data),
+	writeSync: (fd, data, offset, length) => nodeFs.writeSync(fd, data, offset, length),
 	fsyncSync: nodeFs.fsyncSync,
 	closeSync: nodeFs.closeSync,
 	renameSync: nodeFs.renameSync,
 	linkSync: nodeFs.linkSync,
 	unlinkSync: nodeFs.unlinkSync,
 	readFileSync: (path, encoding) => nodeFs.readFileSync(path, encoding),
+	mkdirSync: (path, mode) => {
+		nodeFs.mkdirSync(path, { mode });
+	},
 };
 
 let tempCounter = 0;
@@ -81,10 +101,38 @@ export function fsyncDirectory(dir: string, fs: DurableFs = NODE_FS): void {
 	}
 }
 
+/**
+ * Write every byte of `data` to `fd`, honouring short writes. Throws
+ * `ShortWrite` if a `write` accepts nothing, rather than spinning or
+ * pretending: a record that cannot be written in full is not written.
+ */
+export function writeAllSync(fd: number, data: Uint8Array, fs: DurableFs = NODE_FS): void {
+	let offset = 0;
+	while (offset < data.length) {
+		const accepted = fs.writeSync(fd, data, offset, data.length - offset);
+		if (!Number.isInteger(accepted) || accepted <= 0) {
+			throw new ShortWrite(offset, data.length, accepted);
+		}
+		offset += accepted;
+	}
+}
+
+export class ShortWrite extends Error {
+	readonly code = "short_write" as const;
+	readonly written: number;
+	readonly total: number;
+	constructor(written: number, total: number, accepted: number) {
+		super(`write accepted ${String(accepted)} bytes at offset ${written} of ${total}; the record cannot be completed`);
+		this.name = "ShortWrite";
+		this.written = written;
+		this.total = total;
+	}
+}
+
 function writeTemp(temp: string, contents: string, mode: number, fs: DurableFs): void {
 	const fd = fs.openSync(temp, "w", mode);
 	try {
-		fs.writeSync(fd, contents);
+		writeAllSync(fd, Buffer.from(contents, "utf8"), fs);
 		fs.fsyncSync(fd);
 	} finally {
 		fs.closeSync(fd);
@@ -159,6 +207,40 @@ export function createFileExclusiveDurable(path: string, contents: string, optio
 	} finally {
 		removeQuietly(temp, fs);
 	}
+}
+
+/**
+ * Create `dir` and any missing ancestors, durably: each directory that this
+ * call creates is followed by an `fsync` of ITS PARENT, so the new entry is
+ * on disk before the caller writes anything under it. Directories that
+ * already exist are left alone and not fsynced. Returns the directories
+ * created, outermost first.
+ *
+ * A component that exists but is not a directory surfaces as the error the
+ * next `mkdir` under it raises (`ENOTDIR`/`ENOENT`); nothing is removed.
+ */
+export function mkdirDurable(dir: string, options: { mode?: number; fs?: DurableFs } = {}): string[] {
+	const fs = options.fs ?? NODE_FS;
+	const mode = options.mode ?? 0o700;
+	const absolute = resolve(dir);
+	const created: string[] = [];
+	// Collect the missing suffix of the path, then create it top-down so every
+	// parent exists (and is fsynced) before its child is made.
+	const missing: string[] = [];
+	for (let current = absolute; !nodeFs.existsSync(current) && dirname(current) !== current; current = dirname(current)) {
+		missing.unshift(current);
+	}
+	for (const path of missing) {
+		try {
+			fs.mkdirSync(path, mode);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+			throw error;
+		}
+		fsyncDirectory(dirname(path), fs);
+		created.push(path);
+	}
+	return created;
 }
 
 /** Remove `path` durably: unlink -> fsync parent. `ENOENT` is not an error. */

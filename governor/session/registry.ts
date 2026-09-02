@@ -29,10 +29,10 @@
  * can never delete a lease it did not inspect. The mutex is never stolen.
  */
 
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { createFileExclusiveDurable, unlinkDurable, writeFileDurable } from "../fs/durable.ts";
+import { createFileExclusiveDurable, mkdirDurable, unlinkDurable, writeAllSync, writeFileDurable } from "../fs/durable.ts";
 import { classifyProcessIdentity, currentProcessIdentity, identityProvesProcessOver, LIVE_PROBE, type ProcessIdentity, type ProcessIdentityVerdict, type ProcessProbe } from "../process/identity.ts";
 import type { CanonicalSessionPath } from "./paths.ts";
 
@@ -212,7 +212,7 @@ export class SessionRegistry {
 
 	constructor(stateDir: string, options: SessionRegistryOptions = {}) {
 		this.dir = join(stateDir, "sessions");
-		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+		mkdirDurable(this.dir, { mode: 0o700 });
 		this.#probe = options.processProbe ?? LIVE_PROBE;
 		this.#self = options.self;
 	}
@@ -466,7 +466,7 @@ export class SessionRegistry {
 		}
 		try {
 			try {
-				writeSync(fd, `${JSON.stringify({ ...self, stage: "reclaim" })}\n`);
+				writeAllSync(fd, Buffer.from(`${JSON.stringify({ ...self, stage: "reclaim" })}\n`, "utf8"));
 			} finally {
 				closeSync(fd);
 			}

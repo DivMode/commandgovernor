@@ -156,6 +156,46 @@ UNCERTAIN, a stored success resolves the record from exact evidence.
 `awaitingReconciliation()` is the attention surface: the UNCERTAIN records,
 oldest first. There is no automatic consumer of it by design.
 
+**The crash window.** A Governor that dies after writing DISPATCHED and
+before recording a result leaves the record DISPATCHED, which is the
+truth, but a surface that listed only UNCERTAIN would never show it. Every
+record therefore carries `dispatchedBy`: the dispatching Governor's
+`(ownerToken, pid, processStartId)`, the same identity a recovery lease
+holder carries. `MutationLedger.adoptAbandoned()` classifies each
+DISPATCHED record's dispatcher with the same verdicts the lease fence
+uses: `gone` or `replaced` (pid reuse) adopts the record as UNCERTAIN with
+reason `dispatcher_lost` and the verdict on the transition; `current` is a
+live Governor sharing the state directory, whose in-flight record is left
+alone so that its own completion remains a legal transition; `unknown` is
+reported and left, never adopted. The Governor runs adoption at
+construction (`startupAdoption`) and `awaitingReconciliation()` runs it
+before listing, so the obligation is on the surface whichever way a
+successor looks. `conformance/tier1/governor-crash-recovery.test.ts` is a
+real child-process Governor SIGKILLed after its DISPATCHED write: a
+second Governor is fenced while the child lives, adopts once it is dead,
+and probes under the original id, identity and command;
+`ledger-adoption.test.ts` stages `gone`, `replaced`, `current`, `unknown`,
+this process's own record, two concurrent adopters, and a record with no
+dispatcher identity through the injectable process probe.
+
+**The exact command.** Prime answers a repeated `clientId + commandId`
+from its stored result only if the supervisor received the original. If
+the Governor died before the envelope reached the socket there is no
+receipt, and whatever the probe carries under the old id is admitted as
+new work -- correctly, from Prime's side. The record therefore stores
+`commandDigest`, the SHA-256 of the canonical JSON (keys sorted
+recursively) of the COMPLETE wire command, and `command`, the command
+itself less any field that carries environment values (`launchEnv`,
+`env`; `withheld` names what was removed, and no environment value is
+ever written to the ledger). `probeStoredResult` refuses with
+`command_mismatch` before any I/O unless the offered command's digest
+equals the record's: a different body of the same type, a different
+incarnation id, an added or removed field, or a different environment.
+When the record holds the complete command the probe may omit it and the
+stored command is re-presented verbatim, so nobody has to remember a
+command across a restart; a record that withheld `launchEnv` must be
+given the command again, and it must digest the same.
+
 The classification policy is not injectable. `NAIVE_POLICY` exists for the
 pure classifier tests and the D2 test's re-classification of a captured
 response; a `Governor` always constructs with `DEFAULT_POLICY` and asserts
@@ -179,10 +219,11 @@ Governor's id and the live connection's id all equal the record's. A
 Governor that restarted over a re-initialised state directory therefore
 cannot re-present an old `commandId` under a new `clientId` (which Prime
 would run as new work); the record stays UNCERTAIN for a human. A probe
-must also name the record's command type. `conformance/tier1/governor-probe-identity.test.ts`
-proves each refusal against a fake daemon socket that records every byte
-it receives, and `client-identity.test.ts` races eight processes through
-first initialisation.
+must also carry the record's exact command (see *The exact command*
+above). `conformance/tier1/governor-probe-identity.test.ts`
+proves each refusal, identity and command, against a fake daemon socket
+that records every byte it receives, and `client-identity.test.ts` races
+eight processes through first initialisation.
 
 **Regression tests.** `conformance/runtime/d2-worker-loss-uncertain.test.ts`
 is the exact s1-07 (c) reproducer: effect on disk, SIGKILL the worker,
@@ -327,12 +368,24 @@ goes through `governor/fs/durable.ts`:
 | `writeFileDurable` | write temp → `fsync` temp → close → `rename` → `fsync` parent | mutation records, session records |
 | `createFileExclusiveDurable` | write temp → `fsync` temp → close → `link` (fails `EEXIST`, never replaces) → `fsync` parent → unlink temp; a name that vanishes between the `EEXIST` and the read is reported `vanished` for the caller to retry, never thrown | client identity, recovery lease |
 | `unlinkDurable` | `unlink` → `fsync` parent | lease release; the dead lease inside a reclaim's critical section |
+| `mkdirDurable` | for each missing component, top-down: `mkdir` → `fsync` ITS parent | the state directory, `mutations/`, `sessions/` |
 
 The exclusive create publishes an already-complete, already-fsynced file,
 so no concurrent reader can observe an empty or partial identity or lease,
 which an `O_EXCL` open followed by a write would allow. A failed directory
 `fsync` is an error: a record whose name is not known to be durable is not
 reported as written.
+
+Two details the contract depends on and a naive helper gets wrong. A
+`write(2)` may accept fewer bytes than asked; `writeAllSync` writes the
+byte buffer in a loop until every byte is accepted and throws
+`ShortWrite` (nothing published) if the kernel makes no progress, so a
+truncated record can never be fsynced and renamed into place. And a
+`mkdir(2)` creates an entry in the PARENT that is no more durable than a
+`rename`'s: fsyncing `mutations/` after creating a record inside it makes
+the record's name durable in `mutations/` and says nothing about whether
+`mutations/` itself survived in the state directory, so every directory
+the Governor creates is followed by an `fsync` of its parent.
 
 What is relied on, per platform: on Linux, `fsync(2)` on the parent
 directory fd makes the `rename`/`link`/`unlink` entry durable (the
@@ -343,7 +396,10 @@ issues `fcntl(F_FULLFSYNC)` (flush through the drive cache; plain
 refused, e.g. on a directory fd. Nothing here is claimed for NFS.
 `conformance/tier1/durable.test.ts` records the exact call sequence
 through an instrumented `fs` and asserts the order and the failure
-behaviour, since power loss itself cannot be staged in a test.
+behaviour, since power loss itself cannot be staged in a test; it also
+drives the writers through a kernel that accepts seven bytes per write,
+one that stalls, and shows that the single-write helper this replaced
+would have truncated the record.
 
 ## Known limits, recorded rather than discovered later
 
@@ -352,6 +408,19 @@ behaviour, since power loss itself cannot be staged in a test.
   conformance suite needs the raw protocol for its negative controls. A
   caller that speaks to the socket directly bypasses D8 preflight, the
   ledger and the incarnation fence. Nothing automatic does so.
+- **A dispatcher whose identity is `unknown` is never adopted.** A
+  DISPATCHED record whose Governor's start identity was not readable at
+  dispatch, or is not readable now, stays DISPATCHED and is listed in the
+  adoption report's `undecidable`, not on the attention surface. Adopting
+  it could make a live Governor's own completion an illegal transition;
+  an operator who has confirmed the process is over resolves it. On macOS
+  the start identity has one-second resolution, the same limit Prime's
+  own lease accepts.
+- **A `create` record cannot be re-presented from the ledger alone.**
+  `launchEnv` is withheld from the stored command, so probing an uncertain
+  `create` needs the command supplied again, and it must digest the same
+  as the original -- including the environment. A changed `PATH` is a
+  refusal, by design.
 - **One state directory per fleet.** The recovery lease and the client
   identity (`client-identity.json`) both live in the state directory. Two
   Governors with different state directories are two clients to Prime:

@@ -19,7 +19,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { createFileExclusiveDurable, type DurableFs, fsyncDirectory, NODE_FS, unlinkDurable, writeFileDurable } from "../../governor/fs/durable.ts";
+import { createFileExclusiveDurable, type DurableFs, fsyncDirectory, mkdirDurable, NODE_FS, ShortWrite, unlinkDurable, writeAllSync, writeFileDurable } from "../../governor/fs/durable.ts";
 
 type Call = { readonly op: string; readonly path?: string; readonly fd?: number; readonly to?: string };
 
@@ -40,10 +40,10 @@ function recorder(failAt?: { op: string; path?: RegExp }): { fs: DurableFs; call
 			calls.push({ op: "open", path, fd });
 			return fd;
 		}) as DurableFs["openSync"],
-		writeSync: (fd, data) => {
+		writeSync: (fd, data, offset, length) => {
 			maybeFail("write", fdPaths.get(fd));
 			calls.push({ op: "write", fd, path: fdPaths.get(fd) });
-			return NODE_FS.writeSync(fd, data);
+			return NODE_FS.writeSync(fd, data, offset, length);
 		},
 		fsyncSync: (fd) => {
 			maybeFail("fsync", fdPaths.get(fd));
@@ -71,6 +71,11 @@ function recorder(failAt?: { op: string; path?: RegExp }): { fs: DurableFs; call
 		readFileSync: (path, encoding) => {
 			calls.push({ op: "read", path });
 			return NODE_FS.readFileSync(path, encoding);
+		},
+		mkdirSync: (path, mode) => {
+			maybeFail("mkdir", path);
+			calls.push({ op: "mkdir", path });
+			NODE_FS.mkdirSync(path, mode);
 		},
 	};
 	return { fs, calls };
@@ -192,6 +197,111 @@ describe("DUR: createFileExclusiveDurable", () => {
 		const { fs } = recorder({ op: "fsync", path: /\.tmp$/ });
 		assert.throws(() => createFileExclusiveDurable(target, "x", { fs }), /injected fsync failure/);
 		assert.deepEqual(readdirSync(dir), []);
+	});
+});
+
+describe("DUR: short writes", () => {
+	/** A kernel that accepts at most `chunk` bytes per write, or nothing at all after `stallAfter` bytes. */
+	function shortWriter(chunk: number, stallAfter = Number.POSITIVE_INFINITY): { fs: DurableFs; writes: number[] } {
+		const writes: number[] = [];
+		let total = 0;
+		const fs: DurableFs = {
+			...NODE_FS,
+			writeSync: (fd, data, offset, length) => {
+				if (total >= stallAfter) {
+					writes.push(0);
+					return 0;
+				}
+				const n = Math.min(chunk, length);
+				const accepted = NODE_FS.writeSync(fd, data, offset, n);
+				writes.push(accepted);
+				total += accepted;
+				return accepted;
+			},
+		};
+		return { fs, writes };
+	}
+
+	it("writeAllSync keeps writing until every byte is accepted", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(dir, "record.json");
+		const contents = JSON.stringify({ padding: "x".repeat(1000) });
+		const { fs, writes } = shortWriter(7);
+		writeFileDurable(target, contents, { fs });
+		assert.equal(readFileSync(target, "utf8"), contents, "the record is complete despite the kernel accepting 7 bytes at a time");
+		assert.ok(writes.length >= Math.ceil(contents.length / 7), `many short writes were needed (${writes.length})`);
+		assert.equal(writes.reduce((a, b) => a + b, 0), Buffer.byteLength(contents), "exactly the byte length was written, no more");
+	});
+
+	it("a write that makes no progress throws ShortWrite and nothing is published under the name", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(dir, "record.json");
+		const contents = "0123456789".repeat(20);
+		const { fs } = shortWriter(16, 48);
+		assert.throws(() => writeFileDurable(target, contents, { fs }), (e: unknown) => e instanceof ShortWrite && e.written === 48 && e.total === 200);
+		assert.equal(existsSync(target), false, "a truncated record was never renamed into place");
+		assert.deepEqual(readdirSync(dir), [], "and the truncated temp was removed");
+		assert.throws(() => createFileExclusiveDurable(target, contents, { fs }), ShortWrite);
+		assert.deepEqual(readdirSync(dir), []);
+	});
+
+	it("the byte count is measured in bytes, not characters", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(dir, "record.json");
+		const contents = "héllo wörld ✓"; // multi-byte
+		const { fs, writes } = shortWriter(3);
+		writeFileDurable(target, contents, { fs });
+		assert.equal(readFileSync(target, "utf8"), contents);
+		assert.equal(writes.reduce((a, b) => a + b, 0), Buffer.byteLength(contents, "utf8"));
+		// The negative control: the pre-review helper issued one write and ignored its return.
+		const fd = NODE_FS.openSync(join(dir, "naive"), "w", 0o600);
+		const accepted = fs.writeSync(fd, Buffer.from(contents, "utf8"), 0, Buffer.byteLength(contents, "utf8"));
+		NODE_FS.closeSync(fd);
+		assert.ok(accepted < Buffer.byteLength(contents, "utf8"), "one write under this kernel would have truncated the record");
+		assert.notEqual(readFileSync(join(dir, "naive"), "utf8"), contents);
+	});
+
+	it("writeAllSync writes a zero-length buffer without calling write", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const { fs, writes } = shortWriter(1);
+		const fd = NODE_FS.openSync(join(dir, "empty"), "w", 0o600);
+		writeAllSync(fd, Buffer.alloc(0), fs);
+		NODE_FS.closeSync(fd);
+		assert.deepEqual(writes, []);
+	});
+});
+
+describe("DUR: mkdirDurable", () => {
+	it("creates each missing directory and fsyncs its parent, top-down; existing directories are untouched", () => {
+		const root = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(root, "state", "mutations");
+		const { fs, calls } = recorder();
+		const created = mkdirDurable(target, { fs });
+		assert.deepEqual(created, [join(root, "state"), target]);
+		assert.deepEqual(ops(calls), ["mkdir", "open", "fsync", "close", "mkdir", "open", "fsync", "close"]);
+		assert.equal(calls[0]!.path, join(root, "state"));
+		assert.equal(calls[1]!.path, root, "the state dir's entry is made durable in ITS parent");
+		assert.equal(calls[4]!.path, target);
+		assert.equal(calls[5]!.path, join(root, "state"), "and mutations/ in the state dir");
+		// Idempotent, and silent about what already exists: no mkdir attempt, no fsync.
+		const again = recorder();
+		assert.deepEqual(mkdirDurable(target, { fs: again.fs }), []);
+		assert.deepEqual(ops(again.calls), []);
+	});
+
+	it("a failed parent fsync is an error: the directory exists but was not reported durable", () => {
+		const root = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		const target = join(root, "state");
+		const { fs } = recorder({ op: "fsync", path: new RegExp(`${basename(root).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) });
+		assert.throws(() => mkdirDurable(target, { fs }), /injected fsync failure/);
+		assert.equal(existsSync(target), true);
+	});
+
+	it("a component that exists as a file is an error, and nothing is removed", () => {
+		const root = mkdtempSync(join(tmpdir(), "cg-durable-"));
+		writeFileSync(join(root, "state"), "not a directory");
+		assert.throws(() => mkdirDurable(join(root, "state", "mutations")));
+		assert.equal(readFileSync(join(root, "state"), "utf8"), "not a directory");
 	});
 });
 

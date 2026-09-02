@@ -10,7 +10,8 @@
  *
  *   DISPATCHED -> COMPLETED   (success response)
  *   DISPATCHED -> FAILED      (typed pre-effect rejection)
- *   DISPATCHED -> UNCERTAIN   (anything else)
+ *   DISPATCHED -> UNCERTAIN   (anything else, including the dispatching
+ *                              Governor process being proven over)
  *   UNCERTAIN  -> COMPLETED   (resolveUncertain with effect_observed)
  *   UNCERTAIN  -> FAILED      (resolveUncertain with effect_absent_proven)
  *
@@ -19,14 +20,35 @@
  * for an existing record. Re-dispatch of an uncertain mutation is a human
  * decision expressed as a NEW command with its own record and an explicit
  * `supersedes` link, never an automatic one.
+ *
+ * Two facts every record carries so that the crash window the ledger exists
+ * for cannot swallow an obligation:
+ *
+ * - **Who dispatched it.** `dispatchedBy` is the Governor process's
+ *   `(ownerToken, pid, processStartId)`. A record left DISPATCHED by a
+ *   process that is proven over (`gone`, or its pid `replaced` by another
+ *   process) is ADOPTED as UNCERTAIN by {@link MutationLedger.adoptAbandoned},
+ *   which the attention surface runs first. A record whose dispatcher is
+ *   `current` is in flight in a live Governor sharing this state directory
+ *   and is left alone; one whose dispatcher is `unknown` is reported, never
+ *   adopted, because adopting a live dispatcher's record would make its own
+ *   completion an illegal transition.
+ * - **What was dispatched.** `commandDigest` is the canonical digest of the
+ *   complete wire command, and `command` is the command itself less any
+ *   field that carries environment values (`withheld` names them; env values
+ *   never touch the ledger). A probe of the record must re-present a command
+ *   with the same digest, or it is refused before any I/O: if Prime never
+ *   received the original, it will run whatever the probe carries.
  */
 
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { writeFileDurable } from "../fs/durable.ts";
-import type { DaemonResponse } from "../prime/protocol.ts";
+import { mkdirDurable, writeFileDurable } from "../fs/durable.ts";
+import type { DaemonCommand, DaemonResponse } from "../prime/protocol.ts";
+import { classifyProcessIdentity, LIVE_PROBE, type ProcessIdentity, type ProcessIdentityVerdict, type ProcessProbe, identityProvesProcessOver } from "../process/identity.ts";
 import type { PreEffectProof, UncertainReason } from "./classify.ts";
+import { commandDigest } from "./digest.ts";
 
 export type MutationState = "DISPATCHED" | "COMPLETED" | "FAILED" | "UNCERTAIN";
 
@@ -42,16 +64,33 @@ export interface MutationTransition {
 	readonly uncertainReason?: UncertainReason;
 	readonly evidence?: ResolutionEvidence;
 	readonly response?: DaemonResponse;
+	/** For an adoption: the verdict on the dispatching process and who adopted. */
+	readonly adoption?: { readonly dispatcher: DispatcherIdentity; readonly verdict: ProcessIdentityVerdict; readonly adoptedBy: DispatcherIdentity };
 }
 
+/** The Governor process that wrote a record, in the same terms as a recovery lease holder. */
+export interface DispatcherIdentity extends ProcessIdentity {
+	readonly ownerToken: string;
+}
+
+/** Command fields that carry environment values and are never stored in a record. */
+export const WITHHELD_COMMAND_FIELDS: readonly string[] = ["launchEnv", "env"];
+
 export interface MutationRecord {
-	readonly schemaVersion: 1;
+	readonly schemaVersion: 2;
 	readonly commandId: string;
 	readonly clientId: string;
 	readonly commandType: string;
+	/** The wire command less `withheld` fields. Complete when `withheld` is empty. */
+	readonly command: DaemonCommand;
+	/** Names of fields removed from `command` before storage. */
+	readonly withheld: readonly string[];
+	/** `sha256:` digest of the canonical JSON of the COMPLETE wire command. */
+	readonly commandDigest: string;
 	readonly sessionId: string;
 	readonly activeSessionId: string;
 	readonly incarnationIndex: number;
+	readonly dispatchedBy: DispatcherIdentity;
 	readonly state: MutationState;
 	readonly dispatchedAt: string;
 	readonly transitions: readonly MutationTransition[];
@@ -72,6 +111,25 @@ export class MutationLedgerError extends Error {
 	}
 }
 
+/** What {@link MutationLedger.adoptAbandoned} did and did not do, for the record. */
+export interface AdoptionReport {
+	/** DISPATCHED records whose dispatcher was proven over; now UNCERTAIN. */
+	readonly adopted: readonly MutationRecord[];
+	/** DISPATCHED records whose dispatcher is alive (`current`), including this process's own. Left alone. */
+	readonly inFlight: readonly MutationRecord[];
+	/** DISPATCHED records whose dispatcher cannot be classified. Left alone and reported: an operator decides. */
+	readonly undecidable: readonly { readonly record: MutationRecord; readonly verdict: ProcessIdentityVerdict }[];
+}
+
+export interface MutationLedgerOptions {
+	/** How dispatcher processes are inspected. Injectable so the suite can fabricate pid reuse. */
+	readonly processProbe?: ProcessProbe;
+	/** This process's identity, as written into the records it dispatches and the adoptions it makes. */
+	readonly self?: ProcessIdentity;
+	/** This Governor instance's owner token. */
+	readonly ownerToken?: string;
+}
+
 /**
  * Every record write is durable through `writeFileDurable`: temp, fsync,
  * rename, fsync of the containing directory. The ledger is the authority a
@@ -82,12 +140,35 @@ function writeAtomic(path: string, contents: string): void {
 	writeFileDurable(path, contents, { mode: 0o600 });
 }
 
+/** The command as stored: complete unless it carries environment values. */
+function storableCommand(command: DaemonCommand): { command: DaemonCommand; withheld: string[] } {
+	const stored: Record<string, unknown> = { ...command };
+	const withheld: string[] = [];
+	for (const field of WITHHELD_COMMAND_FIELDS) {
+		if (field in stored) {
+			delete stored[field];
+			withheld.push(field);
+		}
+	}
+	return { command: stored as DaemonCommand, withheld };
+}
+
 export class MutationLedger {
 	readonly dir: string;
+	readonly #probe: ProcessProbe;
+	readonly #self: DispatcherIdentity;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, options: MutationLedgerOptions = {}) {
 		this.dir = join(stateDir, "mutations");
-		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+		mkdirDurable(this.dir, { mode: 0o700 });
+		this.#probe = options.processProbe ?? LIVE_PROBE;
+		const self = options.self ?? { pid: process.pid };
+		this.#self = { ...self, ownerToken: options.ownerToken ?? `pid#${self.pid}` };
+	}
+
+	/** The identity this ledger writes as dispatcher. */
+	get self(): DispatcherIdentity {
+		return this.#self;
 	}
 
 	#path(commandId: string): string {
@@ -117,20 +198,76 @@ export class MutationLedger {
 			.sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt));
 	}
 
-	/** Records that need a human: UNCERTAIN, oldest first. */
+	/**
+	 * Records that need a human: UNCERTAIN, oldest first. Abandoned DISPATCHED
+	 * records are adopted first, so a Governor that died inside its crash
+	 * window cannot make an obligation disappear from this list.
+	 */
 	awaitingReconciliation(): MutationRecord[] {
+		this.adoptAbandoned();
 		return this.list().filter((record) => record.state === "UNCERTAIN");
+	}
+
+	/**
+	 * Every DISPATCHED record whose dispatching process is proven over becomes
+	 * UNCERTAIN (`dispatcher_lost`). The verdict is the same one the recovery
+	 * lease uses: `gone` or `replaced` adopts; `current` is a live owner and is
+	 * fenced; `unknown` is reported and left. A record dispatched by THIS
+	 * ledger's owner token is in flight here and never inspected.
+	 */
+	adoptAbandoned(): AdoptionReport {
+		const adopted: MutationRecord[] = [];
+		const inFlight: MutationRecord[] = [];
+		const undecidable: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
+		for (const record of this.list()) {
+			if (record.state !== "DISPATCHED") continue;
+			const dispatcher = record.dispatchedBy;
+			if (dispatcher === undefined || typeof dispatcher.pid !== "number") {
+				undecidable.push({ record, verdict: "unknown" });
+				continue;
+			}
+			if (dispatcher.ownerToken === this.#self.ownerToken) {
+				inFlight.push(record);
+				continue;
+			}
+			const verdict = classifyProcessIdentity(dispatcher, this.#probe);
+			if (verdict === "current") {
+				inFlight.push(record);
+				continue;
+			}
+			if (!identityProvesProcessOver(verdict)) {
+				undecidable.push({ record, verdict });
+				continue;
+			}
+			// Re-read under the transition: another adopter may have got here first, in
+			// which case the state is no longer DISPATCHED and the transition is refused.
+			try {
+				adopted.push(
+					this.#transition(record.commandId, ["DISPATCHED"], {
+						at: new Date().toISOString(),
+						to: "UNCERTAIN",
+						reason: `dispatcher_lost: the dispatching Governor process (pid ${dispatcher.pid}) is ${verdict}; the command may or may not have reached the substrate`,
+						uncertainReason: "dispatcher_lost",
+						adoption: { dispatcher, verdict, adoptedBy: this.#self },
+					}),
+				);
+			} catch (error) {
+				if (!(error instanceof MutationLedgerError) || error.code !== "illegal_transition") throw error;
+			}
+		}
+		return { adopted, inFlight, undecidable };
 	}
 
 	/**
 	 * Durably record intent. Must be called, and must return, before the
 	 * envelope is written to the socket. Refuses an id that already exists:
-	 * a command id is dispatched once, ever.
+	 * a command id is dispatched once, ever. The complete wire command is
+	 * digested; environment-bearing fields are withheld from the stored copy.
 	 */
 	recordDispatch(input: {
 		commandId: string;
 		clientId: string;
-		commandType: string;
+		command: DaemonCommand;
 		sessionId: string;
 		activeSessionId: string;
 		incarnationIndex: number;
@@ -146,14 +283,19 @@ export class MutationLedger {
 			}
 		}
 		const now = new Date().toISOString();
+		const stored = storableCommand(input.command);
 		const record: MutationRecord = {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			commandId: input.commandId,
 			clientId: input.clientId,
-			commandType: input.commandType,
+			commandType: input.command.type,
+			command: stored.command,
+			withheld: stored.withheld,
+			commandDigest: commandDigest(input.command),
 			sessionId: input.sessionId,
 			activeSessionId: input.activeSessionId,
 			incarnationIndex: input.incarnationIndex,
+			dispatchedBy: this.#self,
 			state: "DISPATCHED",
 			dispatchedAt: now,
 			transitions: [{ at: now, to: "DISPATCHED", reason: "intent recorded before send" }],

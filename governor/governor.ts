@@ -18,8 +18,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
 
+import { mkdirDurable } from "./fs/durable.ts";
 import { ClientIdentityError, type ClientIdentityErrorCode, loadOrCreateClientIdentity, readClientIdentity } from "./prime/client-identity.ts";
 import { DaemonClient, RequestTimeout, TransportLost, connectWithRetry } from "./prime/daemon-client.ts";
 import { buildLaunchEnv, type LaunchEnvOptions } from "./prime/env.ts";
@@ -34,7 +34,8 @@ import {
 import { expectedSubstrate } from "./prime/substrate.ts";
 import { assertProductionPolicy, classifyMutationOutcome, type ClassificationPolicy, DEFAULT_POLICY, type Verdict } from "./mutation/classify.ts";
 import type { DaemonEventCursor } from "./prime/protocol.ts";
-import { MutationLedger, type MutationRecord, type ResolutionEvidence } from "./mutation/ledger.ts";
+import { commandDigest } from "./mutation/digest.ts";
+import { type AdoptionReport, MutationLedger, type MutationRecord, type ResolutionEvidence } from "./mutation/ledger.ts";
 import { currentProcessIdentity } from "./process/identity.ts";
 import { canonicalSessionPath, type CanonicalSessionPath } from "./session/paths.ts";
 import { type Incarnation, RecoveryLeaseContended, RecoveryLeaseHeld, RecoveryReclaimBlocked, type SessionRecord, SessionRegistry } from "./session/registry.ts";
@@ -149,6 +150,31 @@ export class ClientIdentityMismatch extends Error {
 
 export type ClientIdentityMismatchReason = "identity_file_unavailable" | "identity_file_differs" | "governor_differs" | "connection_differs";
 
+/**
+ * The command offered for a probe is not the command the record was
+ * dispatched with, or the record does not hold enough of it to know. Thrown
+ * before any socket I/O; nothing was sent. Prime answers a repeated id from
+ * its stored result only if it received the original; otherwise it runs
+ * whatever the probe carries, so the Governor must prove the two are equal.
+ */
+export class CommandMismatch extends Error {
+	readonly code = "command_mismatch" as const;
+	readonly commandId: string;
+	readonly reason: CommandMismatchReason;
+	readonly recordedDigest: string;
+	readonly offeredDigest: string | undefined;
+	constructor(commandId: string, reason: CommandMismatchReason, recordedDigest: string, offeredDigest: string | undefined, detail: string) {
+		super(`refusing to probe ${commandId}: ${detail}; a probe re-presents the same command (${reason}); nothing was sent`);
+		this.name = "CommandMismatch";
+		this.commandId = commandId;
+		this.reason = reason;
+		this.recordedDigest = recordedDigest;
+		this.offeredDigest = offeredDigest;
+	}
+}
+
+export type CommandMismatchReason = "type_differs" | "digest_differs" | "command_not_stored";
+
 function summaryOf(value: unknown, what: string): SessionSummary {
 	if (!isSessionSummary(value)) throw new Error(`${what}: response data is not a session summary`);
 	return value;
@@ -162,24 +188,36 @@ export class Governor {
 	readonly registry: SessionRegistry;
 	readonly ledger: MutationLedger;
 	readonly options: GovernorOptions;
+	/**
+	 * What construction found left DISPATCHED by Governor processes that are
+	 * proven over: adopted as UNCERTAIN before this instance sends anything.
+	 */
+	readonly startupAdoption: AdoptionReport;
 	#client: DaemonClient | undefined;
 	readonly #policy: ClassificationPolicy;
 
 	constructor(options: GovernorOptions) {
-		mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
+		// The state directory's own entry is made durable before anything is
+		// written under it (governor/fs/durable.ts, mkdirDurable).
+		mkdirDurable(options.stateDir, { mode: 0o700 });
 		this.options = options;
 		this.stateDir = options.stateDir;
 		// One journal identity per state directory, created atomically and
 		// durably, never overwritten (governor/prime/client-identity.ts).
 		this.clientId = loadOrCreateClientIdentity(options.stateDir).record.clientId;
 		this.ownerToken = `${this.clientId}#${process.pid}#${randomUUID().slice(0, 8)}`;
-		this.registry = new SessionRegistry(options.stateDir, { self: currentProcessIdentity() });
-		this.ledger = new MutationLedger(options.stateDir);
+		const self = currentProcessIdentity();
+		this.registry = new SessionRegistry(options.stateDir, { self });
+		this.ledger = new MutationLedger(options.stateDir, { self, ownerToken: this.ownerToken });
 		// The policy is not injectable. The naive policy exists for the pure
 		// classifier tests only; a Governor always runs the production one, and
 		// says so every time it is constructed.
 		this.#policy = DEFAULT_POLICY;
 		assertProductionPolicy(this.#policy);
+		// A predecessor that died inside its crash window (DISPATCHED written,
+		// result never recorded) left an obligation. Surface it now, fenced by
+		// process identity so a live Governor's in-flight record is untouched.
+		this.startupAdoption = this.ledger.adoptAbandoned();
 	}
 
 	get client(): DaemonClient {
@@ -345,7 +383,7 @@ export class Governor {
 		this.ledger.recordDispatch({
 			commandId,
 			clientId: this.clientId,
-			commandType: command.type,
+			command,
 			...identity,
 		});
 		const verdict = await this.#send(client, command, commandId, timeoutMs);
@@ -413,21 +451,45 @@ export class Governor {
 	}
 
 	/**
-	 * Fetch the substrate's stored result for an UNCERTAIN command by
-	 * re-presenting the SAME `clientId + commandId`. Prime's journal answers a
-	 * journaled id from its stored result without executing; the answer is
-	 * classified with the same policy, so a stored untyped failure stays
-	 * UNCERTAIN. Explicit, never automatic, and documented: if the supervisor
-	 * never journaled the receipt, Prime treats the id as new work.
+	 * The exact command a probe of `record` may carry. Omitting `offered` uses
+	 * the stored command when the record holds all of it; a record that
+	 * withheld environment values cannot be reconstructed and must be given the
+	 * command again. Either way the digest of the complete command must equal
+	 * the record's, byte for byte in canonical form, or the probe is refused.
 	 */
-	async probeStoredResult(commandId: string, command: DaemonCommand, timeoutMs = 60_000): Promise<{ record: MutationRecord; verdict: Verdict }> {
+	#assertProbeCommand(record: MutationRecord, offered: DaemonCommand | undefined): DaemonCommand {
+		if (offered === undefined) {
+			if (record.withheld.length > 0) {
+				throw new CommandMismatch(record.commandId, "command_not_stored", record.commandDigest, undefined, `the record withheld ${record.withheld.join(", ")} and cannot reconstruct the command; supply it`);
+			}
+			offered = record.command;
+		}
+		if (offered.type !== record.commandType) {
+			throw new CommandMismatch(record.commandId, "type_differs", record.commandDigest, undefined, `the record is a ${record.commandType}, not a ${offered.type}`);
+		}
+		const digest = commandDigest(offered);
+		if (digest !== record.commandDigest) {
+			throw new CommandMismatch(record.commandId, "digest_differs", record.commandDigest, digest, `the offered ${offered.type} is not the dispatched one (${digest} != ${record.commandDigest})`);
+		}
+		return offered;
+	}
+
+	/**
+	 * Fetch the substrate's stored result for an UNCERTAIN command by
+	 * re-presenting the SAME `clientId + commandId` AND the same command.
+	 * Prime's journal answers a journaled id from its stored result without
+	 * executing; the answer is classified with the same policy, so a stored
+	 * untyped failure stays UNCERTAIN. Explicit, never automatic, and
+	 * documented: if the supervisor never journaled the receipt, Prime treats
+	 * the id as new work -- which is why the command is bound to the record's
+	 * digest before anything is sent.
+	 */
+	async probeStoredResult(commandId: string, command?: DaemonCommand, timeoutMs = 60_000): Promise<{ record: MutationRecord; verdict: Verdict }> {
 		const record = this.ledger.require(commandId);
 		if (record.state !== "UNCERTAIN") {
 			throw new Error(`${commandId} is ${record.state}; only an UNCERTAIN command may be probed`);
 		}
-		if (command.type !== record.commandType) {
-			throw new Error(`refusing to probe ${commandId}: the record is a ${record.commandType}, not a ${command.type}; a probe re-presents the same command`);
-		}
+		command = this.#assertProbeCommand(record, command);
 		// The journal identity is `clientId + commandId`. The record's clientId is
 		// the authority; the probe goes out only if the identity on disk, this
 		// Governor, and the connection that would carry the envelope all agree
@@ -579,9 +641,18 @@ export class Governor {
 		return this.registry.assertCurrentGeneration(sessionId, cursor.generation);
 	}
 
-	/** Mutations awaiting human reconciliation: UNCERTAIN records, oldest first. */
+	/**
+	 * Mutations awaiting human reconciliation: UNCERTAIN records, oldest
+	 * first. Abandoned DISPATCHED records (their Governor process proven over)
+	 * are adopted first, so the list is the whole obligation.
+	 */
 	awaitingReconciliation(): MutationRecord[] {
 		return this.ledger.awaitingReconciliation();
+	}
+
+	/** Adopt abandoned DISPATCHED records now and report what was and was not adopted. */
+	adoptAbandonedDispatches(): AdoptionReport {
+		return this.ledger.adoptAbandoned();
 	}
 }
 

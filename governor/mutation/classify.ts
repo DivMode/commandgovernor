@@ -63,7 +63,9 @@ export type UncertainReason =
 	| "typed_failure_ambiguous"
 	| "typed_failure_unreviewed"
 	| "transport_lost"
-	| "timeout";
+	| "timeout"
+	/** Not a classifier verdict: the ledger adopts a DISPATCHED record whose Governor process is proven over. */
+	| "dispatcher_lost";
 
 export type Verdict =
 	| { readonly verdict: "completed"; readonly response: DaemonSuccessResponse }

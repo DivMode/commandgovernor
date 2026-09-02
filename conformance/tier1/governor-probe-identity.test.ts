@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 
-import { ClientIdentityMismatch, Governor } from "../../governor/governor.ts";
+import { ClientIdentityMismatch, CommandMismatch, Governor } from "../../governor/governor.ts";
 import { clientIdentityPath, loadOrCreateClientIdentity, readClientIdentity } from "../../governor/prime/client-identity.ts";
 import { expectedSubstrate } from "../../governor/prime/substrate.ts";
 
@@ -56,13 +56,13 @@ function governorOver(stateDir: string): Governor {
 	});
 }
 
+const command = { type: "execute_bash_and_wait", activeSessionId: "a", command: "true" };
+
 /** An UNCERTAIN record under `clientId`, written through the ledger so it is a real record, not a hand-made file. */
 function uncertainRecord(governor: Governor, clientId: string, commandId: string) {
-	governor.ledger.recordDispatch({ commandId, clientId, commandType: "execute_bash_and_wait", sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+	governor.ledger.recordDispatch({ commandId, clientId, command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
 	return governor.ledger.markUncertain(commandId, "transport_lost", undefined, "fabricated for the fence test");
 }
-
-const command = { type: "execute_bash_and_wait", activeSessionId: "a", command: "true" };
 
 describe("IDENT: probeStoredResult fails closed on any client-identity doubt, before socket I/O", () => {
 	it("a record whose clientId is not this Governor's is refused, even with a live connection", async () => {
@@ -131,8 +131,55 @@ describe("IDENT: probeStoredResult fails closed on any client-identity doubt, be
 		await governor.connect(5000);
 		uncertainRecord(governor, governor.clientId, "cg-type");
 		const before = received.length;
-		await assert.rejects(governor.probeStoredResult("cg-type", { type: "prompt", message: "x" }), /a probe re-presents the same command/);
+		await assert.rejects(governor.probeStoredResult("cg-type", { type: "prompt", message: "x" }), (e: unknown) => e instanceof CommandMismatch && e.reason === "type_differs");
 		assert.equal(received.length, before);
+		governor.close();
+	});
+
+	it("a probe of the same TYPE but a different body is refused: the record's digest binds the exact command", async () => {
+		// The dangerous case: the Governor died after DISPATCHED and before the send, so Prime has no receipt
+		// and would run whatever the probe carries under the old id.
+		const governor = governorOver(join(root, "g7"));
+		await governor.connect(5000);
+		uncertainRecord(governor, governor.clientId, "cg-body");
+		const before = received.length;
+		await assert.rejects(
+			governor.probeStoredResult("cg-body", { ...command, command: "rm -rf /something-else" }),
+			(e: unknown) => e instanceof CommandMismatch && e.reason === "digest_differs" && e.offeredDigest !== e.recordedDigest,
+		);
+		assert.equal(received.length, before, "nothing reached the socket");
+		// Key order is not a difference: the same command spelled in another order has the same digest.
+		const reordered = { command: "true", activeSessionId: "a", type: "execute_bash_and_wait" };
+		const probe = await governor.probeStoredResult("cg-body", reordered, 300);
+		assert.equal(probe.verdict.verdict, "uncertain");
+		assert.ok(received.length > before, "the equal command was sent");
+		governor.close();
+	});
+
+	it("a probe may omit the command when the record holds all of it, and must supply it when environment was withheld", async () => {
+		const governor = governorOver(join(root, "g8"));
+		await governor.connect(5000);
+		uncertainRecord(governor, governor.clientId, "cg-stored");
+		let before = received.length;
+		const probe = await governor.probeStoredResult("cg-stored", undefined, 300);
+		assert.equal(probe.verdict.verdict, "uncertain");
+		const sent = received.slice(before).join("");
+		const envelope = JSON.parse(sent.trim().split("\n")[0]!) as { id: string; command: Record<string, unknown> };
+		assert.equal(envelope.id, "cg-stored");
+		assert.deepEqual(envelope.command, command, "the stored command was re-presented verbatim");
+		// A create carries launchEnv, which the ledger withholds; it cannot be reconstructed.
+		const create = { type: "create", sessionPath: join(root, "sessions", "x.jsonl"), launchEnv: { HOME: "/h" } };
+		governor.ledger.recordDispatch({ commandId: "cg-create", clientId: governor.clientId, command: create, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		governor.ledger.markUncertain("cg-create", "timeout");
+		before = received.length;
+		await assert.rejects(governor.probeStoredResult("cg-create"), (e: unknown) => e instanceof CommandMismatch && e.reason === "command_not_stored");
+		assert.equal(received.length, before);
+		// Supplied again with the same environment it is accepted; with a different one it is not.
+		await assert.rejects(governor.probeStoredResult("cg-create", { ...create, launchEnv: { HOME: "/other" } }), (e: unknown) => e instanceof CommandMismatch && e.reason === "digest_differs");
+		assert.equal(received.length, before);
+		const again = await governor.probeStoredResult("cg-create", create, 300);
+		assert.equal(again.verdict.verdict, "uncertain");
+		assert.ok(received.length > before);
 		governor.close();
 	});
 
