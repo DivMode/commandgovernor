@@ -63,9 +63,9 @@ ADRs 0001–0007 and the older Rust daemon/browser/MCP documents remain useful p
 
 The merged PR #18 Prime adaptation code is also subject to salvage under ADR 0010. Passing correctness review does not make a custom subsystem permanent architecture.
 
-## Agent and contributor instructions
+## Instructions and contribution policy
 
-Coding and review agents must read [AGENTS.md](AGENTS.md). Claude Code also receives the same canonical rules through [CLAUDE.md](CLAUDE.md).
+Global Claude Code and Codex instructions are managed declaratively by `DivMode/nix-config`; this repository does **not** duplicate them in repo-local `CLAUDE.md` or `AGENTS.md` files. Project-specific architecture lives in the ADRs and research above.
 
 Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
