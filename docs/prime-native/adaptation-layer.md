@@ -194,12 +194,14 @@ unconfirmed claim whose replacement is absent and whose claimant is proven
 over is released by `adoptAbandoned` (the release re-checks the claim,
 its confirmation and the replacement's absence inside its own CAS);
 a confirmed claim is never released, because its replacement may have
-gone out; a created-but-unconfirmed replacement (the claimant died between
-create and confirm) is left to the human, who sees R adopted UNCERTAIN
-and O still claimed. A claimant whose confirmation finds its claim gone
-marks R **never sent** (DISPATCHED → FAILED, the dispatcher's own proof)
-and reports `claim_lost` instead of a record to dispatch; a claimant whose
-create fails releases the claim it took. At most one replacement is ever
+gone out; a created-but-unconfirmed replacement whose claimant is proven
+over was never sent either (sending follows the confirm), so its claim is
+released and R is resolved never sent, and O is supersedable again. A
+claimant whose confirmation finds its claim gone marks R **never sent**
+(DISPATCHED → FAILED, or UNCERTAIN → FAILED if an adopter got there
+first; the dispatcher's own proof, fenced to the dispatcher) and reports
+`claim_lost` instead of a record to dispatch, whatever happened to the
+mark; a claimant whose create fails releases the claim it took. At most one replacement is ever
 sent for one uncertain record. A claim is reported as `pendingClaims`
 while the claimant is alive or cannot be told. `ledger-cas.test.ts` stages claim-vs-resolution, claim-vs-claim and
 the dying claimant; `ledger-race.test.ts` releases six real superseders
@@ -369,7 +371,7 @@ one.
 | ledger transitions, probes, outcomes, claim, claim release | read → derive → write | per-record CAS (`VersionStore.update`); preconditions re-checked inside the derivation |
 | ledger `recordDispatch` (new id) | "does the id exist?" → create | exclusive create of `v1.json`; the early check is a courtesy, the `link` is the fence |
 | ledger `recordDispatch({ supersedes })` | "is O uncertain and unclaimed?" → create R → send R | the claim is a CAS write on O; R is created only after it lands; a resolution or another claim landing first refuses it |
-| ledger claim release | "is the claim unconfirmed, R absent, claimant over?" → release | every condition is re-checked inside the release CAS, including R's absence; a claimant that creates R in the window then either confirms first (the release lands on a confirmed claim and refuses) or finds its claim gone at confirm time and marks R never sent. A confirmed claim is never released |
+| ledger claim release | "is the claim unconfirmed and the claimant over?" → release → mark R never sent | the fence is the confirm, not the check: release and confirm both write O, so only one publishes the next version and the other re-derives to `NO_CHANGE`. A release that lands means the confirm cannot, so R was never sent and is resolved as such; a confirm that lands means the release refuses. A confirmed claim is never released |
 | ledger `recordDispatch({ supersedes })`, phase two | create R → confirm claim → return | the confirm is a CAS on O that requires the claim to be this R's; if it is not, R is marked never sent and `claim_lost` is thrown before the Governor can send |
 | ledger `recordOutcome` after adoption | "is it UNCERTAIN?" → resolve | the resolution is itself a CAS with the same precondition; the response was appended as a probe first, so nothing is lost if it is refused |
 | registry `recordGeneration`, `recordIncarnation` | read → derive → write | per-record CAS; `NO_CHANGE` for idempotent writes |

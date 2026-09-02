@@ -371,15 +371,30 @@ export class MutationLedger {
 			if (record.state === "UNCERTAIN" && record.supersededBy) {
 				const claim = record.supersededBy;
 				if (claim.confirmedAt !== undefined) continue; // confirmed: the replacement exists and may have gone out; never released
-				if (this.get(claim.commandId) !== undefined) continue; // created but not yet confirmed: the claimant is between its create and its confirm (or died there); left for the human
 				const verdict = claim.claimedBy.ownerToken === this.#self.ownerToken ? "current" : classifyProcessIdentity(claim.claimedBy, this.#probe);
 				if (!identityProvesProcessOver(verdict)) {
+					// Alive (or unknowable): between its claim and its confirm, or between its create and its confirm. Left.
 					pendingClaims.push({ record, verdict });
 					continue;
 				}
-				const released = this.#releaseClaim(record.commandId, claim.commandId, `the claimant (pid ${claim.claimedBy.pid}) is ${verdict} and never created the replacement`, verdict);
+				// The claimant is proven over and never confirmed. Whether or not it
+				// created the replacement, it never SENT it: sending follows the
+				// confirm. Release the claim (a CAS that refuses if the claim was
+				// confirmed or changed in the meantime), and if this ledger's release
+				// landed, resolve the never-sent replacement so nothing can probe it.
+				const created = this.get(claim.commandId);
+				let released: MutationRecord;
+				try {
+					released = this.#releaseClaim(record.commandId, claim.commandId, `the claimant (pid ${claim.claimedBy.pid}) is ${verdict} and never confirmed the replacement${created ? " it created" : ", which it never created"}`, verdict, created !== undefined);
+				} catch (error) {
+					if (error instanceof MutationLedgerError && error.code === "contended") continue; // this record stays for the next sweep; the rest of the list is still inspected
+					throw error;
+				}
 				const last = released.transitions[released.transitions.length - 1];
-				if (released.version > record.version && last?.claim?.action === "released" && last.claim.by.ownerToken === this.#self.ownerToken) releasedClaims.push(released);
+				if (released.version > record.version && last?.claim?.action === "released" && last.claim.by.ownerToken === this.#self.ownerToken) {
+					releasedClaims.push(released);
+					if (created) this.#markNeverSentFor(claim.commandId, claim.claimedBy, `its supersede claim on ${record.commandId} was released unconfirmed after the claimant (pid ${claim.claimedBy.pid}) was proven ${verdict}; a replacement is sent only after its claim is confirmed`);
+				}
 				continue;
 			}
 			if (record.state !== "DISPATCHED") continue;
@@ -422,18 +437,24 @@ export class MutationLedger {
 	}
 
 	/**
-	 * Release an unconfirmed claim on `superseded` whose replacement does not
-	 * exist. Every condition is re-checked inside the compare-and-swap,
-	 * including the replacement's absence, so a claimant creating it in the
-	 * meantime makes this write land on a record whose claim it then refuses
-	 * to touch (and that claimant's own confirmation, or its `claim_lost`,
-	 * decides what happens to the replacement).
+	 * Release an unconfirmed claim on `superseded`. Every condition is
+	 * re-checked inside the compare-and-swap. The serialisation against the
+	 * claimant is the confirm: both it and this release write `superseded`,
+	 * so whichever publishes first makes the other re-derive and refuse
+	 * (`NO_CHANGE`); a claimant whose confirm is refused reports `claim_lost`
+	 * and marks its replacement never sent.
 	 */
-	#releaseClaim(superseded: string, replacement: string, why: string, verdict?: ProcessIdentityVerdict): MutationRecord {
+	#releaseClaim(superseded: string, replacement: string, why: string, verdict?: ProcessIdentityVerdict, replacementMayExist = false): MutationRecord {
 		return this.#update(superseded, (current) => {
 			const claim = current.supersededBy;
 			if (current.state !== "UNCERTAIN" || !claim || claim.commandId !== replacement || claim.confirmedAt !== undefined) return NO_CHANGE;
-			if (this.get(replacement) !== undefined) return NO_CHANGE;
+			// A live claimant's own self-release after a failed create must not
+			// release a claim whose replacement someone managed to create; an
+			// adopter that has proven the claimant over may (it will mark the
+			// replacement never sent). Either way the fence that matters is the
+			// confirm: it and this release both write O, and only one can publish
+			// the next version.
+			if (!replacementMayExist && this.get(replacement) !== undefined) return NO_CHANGE;
 			const { supersededBy: _released, ...rest } = current;
 			return {
 				...rest,
@@ -512,7 +533,7 @@ export class MutationLedger {
 			// caller sees `claim_lost` instead of a record to dispatch.
 			const confirmed = this.#update(input.supersedes, (current) => {
 				const claim = current.supersededBy;
-				if (current.state !== "UNCERTAIN" || !claim || claim.commandId !== input.commandId) return NO_CHANGE;
+				if (current.state !== "UNCERTAIN" || !claim || claim.commandId !== input.commandId || claim.claimedBy.ownerToken !== this.#self.ownerToken) return NO_CHANGE;
 				if (claim.confirmedAt !== undefined) return NO_CHANGE;
 				const confirmedAt = new Date().toISOString();
 				return {
@@ -522,21 +543,67 @@ export class MutationLedger {
 				};
 			});
 			if (confirmed.supersededBy?.commandId !== input.commandId || confirmed.supersededBy.confirmedAt === undefined) {
-				this.markNeverSent(input.commandId, `the supersede claim on ${input.supersedes} was lost before the replacement could be sent`);
-				throw new MutationLedgerError("claim_lost", `${input.commandId}: the claim on ${input.supersedes} was released or replaced before it could be confirmed; the replacement was recorded as never sent and must not be dispatched`);
+				const marked = this.markNeverSent(input.commandId, `the supersede claim on ${input.supersedes} was lost before the replacement could be sent`);
+				throw new MutationLedgerError(
+					"claim_lost",
+					`${input.commandId}: the claim on ${input.supersedes} was released or replaced before it could be confirmed; the replacement must not be dispatched (${marked.state === "FAILED" ? "recorded as never sent" : `now ${marked.state}; the never-sent mark was refused`})`,
+				);
 			}
 		}
 		return created;
 	}
 
 	/**
-	 * The dispatcher's own proof that a DISPATCHED command never reached the
-	 * socket: DISPATCHED -> FAILED. Only the process that would have sent it
-	 * can know this, which is why it is a ledger operation and not evidence
-	 * a human supplies.
+	 * The dispatcher's own proof that a command it recorded never reached the
+	 * socket. Only the process that would have sent it can know this, so the
+	 * write is fenced to the record's own dispatcher. DISPATCHED -> FAILED;
+	 * if an adopter already marked the record UNCERTAIN, the same proof
+	 * resolves it (`effect_absent_proven`). Any other state is left as it is
+	 * and returned: this never throws for a lost race, because the caller is
+	 * about to report `claim_lost` and that report must not be replaced.
 	 */
 	markNeverSent(commandId: string, reason: string): MutationRecord {
-		return this.#transition(commandId, ["DISPATCHED"], { at: new Date().toISOString(), to: "FAILED", reason: `never sent: ${reason}`, neverSent: { by: this.#self, reason } });
+		const at = new Date().toISOString();
+		return this.#update(commandId, (current) => {
+			if (current.dispatchedBy.ownerToken !== this.#self.ownerToken) {
+				throw new MutationLedgerError("illegal_transition", `${commandId}: only its dispatcher (${current.dispatchedBy.ownerToken}) may mark it never sent; this is ${this.#self.ownerToken}`);
+			}
+			if (current.state === "DISPATCHED") {
+				return { ...current, state: "FAILED", transitions: [...current.transitions, { at, to: "FAILED", reason: `never sent: ${reason}`, neverSent: { by: this.#self, reason } }] };
+			}
+			if (current.state === "UNCERTAIN") {
+				return {
+					...current,
+					state: "FAILED",
+					transitions: [...current.transitions, { at, to: "FAILED", reason: `resolved by effect_absent_proven: never sent: ${reason}`, evidence: { kind: "effect_absent_proven", by: "dispatcher: never sent", detail: reason, observedAt: at }, neverSent: { by: this.#self, reason } }],
+				};
+			}
+			return NO_CHANGE;
+		});
+	}
+
+	/**
+	 * A successor's proof that a replacement recorded by a dead claimant never
+	 * reached the socket: sending happens only after the claim is confirmed,
+	 * and the claim was released unconfirmed. Fenced to records whose
+	 * dispatcher is the dead claimant; DISPATCHED or UNCERTAIN -> FAILED.
+	 */
+	#markNeverSentFor(commandId: string, claimant: DispatcherIdentity, reason: string): MutationRecord | undefined {
+		const at = new Date().toISOString();
+		try {
+			return this.#update(commandId, (current) => {
+				if (current.dispatchedBy.ownerToken !== claimant.ownerToken) return NO_CHANGE;
+				if (current.state !== "DISPATCHED" && current.state !== "UNCERTAIN") return NO_CHANGE;
+				return {
+					...current,
+					state: "FAILED",
+					transitions: [...current.transitions, { at, to: "FAILED", reason: `resolved by effect_absent_proven: never sent: ${reason}`, evidence: { kind: "effect_absent_proven", by: `adopter ${this.#self.ownerToken}: never sent`, detail: reason, observedAt: at }, neverSent: { by: this.#self, reason } }],
+				};
+			});
+		} catch (error) {
+			if (error instanceof MutationLedgerError && (error.code === "unknown_command" || error.code === "contended")) return undefined;
+			throw error;
+		}
 	}
 
 	/**
