@@ -138,7 +138,7 @@ describe("D2: adoption of abandoned DISPATCHED records", () => {
 		const ledger = ledgerAs(dir, 1001, "start:1001", world({ 1001: "start:1001" }));
 		const record = dispatch(ledger, "cg-h");
 		const { dispatchedBy: _dropped, ...legacy } = record;
-		writeFileSync(join(ledger.dir, "cg-h.json"), `${JSON.stringify(legacy, null, 2)}\n`);
+		writeFileSync(ledger.currentVersionPath("cg-h"), `${JSON.stringify(legacy, null, 2)}\n`);
 		const successor = ledgerAs(dir, 2002, "start:2002", world({ 2002: "start:2002" }));
 		const report = successor.adoptAbandoned();
 		assert.deepEqual(report.adopted, []);

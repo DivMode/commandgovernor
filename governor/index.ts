@@ -10,8 +10,8 @@ export { DEFAULT_POLICY, LEGACY_GLOBAL_CODE_POLICY, NAIVE_POLICY, assertProducti
 export type { ClassificationPolicy, Observation, PreEffectProof, UncertainReason, Verdict } from "./mutation/classify.ts";
 export { PRE_EFFECT_PROOF_MATRIX, ProofMatrix, REVIEWED_PROOFS } from "./mutation/proof.ts";
 export type { EffectTiming, ProofReview } from "./mutation/proof.ts";
-export { MutationLedger, MutationLedgerError, WITHHELD_COMMAND_FIELDS } from "./mutation/ledger.ts";
-export type { AdoptionReport, DispatcherIdentity, MutationLedgerOptions, MutationRecord, MutationState, ResolutionEvidence } from "./mutation/ledger.ts";
+export { MAX_CAS_ATTEMPTS, MutationLedger, MutationLedgerError, WITHHELD_COMMAND_FIELDS } from "./mutation/ledger.ts";
+export type { AdoptionReport, DispatcherIdentity, MutationLedgerHooks, MutationLedgerOptions, MutationRecord, MutationState, ResolutionEvidence } from "./mutation/ledger.ts";
 export { COMMAND_DIGEST_PATTERN, canonicalJson, commandDigest } from "./mutation/digest.ts";
 export { ShortWrite, createFileExclusiveDurable, fsyncDirectory, mkdirDurable, unlinkDurable, writeAllSync, writeFileDurable } from "./fs/durable.ts";
 export type { DurableFs } from "./fs/durable.ts";

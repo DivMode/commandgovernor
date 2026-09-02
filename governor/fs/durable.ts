@@ -190,7 +190,8 @@ export type ExclusiveCreateOutcome =
  * replaces it, so exactly one creator wins, and because the link publishes
  * an already-complete, already-fsynced file, no reader can ever observe an
  * empty or partial `path` (an `O_EXCL` create followed by a write would let
- * one). The loser reads the winner's contents and returns them.
+ * one). The loser fsyncs the parent (the winner may have died before doing
+ * so), then reads the winner's contents and returns them.
  */
 export function createFileExclusiveDurable(path: string, contents: string, options: { mode?: number; fs?: DurableFs } = {}): ExclusiveCreateOutcome {
 	const fs = options.fs ?? NODE_FS;
@@ -201,6 +202,11 @@ export function createFileExclusiveDurable(path: string, contents: string, optio
 			fs.linkSync(temp, path);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			// The loser is about to rely on the winner's name as authority. The
+			// winner may have died between its link and its directory fsync, so
+			// the loser fsyncs the parent itself before reading: a name it did
+			// not confirm durable is not one it may act on.
+			fsyncDirectory(dirname(path), fs);
 			try {
 				return { outcome: "exists", contents: fs.readFileSync(path, "utf8") };
 			} catch (readError) {

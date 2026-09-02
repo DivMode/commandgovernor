@@ -168,6 +168,11 @@ describe("DUR: createFileExclusiveDurable", () => {
 		assert.equal(readFileSync(target, "utf8"), "winner\n");
 		assert.ok(!ops(calls).includes("rename"), "an exclusive create never renames over the name");
 		assert.deepEqual(readdirSync(dir), ["identity.json"], "the loser's temp was removed");
+		// The loser's own order: after the failed link it fsyncs the PARENT before it reads the winner,
+		// because the winner may have died between its link and its own directory fsync.
+		assert.deepEqual(ops(calls), ["open", "write", "fsync", "close", "link", "open", "fsync", "close", "read", "unlink"]);
+		assert.equal(calls[5]!.path, dir, "the parent is fsynced by the loser");
+		assert.equal(calls[8]!.path, target, "and only then read");
 	});
 
 	it("a name that vanishes between the link's EEXIST and the read is reported as vanished, not thrown", () => {
@@ -175,7 +180,7 @@ describe("DUR: createFileExclusiveDurable", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cg-durable-"));
 		const target = join(dir, "lease.lock");
 		writeFileSync(target, "holder\n");
-		const { fs } = recorder();
+		const { fs, calls } = recorder();
 		const racing: DurableFs = {
 			...fs,
 			linkSync: (from, to) => {
@@ -188,6 +193,7 @@ describe("DUR: createFileExclusiveDurable", () => {
 		};
 		const result = createFileExclusiveDurable(target, "mine\n", { fs: racing });
 		assert.equal(result.outcome, "vanished");
+		assert.ok(ops(calls).indexOf("fsync", ops(calls).indexOf("link")) > 0, "the loser still fsyncs the parent before discovering the name is gone");
 		assert.deepEqual(readdirSync(dir), [], "nothing under the name, no temp left");
 		assert.equal(createFileExclusiveDurable(target, "mine\n", { fs }).outcome, "created", "the retry succeeds");
 	});

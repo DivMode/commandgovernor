@@ -144,7 +144,25 @@ both first-class wire fields; the message string is carried as evidence
 and never consulted.
 
 **The ledger.** `recordDispatch` writes `DISPATCHED` durably before the
-envelope is written to the socket. A command id is dispatched once, ever;
+envelope is written to the socket. Storage is a compare-and-swap: a
+record is a directory `mutations/<commandId>/` of immutable versions
+`v1.json, v2.json, ...`, and every write reads the highest version N,
+derives the next state, and publishes `v(N+1).json` with an exclusive
+`link(2)` create. A version that appears in between means another
+Governor sharing the state directory won; the writer re-reads and
+re-applies against the new state, where a transition that is no longer
+legal is refused. Nothing is renamed over, unlinked or locked, so a stale
+writer cannot put an old snapshot over a newer one (a resolved record
+cannot become uncertain, and supersedable, again), a probe recorded while
+another Governor resolved the record is appended to the resolved record,
+of two conflicting resolutions exactly one is legal, and there is no stale
+lock to reclaim. `ledger-cas.test.ts` stages each of those interleavings
+deterministically through the `beforeCommit` seam and ends with the
+negative control (the pre-review rename-in-place from a stale snapshot,
+which loses the evidence); `ledger-race.test.ts` releases eight real child
+processes on one record by a filesystem barrier and asserts one winner,
+every probe kept, contiguous versions and no regression, and six real
+adopters producing one adoption. A command id is dispatched once, ever;
 `UNCERTAIN` leaves only through `resolveUncertain` with
 `effect_observed` (→ COMPLETED) or `effect_absent_proven` (→ FAILED). A
 human-issued replacement is a new command that must name the uncertain
@@ -366,10 +384,10 @@ goes through `governor/fs/durable.ts`:
 
 | helper | sequence | used for |
 | --- | --- | --- |
-| `writeFileDurable` | write temp → `fsync` temp → close → `rename` → `fsync` parent | mutation records, session records |
-| `createFileExclusiveDurable` | write temp → `fsync` temp → close → `link` (fails `EEXIST`, never replaces) → `fsync` parent → unlink temp; a name that vanishes between the `EEXIST` and the read is reported `vanished` for the caller to retry, never thrown | client identity, recovery lease |
+| `writeFileDurable` | write temp → `fsync` temp → close → `rename` → `fsync` parent | session records |
+| `createFileExclusiveDurable` | write temp → `fsync` temp → close → `link` (fails `EEXIST`, never replaces) → `fsync` parent → unlink temp; the `EEXIST` loser also `fsync`s the parent before it reads the winner (the winner may have died between its link and its own fsync); a name that vanishes between the `EEXIST` and the read is reported `vanished` for the caller to retry, never thrown | client identity, recovery lease, every ledger version |
 | `unlinkDurable` | `unlink` → `fsync` parent | lease release; the dead lease inside a reclaim's critical section |
-| `mkdirDurable` | for each missing component, top-down: `mkdir` → `fsync` ITS parent | the state directory, `mutations/`, `sessions/` |
+| `mkdirDurable` | for each missing component, top-down: `mkdir` → `fsync` ITS parent (the `EEXIST` loser fsyncs too) | the state directory, `mutations/`, each record directory, `sessions/` |
 
 The exclusive create publishes an already-complete, already-fsynced file,
 so no concurrent reader can observe an empty or partial identity or lease,

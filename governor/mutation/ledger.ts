@@ -21,6 +21,21 @@
  * decision expressed as a NEW command with its own record and an explicit
  * `supersedes` link, never an automatic one.
  *
+ * **Storage is a compare-and-swap, not a rename.** Several Governors may
+ * share a state directory, and a read-modify-rename would let a stale
+ * writer put an old snapshot over a newer one: exact evidence that resolved
+ * a record could vanish and the mutation become uncertain, and supersedable,
+ * again. So a record is a directory `<commandId>/` of immutable versions
+ * `v1.json, v2.json, ...`, and every write is "read the highest version N,
+ * derive the next state, publish `v(N+1).json` with an exclusive
+ * (`link(2)`) create". If `v(N+1)` already exists, another writer got there
+ * first; this one re-reads and re-applies against the new state, where a
+ * transition that is no longer legal is refused. Nothing is ever renamed
+ * over, unlinked or locked, so there is no stale lock to reclaim and no
+ * partial file to observe: every version is complete and fsynced before its
+ * name exists. The highest version is the record; older ones are its
+ * history, kept.
+ *
  * Two facts every record carries so that the crash window the ledger exists
  * for cannot swallow an obligation:
  *
@@ -45,7 +60,7 @@ import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { mkdirDurable, writeFileDurable } from "../fs/durable.ts";
+import { createFileExclusiveDurable, mkdirDurable } from "../fs/durable.ts";
 import type { DaemonCommand, DaemonResponse } from "../prime/protocol.ts";
 import { classifyProcessIdentity, LIVE_PROBE, type ProcessIdentity, type ProcessIdentityVerdict, type ProcessProbe, identityProvesProcessOver } from "../process/identity.ts";
 import type { PreEffectProof, UncertainReason } from "./classify.ts";
@@ -80,6 +95,8 @@ export const WITHHELD_COMMAND_FIELDS: readonly string[] = ["launchEnv", "env"];
 export interface MutationRecord {
 	readonly schemaVersion: 2;
 	readonly commandId: string;
+	/** The version this snapshot is; the file name `v<version>.json` is the authority. */
+	readonly version: number;
 	readonly clientId: string;
 	readonly commandType: string;
 	/** The wire command less `withheld` fields. Complete when `withheld` is empty. */
@@ -101,7 +118,7 @@ export interface MutationRecord {
 	readonly probes?: readonly { readonly at: string; readonly response?: DaemonResponse; readonly detail?: string }[];
 }
 
-export type MutationLedgerErrorCode = "duplicate_command_id" | "illegal_transition" | "unknown_command" | "supersedes_not_uncertain";
+export type MutationLedgerErrorCode = "duplicate_command_id" | "illegal_transition" | "unknown_command" | "supersedes_not_uncertain" | "contended";
 
 export class MutationLedgerError extends Error {
 	readonly code: MutationLedgerErrorCode;
@@ -122,6 +139,15 @@ export interface AdoptionReport {
 	readonly undecidable: readonly { readonly record: MutationRecord; readonly verdict: ProcessIdentityVerdict }[];
 }
 
+/**
+ * Test seams. `beforeCommit` runs after a write has read the current
+ * version and derived the next, and before it tries to publish, which is
+ * exactly where a concurrent writer can win. Production callers pass none.
+ */
+export interface MutationLedgerHooks {
+	readonly beforeCommit?: (commandId: string, fromVersion: number) => void;
+}
+
 export interface MutationLedgerOptions {
 	/** How dispatcher processes are inspected. Injectable so the suite can fabricate pid reuse. */
 	readonly processProbe?: ProcessProbe;
@@ -129,17 +155,13 @@ export interface MutationLedgerOptions {
 	readonly self?: ProcessIdentity;
 	/** This Governor instance's owner token. */
 	readonly ownerToken?: string;
+	readonly hooks?: MutationLedgerHooks;
 }
 
-/**
- * Every record write is durable through `writeFileDurable`: temp, fsync,
- * rename, fsync of the containing directory. The ledger is the authority a
- * later Governor consults about what may have been sent, so a directory
- * entry lost to power failure would be a lost authority, not a lost cache.
- */
-function writeAtomic(path: string, contents: string): void {
-	writeFileDurable(path, contents, { mode: 0o600 });
-}
+/** Attempts a write makes against concurrent writers before it reports contention. */
+export const MAX_CAS_ATTEMPTS = 64;
+
+const VERSION_FILE = /^v(\d+)\.json$/;
 
 /**
  * `value` with every environment-bearing field removed at any depth; the
@@ -167,10 +189,15 @@ function storableCommand(command: DaemonCommand): { command: DaemonCommand; with
 	return { command: stored, withheld };
 }
 
+function serialise(record: MutationRecord): string {
+	return `${JSON.stringify(record, null, 2)}\n`;
+}
+
 export class MutationLedger {
 	readonly dir: string;
 	readonly #probe: ProcessProbe;
 	readonly #self: DispatcherIdentity;
+	readonly #hooks: MutationLedgerHooks;
 
 	constructor(stateDir: string, options: MutationLedgerOptions = {}) {
 		this.dir = join(stateDir, "mutations");
@@ -181,6 +208,7 @@ export class MutationLedger {
 		// alone would let a successor that recycled a dead dispatcher's pid call
 		// that dispatcher's record its own and never inspect it.
 		this.#self = { ...self, ownerToken: options.ownerToken ?? `pid#${self.pid}#${randomUUID().slice(0, 8)}` };
+		this.#hooks = options.hooks ?? {};
 	}
 
 	/** The identity this ledger writes as dispatcher. */
@@ -188,18 +216,44 @@ export class MutationLedger {
 		return this.#self;
 	}
 
-	#path(commandId: string): string {
+	#recordDir(commandId: string): string {
 		if (!/^[A-Za-z0-9._:-]+$/.test(commandId)) throw new Error(`refusing to use ${JSON.stringify(commandId)} as a file name`);
-		return join(this.dir, `${commandId}.json`);
+		return join(this.dir, commandId);
 	}
 
-	get(commandId: string): MutationRecord | undefined {
+	#versionPath(commandId: string, version: number): string {
+		return join(this.#recordDir(commandId), `v${version}.json`);
+	}
+
+	/** The highest version on disk for `commandId`, or undefined for no record. */
+	#current(commandId: string): { record: MutationRecord; version: number } | undefined {
+		let names: string[];
 		try {
-			return JSON.parse(readFileSync(this.#path(commandId), "utf8")) as MutationRecord;
+			names = readdirSync(this.#recordDir(commandId));
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			throw error;
 		}
+		let version = 0;
+		for (const name of names) {
+			const match = VERSION_FILE.exec(name);
+			if (match) version = Math.max(version, Number(match[1]));
+		}
+		if (version === 0) return undefined; // a directory with no published version yet (a creator died before its link)
+		// A version is published complete (link of an fsynced file); it is never partial.
+		const parsed = JSON.parse(readFileSync(this.#versionPath(commandId, version), "utf8")) as MutationRecord;
+		return { record: { ...parsed, version }, version };
+	}
+
+	/** The path of the current version of `commandId`; for operators and tests. */
+	currentVersionPath(commandId: string): string {
+		const current = this.#current(commandId);
+		if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
+		return this.#versionPath(commandId, current.version);
+	}
+
+	get(commandId: string): MutationRecord | undefined {
+		return this.#current(commandId)?.record;
 	}
 
 	require(commandId: string): MutationRecord {
@@ -208,11 +262,24 @@ export class MutationLedger {
 		return record;
 	}
 
+	/** Every version of `commandId`, oldest first: the record's history. */
+	history(commandId: string): MutationRecord[] {
+		const current = this.#current(commandId);
+		if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
+		const versions: MutationRecord[] = [];
+		for (let version = 1; version <= current.version; version += 1) {
+			const parsed = JSON.parse(readFileSync(this.#versionPath(commandId, version), "utf8")) as MutationRecord;
+			versions.push({ ...parsed, version });
+		}
+		return versions;
+	}
+
 	list(): MutationRecord[] {
-		return readdirSync(this.dir)
-			.filter((name) => name.endsWith(".json"))
-			.map((name) => JSON.parse(readFileSync(join(this.dir, name), "utf8")) as MutationRecord)
-			.sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt));
+		return readdirSync(this.dir, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => this.get(entry.name))
+			.filter((record): record is MutationRecord => record !== undefined)
+			.sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt) || a.commandId.localeCompare(b.commandId));
 	}
 
 	/**
@@ -256,8 +323,9 @@ export class MutationLedger {
 				undecidable.push({ record, verdict });
 				continue;
 			}
-			// Re-read under the transition: another adopter may have got here first, in
-			// which case the state is no longer DISPATCHED and the transition is refused.
+			// The transition is a compare-and-swap from the DISPATCHED version: if
+			// another adopter (or the dispatcher's own late result) published a
+			// newer version first, this one is refused and nothing is written.
 			try {
 				adopted.push(
 					this.#transition(record.commandId, ["DISPATCHED"], {
@@ -304,6 +372,7 @@ export class MutationLedger {
 		const record: MutationRecord = {
 			schemaVersion: 2,
 			commandId: input.commandId,
+			version: 1,
 			clientId: input.clientId,
 			commandType: input.command.type,
 			command: stored.command,
@@ -318,18 +387,40 @@ export class MutationLedger {
 			transitions: [{ at: now, to: "DISPATCHED", reason: "intent recorded before send" }],
 			...(input.supersedes !== undefined ? { supersedes: input.supersedes } : {}),
 		};
-		writeAtomic(this.#path(input.commandId), `${JSON.stringify(record, null, 2)}\n`);
+		mkdirDurable(this.#recordDir(input.commandId), { mode: 0o700 });
+		// Version 1 is an exclusive create too: two dispatchers of one id cannot both succeed.
+		const created = createFileExclusiveDurable(this.#versionPath(input.commandId, 1), serialise(record), { mode: 0o600 });
+		if (created.outcome !== "created") {
+			throw new MutationLedgerError("duplicate_command_id", `command id ${input.commandId} was dispatched concurrently by another writer; a command id is never reused`);
+		}
 		return record;
 	}
 
-	#transition(commandId: string, from: readonly MutationState[], transition: MutationTransition): MutationRecord {
-		const record = this.require(commandId);
-		if (!from.includes(record.state)) {
-			throw new MutationLedgerError("illegal_transition", `${commandId}: ${record.state} -> ${transition.to} is not a legal transition`);
+	/**
+	 * The compare-and-swap every write goes through: read the current version,
+	 * check `from` against its state, derive the next record, publish it as the
+	 * next version with an exclusive create. A version that appears in between
+	 * means another writer won; re-read and re-apply against the new state.
+	 */
+	#update(commandId: string, from: readonly MutationState[] | undefined, target: MutationState | undefined, derive: (current: MutationRecord) => Omit<MutationRecord, "version">): MutationRecord {
+		for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
+			const current = this.#current(commandId);
+			if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
+			if (from && !from.includes(current.record.state)) {
+				throw new MutationLedgerError("illegal_transition", `${commandId}: ${current.record.state} -> ${target ?? "?"} is not a legal transition`);
+			}
+			const next: MutationRecord = { ...derive(current.record), version: current.version + 1 };
+			this.#hooks.beforeCommit?.(commandId, current.version);
+			const published = createFileExclusiveDurable(this.#versionPath(commandId, next.version), serialise(next), { mode: 0o600 });
+			if (published.outcome === "created") return next;
+			// "exists": a concurrent writer published this version; "vanished"
+			// cannot happen (versions are never removed) and is treated the same.
 		}
-		const updated: MutationRecord = { ...record, state: transition.to, transitions: [...record.transitions, transition] };
-		writeAtomic(this.#path(commandId), `${JSON.stringify(updated, null, 2)}\n`);
-		return updated;
+		throw new MutationLedgerError("contended", `${commandId}: ${MAX_CAS_ATTEMPTS} attempts each found a newer version; giving up without writing`);
+	}
+
+	#transition(commandId: string, from: readonly MutationState[], transition: MutationTransition): MutationRecord {
+		return this.#update(commandId, from, transition.to, (current) => ({ ...current, state: transition.to, transitions: [...current.transitions, transition] }));
 	}
 
 	markCompleted(commandId: string, response: DaemonResponse): MutationRecord {
@@ -356,11 +447,13 @@ export class MutationLedger {
 		return this.#transition(commandId, ["UNCERTAIN"], { at: new Date().toISOString(), to, reason: `resolved by ${evidence.kind}`, evidence });
 	}
 
-	/** Record that the substrate's stored result for this id was fetched. Does not change state. */
+	/**
+	 * Record that the substrate's stored result for this id was fetched. Does
+	 * not change state, and is applied on whatever the current version is when
+	 * it lands: a probe written while another Governor resolved the record is
+	 * appended to the resolved record, never over it.
+	 */
 	recordProbe(commandId: string, probe: { response?: DaemonResponse; detail?: string }): MutationRecord {
-		const record = this.require(commandId);
-		const updated: MutationRecord = { ...record, probes: [...(record.probes ?? []), { at: new Date().toISOString(), ...probe }] };
-		writeAtomic(this.#path(commandId), `${JSON.stringify(updated, null, 2)}\n`);
-		return updated;
+		return this.#update(commandId, undefined, undefined, (current) => ({ ...current, probes: [...(current.probes ?? []), { at: new Date().toISOString(), ...probe }] }));
 	}
 }

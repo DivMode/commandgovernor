@@ -76,11 +76,13 @@ describe("D2: a Governor killed inside its crash window", () => {
 		}, 15_000, 50);
 		const mutations = join(stateDir, "mutations");
 		const files = await waitUntil(() => {
-			const names = readdirSync(mutations).filter((name) => name.endsWith(".json"));
+			const names = readdirSync(mutations, { withFileTypes: true })
+				.filter((entry) => entry.isDirectory() && readdirSync(join(mutations, entry.name)).includes("v1.json"))
+				.map((entry) => entry.name);
 			return names.length > 0 ? names : undefined;
 		}, 5_000, 25);
 		assert.equal(files.length, 1);
-		const commandId = files[0]!.replace(/\.json$/, "");
+		const commandId = files[0]!;
 		const envelopesBefore = received.join("").split("\n").filter((line) => line.includes(commandId)).length;
 		assert.equal(envelopesBefore, 1, "the child's envelope did reach the socket (the crash window here is 'sent, no result')");
 

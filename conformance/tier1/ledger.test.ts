@@ -43,6 +43,8 @@ describe("MutationLedger (D2)", () => {
 		assert.equal(resolved.state, "COMPLETED");
 		assert.throws(() => ledger.resolveUncertain("cg-2", { kind: "effect_absent_proven", by: "t", detail: "d", observedAt: "now" }), /not a legal transition/);
 		assert.equal(ledger.require("cg-2").transitions.map((t) => t.to).join(">"), "DISPATCHED>UNCERTAIN>COMPLETED");
+		assert.equal(ledger.require("cg-2").version, 3, "one immutable version per write");
+		assert.deepEqual(ledger.history("cg-2").map((v) => [v.version, v.state]), [[1, "DISPATCHED"], [2, "UNCERTAIN"], [3, "COMPLETED"]], "the history is every version, kept");
 	});
 
 	it("effect_absent_proven resolves to FAILED", () => {
