@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://commandgovernor.com/schema/agent-role.v1.json",
+  "title": "Command Governor agent role frontmatter",
+  "description": "The YAML frontmatter of a harness/agents/*.md role file. Pi core has no agents concept and validates none of this; the schema is enforced by the conformance suite, and at spawn time it will be enforced by whichever extension reads these files. Every field is required, including the ones that could plausibly default: an omitted `tools` list would otherwise mean 'whatever the defaults are today', which is precisely how a resumed worker silently broadens.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description", "tools", "model", "delegation", "authority"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Role identity. Referenced by `delegation` in other roles.",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "description": "One line. What the role is for, and what it must not do.",
+      "minLength": 1
+    },
+    "tools": {
+      "type": "array",
+      "description": "The starting loadout. Required even when empty, so that 'no tools' and 'nobody decided' are different states. Conformance checks every entry against the pinned Pi's own built-in tool set rather than a hardcoded list.",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "model": {
+      "type": "string",
+      "description": "A provider/id model pattern. Conformance checks it exists in the pinned Pi's model catalog.",
+      "pattern": "^[a-z0-9][a-z0-9-]*/[A-Za-z0-9._:-]+$"
+    },
+    "delegation": {
+      "type": "array",
+      "description": "Role names this role may spawn. Empty means none. Conformance checks every target names an existing role.",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+      "uniqueItems": true
+    },
+    "authority": {
+      "type": "string",
+      "description": "What this role owns and, more usefully, what it does not. One authority per concern is checked in harness/authorities.json; this is the per-role statement of the same rule.",
+      "minLength": 1
+    }
+  }
+}

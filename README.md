@@ -1,6 +1,6 @@
 # Command Governor
 
-Command Governor is a custom Pi-native harness for durable, foreman-led AI/software-engineering work.
+Command Governor is a curated, pinned Pi-family harness distribution (currently on the Prime Agent substrate) for durable, foreman-led AI/software-engineering work.
 
 [commandgovernor.com](https://commandgovernor.com)
 
@@ -15,6 +15,16 @@ Command Governor is a custom Pi-native harness for durable, foreman-led AI/softw
 > Read [ADR 0008](docs/adr/0008-adopt-pi-native-command-governor-harness.md) and
 > the [Pi-native research review](docs/research/2026-09-01-pi-native-command-governor-harness-review.md)
 > before treating older topology documents as current implementation direction.
+
+> **Substrate — 2026-09-01:** [ADR 0009](docs/adr/0009-prime-agent-substrate-and-acp-boundary.md)
+> conditionally selects **Prime Agent v0.8.1** as the runtime substrate (Proposed until
+> Issue #17 passes independent review). The Prime adaptation layer under `governor/`
+> closes the three real-machine blockers from Issue #15 — worker-loss mutation
+> ambiguity (D2), resident-root recovery (D1), mandatory explicit session paths (D8) —
+> and the credential-free conformance suite that proves them runs in merge-gating CI.
+> Start with [`docs/prime-distribution.md`](docs/prime-distribution.md) and
+> [`docs/prime-native/adaptation-layer.md`](docs/prime-native/adaptation-layer.md).
+> Upstream Pi v0.84.4 remains the recorded fallback (frozen PR #16), never co-installed.
 
 ## Current direction
 
