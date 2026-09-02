@@ -245,12 +245,15 @@ with a response goes through `recordProbeOutcome`, which resolves an
 UNCERTAIN record from a success response whatever verdict the caller
 passes, refuses any response on a DISPATCHED record (that is the
 dispatcher's outcome and belongs on `recordOutcome`, which resolves as it
-records), and keeps a response on an already-resolved record only with
-a `conflictsWith` mark when it contradicts the resolution. The `mark*`
+records), and keeps a response on an already-resolved record with a
+`conflictsWith` mark when it contradicts the resolution (the mark follows
+the caller's classification: the ledger re-derives completion from a
+success response itself, but whether a failure is a typed pre-effect
+rejection needs the proof matrix, which the ledger does not hold). The `mark*`
 writers and both resolution branches refuse a response that contradicts
-the state they write. The suite calls every public writer, including
-`adoptAbandoned` after each, and then scans every version of every record
-for an UNCERTAIN or DISPATCHED version carrying a success response.
+the state they write. The suite calls every public writer, runs
+`adoptAbandoned` over the result, and then scans every version of every
+record for an UNCERTAIN or DISPATCHED version carrying a success response.
 
 **Evidence and resolution are one write.** A probe's stored success is
 exact evidence that the effect happened, and a stored typed pre-effect

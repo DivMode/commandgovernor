@@ -1,6 +1,6 @@
 # ADR 0009: Select Prime Agent as the initial substrate and ACP v1 as the public agent-client boundary
 
-- **Status:** Proposed — source-level bake-off complete; Gate S0/S1 required before final acceptance
+- **Status:** Accepted — 2026-09-02, on Gate S0/S1 evidence and the merge of the Gate S1b foundation (PR #18 at `5801a029d3b2be784f641246d9f181f4c61ac953`, merge `d9e5ab0`); see *Acceptance record*
 - **Date:** 2026-09-01
 - **Supersedes/refines:** ADR 0008's initial upstream-Pi substrate direction
 - **Research:** [`../research/2026-09-01-agent-harness-landscape-and-substrate-bakeoff.md`](../research/2026-09-01-agent-harness-landscape-and-substrate-bakeoff.md)
@@ -365,3 +365,18 @@ Move this ADR from **Proposed** to **Accepted** only after:
 4. the implementation foundation PR records the exact pin and a reproducible component manifest.
 
 After acceptance, the next implementation PR should establish the pinned Prime Agent Command Governor distribution and ACP conformance harness. It should **not** start by porting OMP features, memory systems, or ChatGPT transport all at once.
+
+## Acceptance record
+
+Accepted on 2026-09-02. Each condition above, with where its evidence lives:
+
+1. **Gate S0 on the supported Mac** — Issue #15, executed 2026-09-01 (`spikes/2026-09-01-prime-agent-bakeoff/REPORT.md` on the spike branch; comment on #15). Prime Agent v0.8.1 installed from the verified release assets with no blocking defect; the required stable features were present. Verdict at the time: ACCEPT conditionally on three blockers (D1, D2, D8).
+2. **Gate S1, critical ambiguity and session-owner portions** — Issue #17 / PR #18, the Gate S1b adaptation layer, merged at exact head `5801a029d3b2be784f641246d9f181f4c61ac953` after six foreman review rounds (final: review 5089454598, FOREMAN PASS) and an independent non-implementing review that re-ran bootstrap and the full conformance suite on that exact head and returned PASS (CI run 33624941123, six required contexts). The three blockers are closed by the Governor, not by trusting the substrate: D2 by a structural classifier with a reviewed `(command, code)` proof matrix and a durable compare-and-swap ledger with adoption, exact-command digests, a two-phase supersede claim whose confirmed backlink is the sole authority for whether a replacement may have been sent, and one-write evidence; D1 by a versioned session registry with incarnations and a fenced recovery lease; D8 by canonical, fenced session paths. `docs/prime-native/adaptation-layer.md` is the design authority and carries the concurrency and crash-cut audits. The Issue #17 fallback trigger (only string-matching the worker-loss message could implement the guard) did not fire.
+3. **No license or distribution issue** — Prime Agent v0.8.1 is distributed under its upstream license from GitHub release assets pinned by SHA-256 and SHA-512 (`pins/pins.json`, `pins/SHA256SUMS`); nothing in the pin or the harness redistributes it under different terms. Prime is not on npm; the pin installs the verified tarballs with `--ignore-scripts`.
+4. **Exact pin and reproducible component manifest in the foundation PR** — `pins/pins.json` records Prime Agent v0.8.1 at commit `514633727bf26d74f39f3119c2b0e31a5ceb2a9d`, every asset with both digests, and the install root; `scripts/bootstrap.sh` verifies the upstream checksum file against the committed copy before installing; `conformance/tier1/pin.test.ts` and `substrate-pin.test.ts` assert the manifest, and `prime-protocol.test.ts` diffs the protocol facts the Governor relies on against the pinned build so a re-pin re-evaluates the guard deliberately.
+
+**What acceptance means.** Prime Agent v0.8.1 is the accepted production substrate. Upstream Pi v0.84.4 remains the recorded fallback and research path (frozen PR #16, tagged), never co-installed. The Rust crates remain a frozen migration oracle per ADR 0008 §10 until a dedicated retirement PR.
+
+**Recorded upstream.** The D2 worker-loss journal defect is reported as PrimeIntellect-ai/prime-agent discussion #1978; the Governor guard does not depend on it landing.
+
+**Not accepted here.** Gates S2 (ACP v1 conformance), S3 (sandbox/security baseline), S4, S5 and S6 remain open and are the next work; none of them re-opens the substrate decision unless the fallback trigger in Issue #17 fires.
