@@ -6,7 +6,7 @@
  *
  *   node ledger-race-child.ts <stateDir> <goFile> <commandId> <role> <tag>
  *
- * Roles: probe | resolve_observed | resolve_absent | adopt
+ * Roles: probe | resolve_observed | resolve_absent | adopt | supersede (replacement id `<tag>`)
  * Output: one JSON line `{ tag, role, outcome, code?, state?, version? }`.
  */
 
@@ -43,6 +43,9 @@ try {
 			break;
 		case "resolve_absent":
 			record = ledger.resolveUncertain(commandId, { kind: "effect_absent_proven", by: tag, detail: "absent", observedAt: new Date().toISOString() });
+			break;
+		case "supersede":
+			record = ledger.recordDispatch({ commandId: tag, clientId: "cg:race", command: { type: "execute_bash_and_wait", activeSessionId: "a", command: "true" }, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: commandId });
 			break;
 		case "adopt": {
 			const report = ledger.adoptAbandoned();

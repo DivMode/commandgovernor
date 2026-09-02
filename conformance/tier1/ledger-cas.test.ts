@@ -193,6 +193,92 @@ describe("D2: ledger writes are compare-and-swap", () => {
 		assert.throws(() => plain.recordOutcome("cg-2", { verdict: "uncertain", reason: "timeout" }), (e: unknown) => e instanceof MutationLedgerError && e.code === "illegal_transition");
 	});
 
+	it("supersede vs resolution: a resolution that lands first makes the claim fail, and no replacement record is created", () => {
+		let competed = false;
+		const { dir, ledger: A } = uncertain();
+		const B = new MutationLedger(dir, {
+			hooks: {
+				beforeCommit: (commandId) => {
+					if (competed || commandId !== "cg-1") return;
+					competed = true;
+					A.resolveUncertain("cg-1", observed); // O is COMPLETED before B's claim lands
+				},
+			},
+		});
+		assert.throws(
+			() => B.recordDispatch({ commandId: "cg-R", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }),
+			(e: unknown) => e instanceof MutationLedgerError && e.code === "supersedes_not_uncertain",
+		);
+		assert.equal(B.get("cg-R"), undefined, "the replacement was never created, so it can never be sent");
+		assert.equal(A.require("cg-1").supersededBy, undefined, "and no claim was written on the resolved record");
+	});
+
+	it("supersede vs supersede: exactly one claim wins, exactly one replacement exists, the loser is refused before creating anything", () => {
+		let competed = false;
+		const { dir, ledger: A } = uncertain();
+		const B = new MutationLedger(dir, {
+			hooks: {
+				beforeCommit: (commandId) => {
+					if (competed || commandId !== "cg-1") return;
+					competed = true;
+					A.recordDispatch({ commandId: "cg-RA", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" });
+				},
+			},
+		});
+		assert.throws(
+			() => B.recordDispatch({ commandId: "cg-RB", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }),
+			(e: unknown) => e instanceof MutationLedgerError && e.code === "already_superseded" && /cg-RA/.test(e.message),
+		);
+		assert.equal(B.get("cg-RB"), undefined, "the losing replacement was never created");
+		assert.equal(A.require("cg-RA")?.supersedes, "cg-1");
+		assert.equal(A.require("cg-1").supersededBy?.commandId, "cg-RA");
+		assert.equal(A.require("cg-1").state, "UNCERTAIN", "the claim does not resolve the record");
+		// Exact evidence about O still resolves it afterwards; the claim stays on the record for the reader.
+		const resolved = A.resolveUncertain("cg-1", observed);
+		assert.equal(resolved.state, "COMPLETED");
+		assert.equal(resolved.supersededBy?.commandId, "cg-RA");
+		// And nobody can supersede a resolved record, claimed or not.
+		assert.throws(() => A.recordDispatch({ commandId: "cg-RC", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /not UNCERTAIN/);
+	});
+
+	it("a claimant that dies between the claim and the create: the claim is released by a successor under the identity fence, and a new supersede succeeds", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-cas-"));
+		const probe = { alive: (pid: number) => pid !== 1001, startId: (pid: number) => `start:${pid}` };
+		const setup = new MutationLedger(dir, { processProbe: probe, self: { pid: 9, processStartId: "start:9" } });
+		setup.recordDispatch({ commandId: "cg-1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		setup.markUncertain("cg-1", "transport_lost");
+		const dying = new MutationLedger(dir, {
+			processProbe: probe,
+			self: { pid: 1001, processStartId: "start:1001" },
+			hooks: {
+				afterClaim: () => {
+					throw new Error("SIGKILL between the claim and the create");
+				},
+			},
+		});
+		assert.throws(() => dying.recordDispatch({ commandId: "cg-R1", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), /SIGKILL/);
+		assert.equal(setup.require("cg-1").supersededBy?.commandId, "cg-R1", "the claim is on disk");
+		assert.equal(setup.get("cg-R1"), undefined, "the replacement is not");
+		// A live claimant (pid 9's world says 1001 is alive) is honoured: the claim is pending, not released.
+		const cautious = new MutationLedger(dir, { processProbe: { alive: () => true, startId: (pid) => `start:${pid}` }, self: { pid: 2002, processStartId: "start:2002" } });
+		const pending = cautious.adoptAbandoned();
+		assert.deepEqual(pending.releasedClaims, []);
+		assert.deepEqual(pending.pendingClaims.map((c) => [c.record.commandId, c.verdict]), [["cg-1", "current"]]);
+		assert.throws(() => cautious.recordDispatch({ commandId: "cg-R2", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" }), (e: unknown) => e instanceof MutationLedgerError && e.code === "already_superseded");
+		// Once the claimant is proven gone, a successor releases the claim and a new supersede goes through.
+		const successor = new MutationLedger(dir, { processProbe: probe, self: { pid: 3003, processStartId: "start:3003" } });
+		const report = successor.adoptAbandoned();
+		assert.deepEqual(report.releasedClaims.map((r) => r.commandId), ["cg-1"]);
+		const released = successor.require("cg-1");
+		assert.equal(released.supersededBy, undefined);
+		assert.equal(released.transitions[released.transitions.length - 1]!.claim?.action, "released");
+		assert.equal(released.state, "UNCERTAIN");
+		const replacement = successor.recordDispatch({ commandId: "cg-R3", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0, supersedes: "cg-1" });
+		assert.equal(replacement.supersedes, "cg-1");
+		assert.equal(successor.require("cg-1").supersededBy?.commandId, "cg-R3");
+		assert.deepEqual(successor.adoptAbandoned().pendingClaims, [], "a claim whose replacement exists is not reported");
+	});
+
 	it("negative control: the pre-review rename-in-place write loses A's evidence from a stale snapshot", () => {
 		const { dir, ledger: A } = uncertain();
 		const B = new MutationLedger(dir);

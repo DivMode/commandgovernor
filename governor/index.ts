@@ -11,7 +11,9 @@ export type { ClassificationPolicy, Observation, PreEffectProof, UncertainReason
 export { PRE_EFFECT_PROOF_MATRIX, ProofMatrix, REVIEWED_PROOFS } from "./mutation/proof.ts";
 export type { EffectTiming, ProofReview } from "./mutation/proof.ts";
 export { MAX_CAS_ATTEMPTS, MutationLedger, MutationLedgerError, WITHHELD_COMMAND_FIELDS } from "./mutation/ledger.ts";
-export type { AdoptionReport, DispatcherIdentity, MutationLedgerHooks, MutationLedgerOptions, MutationRecord, MutationState, ResolutionEvidence } from "./mutation/ledger.ts";
+export type { AdoptionReport, DispatcherIdentity, MutationLedgerHooks, MutationLedgerOptions, MutationRecord, MutationState, ResolutionEvidence, SupersedeClaim } from "./mutation/ledger.ts";
+export { NO_CHANGE, VersionStore, VersionStoreError } from "./fs/versioned.ts";
+export type { VersionStoreHooks, VersionStoreOptions, Versioned } from "./fs/versioned.ts";
 export { COMMAND_DIGEST_PATTERN, canonicalJson, commandDigest } from "./mutation/digest.ts";
 export { ShortWrite, createFileExclusiveDurable, fsyncDirectory, mkdirDurable, unlinkDurable, writeAllSync, writeFileDurable } from "./fs/durable.ts";
 export type { DurableFs } from "./fs/durable.ts";

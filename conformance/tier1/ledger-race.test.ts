@@ -82,6 +82,38 @@ describe("D2: real processes racing on one record", () => {
 		assert.ok(states.slice(0, firstResolved).every((s, i) => (i === 0 ? s === "DISPATCHED" : s === "UNCERTAIN")));
 	});
 
+	it("six replacements and two resolutions racing on one uncertain record: at most one claim, at most one replacement record, resolution and claim never both pass the check-then-act", async () => {
+		const stateDir = mkdtempSync(join(tmpdir(), "cg-race-"));
+		const ledger = new MutationLedger(stateDir);
+		ledger.recordDispatch({ commandId: "cg-o", clientId: "cg:test", command, sessionId: "s", activeSessionId: "a", incarnationIndex: 0 });
+		ledger.markUncertain("cg-o", "transport_lost");
+
+		const roles = ["supersede", "supersede", "supersede", "supersede", "supersede", "supersede", "resolve_observed", "resolve_absent"];
+		const outcomes = await race(stateDir, "cg-o", roles);
+		const claims = outcomes.filter((o) => o.role === "supersede");
+		const won = claims.filter((o) => o.outcome === "ok");
+		assert.ok(won.length <= 1, `at most one replacement was claimed: ${JSON.stringify(outcomes)}`);
+		for (const lost of claims.filter((o) => o.outcome !== "ok")) {
+			assert.ok(lost.code === "already_superseded" || lost.code === "supersedes_not_uncertain", `a losing supersede is refused by the claim, not last-writer-wins: ${JSON.stringify(lost)}`);
+		}
+		const replacements = ledger.list().filter((r) => r.supersedes === "cg-o");
+		assert.equal(replacements.length, won.length, "exactly the winning replacement exists, no other");
+		const final = ledger.require("cg-o");
+		const history = ledger.history("cg-o");
+		const claimVersion = history.findIndex((v) => v.supersededBy !== undefined);
+		const resolvedVersion = history.findIndex((v) => v.state !== "UNCERTAIN" && v.state !== "DISPATCHED");
+		if (won.length === 1) {
+			assert.equal(final.supersededBy?.commandId, won[0]!.tag);
+			// The claim landed while the record was still UNCERTAIN: strictly before any resolution.
+			if (resolvedVersion >= 0) assert.ok(claimVersion < resolvedVersion, `claim v${claimVersion + 1} precedes resolution v${resolvedVersion + 1}`);
+		} else {
+			assert.equal(final.supersededBy, undefined);
+			assert.ok(resolvedVersion >= 0, "if no claim won, a resolution must have landed first");
+		}
+		const resolvers = outcomes.filter((o) => o.role.startsWith("resolve"));
+		assert.ok(resolvers.filter((o) => o.outcome === "ok").length <= 1);
+	});
+
 	it("many adopters of one abandoned record: exactly one adoption transition", async () => {
 		const stateDir = mkdtempSync(join(tmpdir(), "cg-race-"));
 		// A dispatcher that is certainly over: a pid the kernel has already reaped, with a start id nothing alive will match.

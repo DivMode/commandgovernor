@@ -24,7 +24,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { createFileExclusiveDurable } from "../fs/durable.ts";
+import { createFileExclusiveDurable, fsyncDirectory } from "../fs/durable.ts";
 import { currentProcessIdentity, type ProcessIdentity } from "../process/identity.ts";
 
 export const CLIENT_IDENTITY_FILE = "client-identity.json";
@@ -125,7 +125,13 @@ export interface LoadClientIdentityHooks {
 export function loadOrCreateClientIdentity(stateDir: string, hooks: LoadClientIdentityHooks = {}): LoadedClientIdentity {
 	const path = clientIdentityPath(stateDir);
 	try {
-		return { record: readClientIdentity(stateDir), created: false };
+		const record = readClientIdentity(stateDir);
+		// The name was linked by some process at some time, and a link is visible
+		// to other processes before its creator's directory fsync completes. This
+		// identity is about to be stamped on every envelope, so confirm the name
+		// durable here rather than assume the creator finished.
+		fsyncDirectory(stateDir);
+		return { record, created: false };
 	} catch (error) {
 		if (!(error instanceof ClientIdentityError) || error.code !== "identity_missing") throw error;
 	}

@@ -8,10 +8,14 @@
  * never used as a key. The Rust oracle called the same thing a "session
  * incarnation" (WRK-018, `stale_session_incarnation`) and this is its port.
  *
- * Storage is a directory of JSON files written durably (`governor/fs/durable.ts`:
- * temp file, fsync, rename, fsync of the directory). No database: the record
- * set is small, and a file per session means two Governor processes on one
- * state dir contend per session, not globally.
+ * Storage is a compare-and-swap over immutable versions
+ * (`governor/fs/versioned.ts`: `sessions/<sessionId>/vN.json`, each
+ * published by an exclusive `link` of an fsynced file). No database: the
+ * record set is small, and a directory per session means two Governor
+ * processes on one state dir contend per session, not globally -- and a
+ * generation bound from a stale snapshot cannot drop an incarnation another
+ * Governor appended in between, because every write re-derives against the
+ * record that is current when it lands.
  *
  * The recovery lease is the fence that makes "reopen exactly once" true under
  * concurrency. It is an exclusive, durable create of
@@ -29,10 +33,11 @@
  * can never delete a lease it did not inspect. The mutex is never stolen.
  */
 
-import { closeSync, openSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
+import { closeSync, openSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { createFileExclusiveDurable, mkdirDurable, unlinkDurable, writeAllSync, writeFileDurable } from "../fs/durable.ts";
+import { createFileExclusiveDurable, unlinkDurable, writeAllSync } from "../fs/durable.ts";
+import { NO_CHANGE, VersionStore, VersionStoreError, type VersionStoreHooks } from "../fs/versioned.ts";
 import { classifyProcessIdentity, currentProcessIdentity, identityProvesProcessOver, LIVE_PROBE, type ProcessIdentity, type ProcessIdentityVerdict, type ProcessProbe } from "../process/identity.ts";
 import type { CanonicalSessionPath } from "./paths.ts";
 
@@ -51,7 +56,9 @@ export interface Incarnation {
 }
 
 export interface SessionRecord {
-	readonly schemaVersion: 1;
+	readonly schemaVersion: 2;
+	/** The version this snapshot is; the file name `v<version>.json` is the authority. */
+	readonly version: number;
 	/** Prime's stable `sessionId`. The logical identity. */
 	readonly sessionId: string;
 	readonly sessionPath: CanonicalSessionPath;
@@ -176,7 +183,13 @@ export interface SessionRegistryOptions {
 	readonly processProbe?: ProcessProbe;
 	/** This process's identity as written into leases it takes. */
 	readonly self?: ProcessIdentity;
+	/** Test seams for the record store (see `governor/fs/versioned.ts`). */
+	readonly hooks?: VersionStoreHooks;
+	readonly maxAttempts?: number;
 }
+
+const SESSION_ID = /^[A-Za-z0-9._-]+$/;
+const LEASE_SUFFIX = /\.json\.recovery\.(lock|reclaim)$/;
 
 function readRaw(path: string): string | undefined {
 	try {
@@ -185,11 +198,6 @@ function readRaw(path: string): string | undefined {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
 	}
-}
-
-function readJson<T>(path: string): T | undefined {
-	const raw = readRaw(path);
-	return raw === undefined ? undefined : (JSON.parse(raw) as T);
 }
 
 function isLeaseRecord(value: unknown): value is RecoveryLeaseRecord {
@@ -207,31 +215,70 @@ function isLeaseRecord(value: unknown): value is RecoveryLeaseRecord {
 
 export class SessionRegistry {
 	readonly dir: string;
+	readonly #store: VersionStore<SessionRecord>;
 	readonly #probe: ProcessProbe;
 	readonly #self: ProcessIdentity | undefined;
 
 	constructor(stateDir: string, options: SessionRegistryOptions = {}) {
 		this.dir = join(stateDir, "sessions");
-		mkdirDurable(this.dir, { mode: 0o700 });
+		this.#store = new VersionStore<SessionRecord>(this.dir, {
+			idPattern: SESSION_ID,
+			ignore: (name) => LEASE_SUFFIX.test(name),
+			...(options.hooks ? { hooks: options.hooks } : {}),
+			...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
+		});
 		this.#probe = options.processProbe ?? LIVE_PROBE;
 		this.#self = options.self;
 	}
 
-	#recordPath(sessionId: string): string {
-		if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) throw new Error(`refusing to use ${JSON.stringify(sessionId)} as a file name`);
+	/** The lease and reclaim-mutex names live beside the record directory, as `<sessionId>.json.recovery.*`. */
+	#leaseBase(sessionId: string): string {
+		if (!SESSION_ID.test(sessionId)) throw new Error(`refusing to use ${JSON.stringify(sessionId)} as a file name`);
 		return join(this.dir, `${sessionId}.json`);
 	}
 
 	#leasePath(sessionId: string): string {
-		return `${this.#recordPath(sessionId)}.recovery.lock`;
+		return `${this.#leaseBase(sessionId)}.recovery.lock`;
 	}
 
-	#write(sessionId: string, record: SessionRecord): void {
-		writeFileDurable(this.#recordPath(sessionId), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+	/** The compare-and-swap every record write goes through; the store's "unknown" is the registry's. */
+	#update(sessionId: string, derive: (current: SessionRecord) => Omit<SessionRecord, "version"> | typeof NO_CHANGE): SessionRecord {
+		try {
+			return this.#store.update(sessionId, derive);
+		} catch (error) {
+			if (error instanceof VersionStoreError && error.code === "unknown_record") throw new UnknownSessionError(sessionId);
+			if (error instanceof VersionStoreError && error.code === "bad_id") throw new Error(`refusing to use ${JSON.stringify(sessionId)} as a file name`);
+			throw error;
+		}
+	}
+
+	/** The path of the current version of `sessionId`; for operators and tests. */
+	currentVersionPath(sessionId: string): string {
+		try {
+			return this.#store.currentVersionPath(sessionId);
+		} catch (error) {
+			if (error instanceof VersionStoreError && error.code === "unknown_record") throw new UnknownSessionError(sessionId);
+			throw error;
+		}
+	}
+
+	/** Every version of `sessionId`, oldest first. */
+	history(sessionId: string): SessionRecord[] {
+		try {
+			return this.#store.history(sessionId);
+		} catch (error) {
+			if (error instanceof VersionStoreError && error.code === "unknown_record") throw new UnknownSessionError(sessionId);
+			throw error;
+		}
 	}
 
 	get(sessionId: string): SessionRecord | undefined {
-		return readJson<SessionRecord>(this.#recordPath(sessionId));
+		try {
+			return this.#store.get(sessionId);
+		} catch (error) {
+			if (error instanceof VersionStoreError && error.code === "bad_id") throw new Error(`refusing to use ${JSON.stringify(sessionId)} as a file name`);
+			throw error;
+		}
 	}
 
 	require(sessionId: string): SessionRecord {
@@ -241,11 +288,7 @@ export class SessionRegistry {
 	}
 
 	list(): SessionRecord[] {
-		return readdirSync(this.dir)
-			.filter((name) => name.endsWith(".json"))
-			.map((name) => readJson<SessionRecord>(join(this.dir, name)))
-			.filter((record): record is SessionRecord => record !== undefined)
-			.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+		return this.#store.list().sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.sessionId.localeCompare(b.sessionId));
 	}
 
 	/** The record for a canonical path, if one logical session owns it. */
@@ -276,19 +319,19 @@ export class SessionRegistry {
 	 * process and an incarnation is one worker process.
 	 */
 	recordGeneration(sessionId: string, activeSessionId: string, generation: string): Incarnation {
-		const record = this.require(sessionId);
-		const index = record.incarnations.findIndex((inc) => inc.activeSessionId === activeSessionId);
-		const known = record.incarnations[index];
-		if (!known) throw new StaleIncarnationError(sessionId, activeSessionId, this.current(sessionId).activeSessionId);
-		if (known.generation === generation) return known;
-		if (known.generation !== undefined) {
-			throw new Error(`incarnation ${activeSessionId} of ${sessionId} already has generation ${known.generation}; refusing to rebind it to ${generation}`);
-		}
-		const bound: Incarnation = { ...known, generation };
-		const incarnations = [...record.incarnations];
-		incarnations[index] = bound;
-		this.#write(sessionId, { ...record, incarnations });
-		return bound;
+		const updated = this.#update(sessionId, (record) => {
+			const index = record.incarnations.findIndex((inc) => inc.activeSessionId === activeSessionId);
+			const known = record.incarnations[index];
+			if (!known) throw new StaleIncarnationError(sessionId, activeSessionId, record.incarnations[record.incarnations.length - 1]!.activeSessionId);
+			if (known.generation === generation) return NO_CHANGE;
+			if (known.generation !== undefined) {
+				throw new Error(`incarnation ${activeSessionId} of ${sessionId} already has generation ${known.generation}; refusing to rebind it to ${generation}`);
+			}
+			const incarnations = [...record.incarnations];
+			incarnations[index] = { ...known, generation };
+			return { ...record, incarnations };
+		});
+		return updated.incarnations.find((inc) => inc.activeSessionId === activeSessionId)!;
 	}
 
 	/** The cursor fence: the presented generation must be the current incarnation's. */
@@ -300,7 +343,13 @@ export class SessionRegistry {
 		return current;
 	}
 
-	/** Record a brand-new logical session with its first incarnation. */
+	/**
+	 * Record a brand-new logical session with its first incarnation. Two
+	 * Governors that both created (Prime converges a `create` on one path to
+	 * one session) converge here too: a second `create` for the same session
+	 * on the same path records its incarnation instead of failing. A second
+	 * `create` for the same session on a DIFFERENT path is an error.
+	 */
 	create(input: {
 		sessionId: string;
 		sessionPath: CanonicalSessionPath;
@@ -311,16 +360,19 @@ export class SessionRegistry {
 		openedBy: string;
 	}): SessionRecord {
 		const existing = this.get(input.sessionId);
+		if (existing && existing.sessionPath !== input.sessionPath) {
+			throw new Error(`session ${input.sessionId} already has a registry record for ${existing.sessionPath}; use recordIncarnation`);
+		}
 		if (existing) {
-			throw new Error(`session ${input.sessionId} already has a registry record; use recordIncarnation`);
+			return this.recordIncarnation({ sessionId: input.sessionId, activeSessionId: input.activeSessionId, workerPid: input.workerPid, generation: input.generation, cause: "converged", openedBy: input.openedBy }).record;
 		}
 		const owner = this.findByPath(input.sessionPath);
 		if (owner) {
 			throw new Error(`session path ${input.sessionPath} is already bound to session ${owner.sessionId}`);
 		}
 		const now = new Date().toISOString();
-		const record: SessionRecord = {
-			schemaVersion: 1,
+		const record: Omit<SessionRecord, "version"> = {
+			schemaVersion: 2,
 			sessionId: input.sessionId,
 			sessionPath: input.sessionPath,
 			lifecycle: input.lifecycle,
@@ -337,8 +389,13 @@ export class SessionRegistry {
 				},
 			],
 		};
-		this.#write(input.sessionId, record);
-		return record;
+		try {
+			return this.#store.create(input.sessionId, record);
+		} catch (error) {
+			if (!(error instanceof VersionStoreError) || error.code !== "duplicate_record") throw error;
+			// Lost the race to create this session's record: converge on the winner's.
+			return this.create(input);
+		}
 	}
 
 	/**
@@ -353,21 +410,24 @@ export class SessionRegistry {
 		cause: Exclude<IncarnationCause, "create">;
 		openedBy: string;
 	}): { record: SessionRecord; incarnation: Incarnation; appended: boolean } {
-		const record = this.require(input.sessionId);
-		const known = record.incarnations.find((inc) => inc.activeSessionId === input.activeSessionId);
-		if (known) return { record, incarnation: known, appended: false };
-		const incarnation: Incarnation = {
-			index: record.incarnations.length,
-			activeSessionId: input.activeSessionId,
-			...(input.workerPid !== undefined ? { workerPid: input.workerPid } : {}),
-			...(input.generation !== undefined ? { generation: input.generation } : {}),
-			openedAt: new Date().toISOString(),
-			cause: input.cause,
-			openedBy: input.openedBy,
-		};
-		const updated: SessionRecord = { ...record, incarnations: [...record.incarnations, incarnation] };
-		this.#write(input.sessionId, updated);
-		return { record: updated, incarnation, appended: true };
+		let appended = false;
+		const record = this.#update(input.sessionId, (current) => {
+			appended = false;
+			if (current.incarnations.some((inc) => inc.activeSessionId === input.activeSessionId)) return NO_CHANGE;
+			appended = true;
+			const incarnation: Incarnation = {
+				index: current.incarnations.length,
+				activeSessionId: input.activeSessionId,
+				...(input.workerPid !== undefined ? { workerPid: input.workerPid } : {}),
+				...(input.generation !== undefined ? { generation: input.generation } : {}),
+				openedAt: new Date().toISOString(),
+				cause: input.cause,
+				openedBy: input.openedBy,
+			};
+			return { ...current, incarnations: [...current.incarnations, incarnation] };
+		});
+		const incarnation = record.incarnations.find((inc) => inc.activeSessionId === input.activeSessionId)!;
+		return { record, incarnation, appended };
 	}
 
 	/** The lease on disk for `sessionId`, if any, with the verdict on its holder's process and the exact bytes inspected. */
@@ -489,7 +549,7 @@ export class SessionRegistry {
 	}
 
 	#reclaimMutexPath(sessionId: string): string {
-		return `${this.#recordPath(sessionId)}.recovery.reclaim`;
+		return `${this.#leaseBase(sessionId)}.recovery.reclaim`;
 	}
 
 	#reclaimBlocked(sessionId: string): RecoveryReclaimBlocked {

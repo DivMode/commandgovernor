@@ -21,20 +21,25 @@
  * decision expressed as a NEW command with its own record and an explicit
  * `supersedes` link, never an automatic one.
  *
- * **Storage is a compare-and-swap, not a rename.** Several Governors may
- * share a state directory, and a read-modify-rename would let a stale
- * writer put an old snapshot over a newer one: exact evidence that resolved
- * a record could vanish and the mutation become uncertain, and supersedable,
- * again. So a record is a directory `<commandId>/` of immutable versions
- * `v1.json, v2.json, ...`, and every write is "read the highest version N,
- * derive the next state, publish `v(N+1).json` with an exclusive
- * (`link(2)`) create". If `v(N+1)` already exists, another writer got there
- * first; this one re-reads and re-applies against the new state, where a
- * transition that is no longer legal is refused. Nothing is ever renamed
- * over, unlinked or locked, so there is no stale lock to reclaim and no
- * partial file to observe: every version is complete and fsynced before its
- * name exists. The highest version is the record; older ones are its
- * history, kept.
+ * **Storage is a compare-and-swap** (`governor/fs/versioned.ts`): a record
+ * is a directory of immutable versions and every write publishes the next
+ * version exclusively, re-deriving against whatever is current when it
+ * lands. Several Governors may share a state directory; none can regress a
+ * record or lose another's write.
+ *
+ * **Superseding is a claim on the OLD record.** "Is O still UNCERTAIN?"
+ * followed by "create R" is a check-then-act across two records, and the
+ * CAS on each record alone does not serialise it: O could be resolved in
+ * between, or two Governors could both pass the check and both send a
+ * replacement. So `recordDispatch({ supersedes: O })` first writes
+ * `supersededBy: R` onto O by compare-and-swap, which requires O to be
+ * UNCERTAIN and unclaimed at the moment the write lands; only then is R's
+ * record created and only then may R be sent. A resolution that lands
+ * first makes the claim fail; a claim that lands first makes the second
+ * claim fail. Exact evidence about O may still resolve it afterwards (the
+ * claim is on the record for the human who reads it). A claim whose
+ * claimant died before creating R is released by {@link adoptAbandoned}
+ * under the same process-identity fence adoption uses.
  *
  * Two facts every record carries so that the crash window the ledger exists
  * for cannot swallow an obligation:
@@ -57,14 +62,15 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { createFileExclusiveDurable, mkdirDurable } from "../fs/durable.ts";
+import { NO_CHANGE, VersionStore, VersionStoreError, type VersionStoreHooks } from "../fs/versioned.ts";
 import type { DaemonCommand, DaemonResponse } from "../prime/protocol.ts";
 import { classifyProcessIdentity, LIVE_PROBE, type ProcessIdentity, type ProcessIdentityVerdict, type ProcessProbe, identityProvesProcessOver } from "../process/identity.ts";
 import type { PreEffectProof, UncertainReason, Verdict } from "./classify.ts";
 import { commandDigest } from "./digest.ts";
+
+export { MAX_CAS_ATTEMPTS } from "../fs/versioned.ts";
 
 export type MutationState = "DISPATCHED" | "COMPLETED" | "FAILED" | "UNCERTAIN";
 
@@ -82,11 +88,21 @@ export interface MutationTransition {
 	readonly response?: DaemonResponse;
 	/** For an adoption: the verdict on the dispatching process and who adopted. */
 	readonly adoption?: { readonly dispatcher: DispatcherIdentity; readonly verdict: ProcessIdentityVerdict; readonly adoptedBy: DispatcherIdentity };
+	/** For a supersede claim taken or released. */
+	readonly claim?: { readonly action: "taken" | "released"; readonly replacement: string; readonly by: DispatcherIdentity; readonly verdict?: ProcessIdentityVerdict };
 }
 
 /** The Governor process that wrote a record, in the same terms as a recovery lease holder. */
 export interface DispatcherIdentity extends ProcessIdentity {
 	readonly ownerToken: string;
+}
+
+/** The durable claim that a replacement command is being dispatched for an uncertain record. */
+export interface SupersedeClaim {
+	/** The replacement command id. */
+	readonly commandId: string;
+	readonly claimedBy: DispatcherIdentity;
+	readonly claimedAt: string;
 }
 
 /** Field names that carry environment values, at any depth, and are never stored in a record. */
@@ -114,11 +130,20 @@ export interface MutationRecord {
 	readonly transitions: readonly MutationTransition[];
 	/** A human-issued replacement names the uncertain record it supersedes. */
 	readonly supersedes?: string;
+	/** The replacement claimed for this uncertain record; at most one, ever, unless released after its claimant died. */
+	readonly supersededBy?: SupersedeClaim;
 	/** Attempts to fetch the substrate's stored result for this id, for the record. */
 	readonly probes?: readonly { readonly at: string; readonly response?: DaemonResponse; readonly detail?: string }[];
 }
 
-export type MutationLedgerErrorCode = "duplicate_command_id" | "illegal_transition" | "unknown_command" | "supersedes_not_uncertain" | "contended" | "corrupt_history";
+export type MutationLedgerErrorCode =
+	| "duplicate_command_id"
+	| "illegal_transition"
+	| "unknown_command"
+	| "supersedes_not_uncertain"
+	| "already_superseded"
+	| "contended"
+	| "corrupt_history";
 
 export class MutationLedgerError extends Error {
 	readonly code: MutationLedgerErrorCode;
@@ -137,6 +162,10 @@ export interface AdoptionReport {
 	readonly inFlight: readonly MutationRecord[];
 	/** DISPATCHED records whose dispatcher cannot be classified. Left alone and reported: an operator decides. */
 	readonly undecidable: readonly { readonly record: MutationRecord; readonly verdict: ProcessIdentityVerdict }[];
+	/** Supersede claims whose replacement was never created and whose claimant is proven over; released. */
+	readonly releasedClaims: readonly MutationRecord[];
+	/** Supersede claims whose replacement was never created but whose claimant is alive or cannot be told. Left. */
+	readonly pendingClaims: readonly { readonly record: MutationRecord; readonly verdict: ProcessIdentityVerdict }[];
 	/** Entries under `mutations/` that are not record directories. Ignored by every listing and reported here. */
 	readonly strays: readonly string[];
 }
@@ -144,10 +173,13 @@ export interface AdoptionReport {
 /**
  * Test seams. `beforeCommit` runs after a write has read the current
  * version and derived the next, and before it tries to publish, which is
- * exactly where a concurrent writer can win. Production callers pass none.
+ * exactly where a concurrent writer can win. `afterClaim` runs after a
+ * supersede claim has been published on the old record and before the
+ * replacement record is created, which is where a Governor can die.
+ * Production callers pass none.
  */
-export interface MutationLedgerHooks {
-	readonly beforeCommit?: (commandId: string, fromVersion: number) => void;
+export interface MutationLedgerHooks extends VersionStoreHooks {
+	readonly afterClaim?: (superseded: string, replacement: string) => void;
 }
 
 export interface MutationLedgerOptions {
@@ -158,32 +190,8 @@ export interface MutationLedgerOptions {
 	/** This Governor instance's owner token. */
 	readonly ownerToken?: string;
 	readonly hooks?: MutationLedgerHooks;
-	/** Attempts a write makes before reporting `contended`; defaults to {@link MAX_CAS_ATTEMPTS}. Tests lower it. */
+	/** Attempts a write makes before reporting `contended`; defaults to the store's bound. Tests lower it. */
 	readonly maxAttempts?: number;
-}
-
-/**
- * Attempts a write makes against concurrent writers before it reports
- * contention. Every lost attempt means another writer made progress, so
- * exhaustion needs that many OTHER writes to land on one record while this
- * one keeps losing; with the backoff below that took more than 32 processes
- * hammering one record to approach at the previous limit of 64.
- */
-export const MAX_CAS_ATTEMPTS = 1024;
-
-/** Upper bound of the jittered pause after a lost attempt, in milliseconds. */
-const CAS_BACKOFF_MAX_MS = 25;
-
-const VERSION_FILE = /^v([1-9]\d*)\.json$/;
-const COMMAND_ID = /^[A-Za-z0-9._:-]+$/;
-
-const sleeper = new Int32Array(new SharedArrayBuffer(4));
-
-/** Synchronous, jittered pause; the write path is synchronous on purpose (see durable.ts). */
-function backoff(attempt: number): void {
-	const cap = Math.min(CAS_BACKOFF_MAX_MS, 1 + attempt);
-	const ms = Math.random() * cap;
-	if (ms >= 0.5) Atomics.wait(sleeper, 0, 0, ms);
 }
 
 /**
@@ -212,28 +220,45 @@ function storableCommand(command: DaemonCommand): { command: DaemonCommand; with
 	return { command: stored, withheld };
 }
 
-function serialise(record: MutationRecord): string {
-	return `${JSON.stringify(record, null, 2)}\n`;
+/** The store's errors in the ledger's vocabulary. */
+function translate(error: unknown): never {
+	if (error instanceof VersionStoreError) {
+		switch (error.code) {
+			case "unknown_record":
+				throw new MutationLedgerError("unknown_command", `no ledger record for ${error.id}`);
+			case "duplicate_record":
+				throw new MutationLedgerError("duplicate_command_id", `command id ${error.id} was already dispatched; a command id is never reused`);
+			case "contended":
+				throw new MutationLedgerError("contended", error.message);
+			case "corrupt_history":
+				throw new MutationLedgerError("corrupt_history", error.message);
+			case "bad_id":
+				throw new Error(`refusing to use ${JSON.stringify(error.id)} as a file name`);
+		}
+	}
+	throw error;
 }
 
 export class MutationLedger {
 	readonly dir: string;
+	readonly #store: VersionStore<MutationRecord>;
 	readonly #probe: ProcessProbe;
 	readonly #self: DispatcherIdentity;
 	readonly #hooks: MutationLedgerHooks;
-	readonly #maxAttempts: number;
 
 	constructor(stateDir: string, options: MutationLedgerOptions = {}) {
 		this.dir = join(stateDir, "mutations");
-		mkdirDurable(this.dir, { mode: 0o700 });
+		this.#hooks = options.hooks ?? {};
+		this.#store = new VersionStore<MutationRecord>(this.dir, {
+			hooks: this.#hooks,
+			...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
+		});
 		this.#probe = options.processProbe ?? LIVE_PROBE;
 		const self = options.self ?? { pid: process.pid };
 		// The default token carries randomness: a token derived from the pid
 		// alone would let a successor that recycled a dead dispatcher's pid call
 		// that dispatcher's record its own and never inspect it.
 		this.#self = { ...self, ownerToken: options.ownerToken ?? `pid#${self.pid}#${randomUUID().slice(0, 8)}` };
-		this.#hooks = options.hooks ?? {};
-		this.#maxAttempts = options.maxAttempts ?? MAX_CAS_ATTEMPTS;
 	}
 
 	/** The identity this ledger writes as dispatcher. */
@@ -241,92 +266,47 @@ export class MutationLedger {
 		return this.#self;
 	}
 
-	#recordDir(commandId: string): string {
-		if (!COMMAND_ID.test(commandId)) throw new Error(`refusing to use ${JSON.stringify(commandId)} as a file name`);
-		return join(this.dir, commandId);
-	}
-
-	/** Record directory names under `mutations/`, and the entries that are not. */
-	#entries(): { ids: string[]; strays: string[] } {
-		const ids: string[] = [];
-		const strays: string[] = [];
-		for (const entry of readdirSync(this.dir, { withFileTypes: true })) {
-			if (entry.isDirectory() && COMMAND_ID.test(entry.name)) ids.push(entry.name);
-			else strays.push(entry.name);
-		}
-		return { ids, strays };
-	}
-
-	/** Entries under `mutations/` that are not record directories; never read, always reported. */
-	strays(): string[] {
-		return this.#entries().strays;
-	}
-
-	#versionPath(commandId: string, version: number): string {
-		return join(this.#recordDir(commandId), `v${version}.json`);
-	}
-
-	/** The highest version on disk for `commandId`, or undefined for no record. */
-	#current(commandId: string): { record: MutationRecord; version: number } | undefined {
-		let names: string[];
-		try {
-			names = readdirSync(this.#recordDir(commandId));
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-			throw error;
-		}
-		let version = 0;
-		for (const name of names) {
-			const match = VERSION_FILE.exec(name);
-			if (match) version = Math.max(version, Number(match[1]));
-		}
-		if (version === 0) return undefined; // a directory with no published version yet (a creator died before its link)
-		// A version is published complete (link of an fsynced file); it is never partial.
-		const parsed = JSON.parse(readFileSync(this.#versionPath(commandId, version), "utf8")) as MutationRecord;
-		return { record: { ...parsed, version }, version };
-	}
-
 	/** The path of the current version of `commandId`; for operators and tests. */
 	currentVersionPath(commandId: string): string {
-		const current = this.#current(commandId);
-		if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
-		return this.#versionPath(commandId, current.version);
+		try {
+			return this.#store.currentVersionPath(commandId);
+		} catch (error) {
+			return translate(error);
+		}
 	}
 
 	get(commandId: string): MutationRecord | undefined {
-		return this.#current(commandId)?.record;
+		try {
+			return this.#store.get(commandId);
+		} catch (error) {
+			return translate(error);
+		}
 	}
 
 	require(commandId: string): MutationRecord {
-		const record = this.get(commandId);
-		if (!record) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
-		return record;
+		try {
+			return this.#store.require(commandId);
+		} catch (error) {
+			return translate(error);
+		}
 	}
 
 	/** Every version of `commandId`, oldest first: the record's history. */
 	history(commandId: string): MutationRecord[] {
-		const current = this.#current(commandId);
-		if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
-		const versions: MutationRecord[] = [];
-		for (let version = 1; version <= current.version; version += 1) {
-			let raw: string;
-			try {
-				raw = readFileSync(this.#versionPath(commandId, version), "utf8");
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-				// Nothing in the Governor removes a version; a gap is damage, and is named as such.
-				throw new MutationLedgerError("corrupt_history", `${commandId}: version ${version} is missing although version ${current.version} exists`);
-			}
-			versions.push({ ...(JSON.parse(raw) as MutationRecord), version });
+		try {
+			return this.#store.history(commandId);
+		} catch (error) {
+			return translate(error);
 		}
-		return versions;
+	}
+
+	/** Entries under `mutations/` that are not record directories; never read, always reported. */
+	strays(): string[] {
+		return this.#store.entries().strays;
 	}
 
 	list(): MutationRecord[] {
-		return this.#entries()
-			.ids.map((id) => this.get(id))
-			.filter((record): record is MutationRecord => record !== undefined)
-			.sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt) || a.commandId.localeCompare(b.commandId));
+		return this.#store.list().sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt) || a.commandId.localeCompare(b.commandId));
 	}
 
 	/**
@@ -345,13 +325,48 @@ export class MutationLedger {
 	 * lease uses: `gone` or `replaced` adopts; `current` is a live owner and is
 	 * fenced; `unknown` is reported and left. A record dispatched by THIS
 	 * ledger's owner token is in flight here and never inspected.
+	 *
+	 * Likewise a supersede claim whose replacement record was never created
+	 * (the claimant died between the claim and the create) is released when
+	 * the claimant is proven over, and reported otherwise.
 	 */
 	adoptAbandoned(): AdoptionReport {
 		const adopted: MutationRecord[] = [];
 		const inFlight: MutationRecord[] = [];
 		const undecidable: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
+		const releasedClaims: MutationRecord[] = [];
+		const pendingClaims: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
 		const strays = this.strays();
 		for (const record of this.list()) {
+			if (record.state === "UNCERTAIN" && record.supersededBy) {
+				const claim = record.supersededBy;
+				const replacement = this.get(claim.commandId);
+				if (replacement !== undefined && replacement.supersedes === record.commandId) continue; // the replacement exists: the claim is doing its job
+				const verdict = claim.claimedBy.ownerToken === this.#self.ownerToken ? "current" : classifyProcessIdentity(claim.claimedBy, this.#probe);
+				if (!identityProvesProcessOver(verdict)) {
+					pendingClaims.push({ record, verdict });
+					continue;
+				}
+				releasedClaims.push(
+					this.#update(record.commandId, (current) => {
+						if (current.state !== "UNCERTAIN" || !current.supersededBy || current.supersededBy.commandId !== claim.commandId) return NO_CHANGE;
+						const { supersededBy: _released, ...rest } = current;
+						return {
+							...rest,
+							transitions: [
+								...current.transitions,
+								{
+									at: new Date().toISOString(),
+									to: "UNCERTAIN",
+									reason: `supersede claim by ${claim.commandId} released: the claimant (pid ${claim.claimedBy.pid}) is ${verdict} and never created the replacement`,
+									claim: { action: "released", replacement: claim.commandId, by: this.#self, verdict },
+								},
+							],
+						};
+					}),
+				);
+				continue;
+			}
 			if (record.state !== "DISPATCHED") continue;
 			const dispatcher = record.dispatchedBy;
 			if (dispatcher === undefined || typeof dispatcher.pid !== "number") {
@@ -388,7 +403,7 @@ export class MutationLedger {
 				if (!(error instanceof MutationLedgerError) || error.code !== "illegal_transition") throw error;
 			}
 		}
-		return { adopted, inFlight, undecidable, strays };
+		return { adopted, inFlight, undecidable, releasedClaims, pendingClaims, strays };
 	}
 
 	/**
@@ -396,6 +411,9 @@ export class MutationLedger {
 	 * envelope is written to the socket. Refuses an id that already exists:
 	 * a command id is dispatched once, ever. The complete wire command is
 	 * digested; environment-bearing fields are withheld from the stored copy.
+	 *
+	 * With `supersedes`, the claim on the old record is taken FIRST, by
+	 * compare-and-swap, and the replacement is created only if it succeeds.
 	 */
 	recordDispatch(input: {
 		commandId: string;
@@ -410,17 +428,14 @@ export class MutationLedger {
 			throw new MutationLedgerError("duplicate_command_id", `command id ${input.commandId} was already dispatched; a command id is never reused`);
 		}
 		if (input.supersedes !== undefined) {
-			const prior = this.require(input.supersedes);
-			if (prior.state !== "UNCERTAIN") {
-				throw new MutationLedgerError("supersedes_not_uncertain", `${input.supersedes} is ${prior.state}, not UNCERTAIN; only an uncertain mutation may be superseded`);
-			}
+			this.#claim(input.supersedes, input.commandId);
+			this.#hooks.afterClaim?.(input.supersedes, input.commandId);
 		}
 		const now = new Date().toISOString();
 		const stored = storableCommand(input.command);
-		const record: MutationRecord = {
+		const record: Omit<MutationRecord, "version"> = {
 			schemaVersion: 2,
 			commandId: input.commandId,
-			version: 1,
 			clientId: input.clientId,
 			commandType: input.command.type,
 			command: stored.command,
@@ -432,44 +447,53 @@ export class MutationLedger {
 			dispatchedBy: this.#self,
 			state: "DISPATCHED",
 			dispatchedAt: now,
-			transitions: [{ at: now, to: "DISPATCHED", reason: "intent recorded before send" }],
+			transitions: [{ at: now, to: "DISPATCHED", reason: input.supersedes !== undefined ? `intent recorded before send; supersedes ${input.supersedes}` : "intent recorded before send" }],
 			...(input.supersedes !== undefined ? { supersedes: input.supersedes } : {}),
 		};
-		mkdirDurable(this.#recordDir(input.commandId), { mode: 0o700 });
-		// Version 1 is an exclusive create too: two dispatchers of one id cannot both succeed.
-		const created = createFileExclusiveDurable(this.#versionPath(input.commandId, 1), serialise(record), { mode: 0o600 });
-		if (created.outcome !== "created") {
-			throw new MutationLedgerError("duplicate_command_id", `command id ${input.commandId} was dispatched concurrently by another writer; a command id is never reused`);
+		try {
+			return this.#store.create(input.commandId, record);
+		} catch (error) {
+			return translate(error);
 		}
-		return record;
 	}
 
 	/**
-	 * The compare-and-swap every write goes through: read the current version,
-	 * check `from` against its state, derive the next record, publish it as the
-	 * next version with an exclusive create. A version that appears in between
-	 * means another writer won; re-read and re-apply against the new state.
+	 * The serialisation point of a supersede: `supersededBy` is written onto
+	 * the OLD record by compare-and-swap, and the write is refused unless the
+	 * record is UNCERTAIN and unclaimed at the moment it lands.
 	 */
-	#update(commandId: string, from: readonly MutationState[] | undefined, target: MutationState | undefined, derive: (current: MutationRecord) => Omit<MutationRecord, "version">): MutationRecord {
-		for (let attempt = 0; attempt < this.#maxAttempts; attempt += 1) {
-			const current = this.#current(commandId);
-			if (!current) throw new MutationLedgerError("unknown_command", `no ledger record for ${commandId}`);
-			if (from && !from.includes(current.record.state)) {
-				throw new MutationLedgerError("illegal_transition", `${commandId}: ${current.record.state} -> ${target ?? "?"} is not a legal transition`);
+	#claim(superseded: string, replacement: string): MutationRecord {
+		return this.#update(superseded, (current) => {
+			if (current.state !== "UNCERTAIN") {
+				throw new MutationLedgerError("supersedes_not_uncertain", `${superseded} is ${current.state}, not UNCERTAIN; only an uncertain mutation may be superseded`);
 			}
-			const next: MutationRecord = { ...derive(current.record), version: current.version + 1 };
-			this.#hooks.beforeCommit?.(commandId, current.version);
-			const published = createFileExclusiveDurable(this.#versionPath(commandId, next.version), serialise(next), { mode: 0o600 });
-			if (published.outcome === "created") return next;
-			// "exists": a concurrent writer published this version; "vanished"
-			// cannot happen (versions are never removed) and is treated the same.
-			backoff(attempt);
+			if (current.supersededBy !== undefined) {
+				throw new MutationLedgerError("already_superseded", `${superseded} is already superseded by ${current.supersededBy.commandId} (claimed by ${current.supersededBy.claimedBy.ownerToken}); a second replacement is refused`);
+			}
+			const claimedAt = new Date().toISOString();
+			return {
+				...current,
+				supersededBy: { commandId: replacement, claimedBy: this.#self, claimedAt },
+				transitions: [...current.transitions, { at: claimedAt, to: "UNCERTAIN", reason: `supersede claim taken by ${replacement}`, claim: { action: "taken", replacement, by: this.#self } }],
+			};
+		});
+	}
+
+	#update(commandId: string, derive: (current: MutationRecord) => Omit<MutationRecord, "version"> | typeof NO_CHANGE): MutationRecord {
+		try {
+			return this.#store.update(commandId, derive);
+		} catch (error) {
+			return translate(error);
 		}
-		throw new MutationLedgerError("contended", `${commandId}: ${this.#maxAttempts} attempts each found a newer version; giving up without writing`);
 	}
 
 	#transition(commandId: string, from: readonly MutationState[], transition: MutationTransition): MutationRecord {
-		return this.#update(commandId, from, transition.to, (current) => ({ ...current, state: transition.to, transitions: [...current.transitions, transition] }));
+		return this.#update(commandId, (current) => {
+			if (!from.includes(current.state)) {
+				throw new MutationLedgerError("illegal_transition", `${commandId}: ${current.state} -> ${transition.to} is not a legal transition`);
+			}
+			return { ...current, state: transition.to, transitions: [...current.transitions, transition] };
+		});
 	}
 
 	markCompleted(commandId: string, response: DaemonResponse): MutationRecord {
@@ -524,7 +548,12 @@ export class MutationLedger {
 		}
 	}
 
-	/** The only way out of UNCERTAIN: exact evidence about the external effect. */
+	/**
+	 * The only way out of UNCERTAIN: exact evidence about the external effect.
+	 * A record that carries a supersede claim may still be resolved: the
+	 * evidence is about the original command, and the claim stays on the
+	 * record for whoever reads it.
+	 */
 	resolveUncertain(commandId: string, evidence: ResolutionEvidence): MutationRecord {
 		const to: MutationState = evidence.kind === "effect_observed" ? "COMPLETED" : "FAILED";
 		return this.#transition(commandId, ["UNCERTAIN"], { at: new Date().toISOString(), to, reason: `resolved by ${evidence.kind}`, evidence });
@@ -537,6 +566,6 @@ export class MutationLedger {
 	 * appended to the resolved record, never over it.
 	 */
 	recordProbe(commandId: string, probe: { response?: DaemonResponse; detail?: string }): MutationRecord {
-		return this.#update(commandId, undefined, undefined, (current) => ({ ...current, probes: [...(current.probes ?? []), { at: new Date().toISOString(), ...probe }] }));
+		return this.#update(commandId, (current) => ({ ...current, probes: [...(current.probes ?? []), { at: new Date().toISOString(), ...probe }] }));
 	}
 }

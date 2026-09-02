@@ -144,7 +144,8 @@ both first-class wire fields; the message string is carried as evidence
 and never consulted.
 
 **The ledger.** `recordDispatch` writes `DISPATCHED` durably before the
-envelope is written to the socket. Storage is a compare-and-swap: a
+envelope is written to the socket. Storage is a compare-and-swap
+(`governor/fs/versioned.ts`, shared with the session registry): a
 record is a directory `mutations/<commandId>/` of immutable versions
 `v1.json, v2.json, ...`, and every write reads the highest version N,
 derives the next state, and publishes `v(N+1).json` with an exclusive
@@ -169,10 +170,26 @@ probe), a typed pre-effect rejection resolves it the other way, and an
 uncertain outcome is appended as a probe (`recordOutcome`). A command id
 is dispatched once, ever;
 `UNCERTAIN` leaves only through `resolveUncertain` with
-`effect_observed` (→ COMPLETED) or `effect_absent_proven` (→ FAILED). A
-human-issued replacement is a new command that must name the uncertain
-record it supersedes, and is refused if that record is no longer
-uncertain. `probeStoredResult` re-presents the same `clientId + commandId`
+`effect_observed` (→ COMPLETED) or `effect_absent_proven` (→ FAILED).
+
+**Superseding is a claim on the old record.** A human-issued replacement
+is a new command that names the uncertain record it supersedes. "Is O
+still UNCERTAIN?" then "create R" is a check-then-act across two records,
+and the per-record CAS does not serialise it on its own: O could be
+resolved in between, or two Governors could both pass the check and both
+send. So the supersede first writes `supersededBy: R` onto O by
+compare-and-swap, refused unless O is UNCERTAIN and unclaimed at the
+moment the write lands (`supersedes_not_uncertain`, `already_superseded`),
+and only then creates R's record, and only then can R be sent. A
+resolution that lands first makes the claim fail and R is never created;
+a claim that lands first makes the second claim fail. Exact evidence
+about O may still resolve it afterwards (the claim stays on the record).
+A claim whose claimant died between the claim and the create is released
+by `adoptAbandoned` under the same process-identity fence adoption uses,
+and reported as `pendingClaims` while the claimant is alive or cannot be
+told. `ledger-cas.test.ts` stages claim-vs-resolution, claim-vs-claim and
+the dying claimant; `ledger-race.test.ts` releases six real superseders
+and two resolvers on one record. `probeStoredResult` re-presents the same `clientId + commandId`
 to fetch Prime's stored result; a stored untyped failure is still
 UNCERTAIN, a stored success resolves the record from exact evidence.
 
@@ -310,6 +327,46 @@ and nothing records that two reopens were attempted. The runtime test
 races two Governors over one state directory and asserts one `create` with
 the fence and two without it.
 
+**The registry's own writes are compare-and-swap.** A session record is a
+directory `sessions/<sessionId>/` of immutable versions, through the same
+store as the ledger (`governor/fs/versioned.ts`). `recordGeneration`,
+`recordIncarnation` and the converging `create` each re-derive against
+the record that is current when the write lands, so a generation bound
+from a stale snapshot cannot drop an incarnation another Governor
+appended in between (the stale-incarnation authority cannot regress to an
+older `current()`), two appends from one snapshot both land with
+consistent indices, and an idempotent write costs no version. The lease
+and reclaim-mutex names are unchanged (`<sessionId>.json.recovery.*`,
+beside the record directory). `conformance/tier1/registry-cas.test.ts`
+stages generation-vs-incarnation both ways, two appends, the converging
+create, and the negative control (the pre-review rename-in-place, which
+drops the incarnation); `registry-race.test.ts` releases one binder and
+six appenders as real processes on one record and asserts every write
+survives.
+
+## Concurrency audit
+
+Every write to Governor authority and every check-then-act, with what
+serialises it. Kept here so a review checks a list rather than rediscovers
+one.
+
+| site | shape | serialised by |
+| --- | --- | --- |
+| ledger transitions, probes, outcomes, claim, claim release | read → derive → write | per-record CAS (`VersionStore.update`); preconditions re-checked inside the derivation |
+| ledger `recordDispatch` (new id) | "does the id exist?" → create | exclusive create of `v1.json`; the early check is a courtesy, the `link` is the fence |
+| ledger `recordDispatch({ supersedes })` | "is O uncertain and unclaimed?" → create R → send R | the claim is a CAS write on O; R is created only after it lands; a resolution or another claim landing first refuses it |
+| ledger claim release | "does R exist?" → release | R is unique to the dead claimant, who cannot create it; the release CAS re-checks the claim is still the one classified |
+| ledger `recordOutcome` after adoption | "is it UNCERTAIN?" → resolve | the resolution is itself a CAS with the same precondition; the response was appended as a probe first, so nothing is lost if it is refused |
+| registry `recordGeneration`, `recordIncarnation` | read → derive → write | per-record CAS; `NO_CHANGE` for idempotent writes |
+| registry `create` | "is the id known? is the path bound?" → create | exclusive create of `v1.json`; a duplicate id converges on the winner; a duplicate path for a different id cannot arise because Prime maps one path to one `sessionId` |
+| recovery lease acquire | exclusive create; dead-holder reclaim | `link` for the take; compare-and-swap of the exact dead bytes under a never-stolen reclaim mutex (see above) |
+| client identity | "does it exist?" → create | exclusive create; the loser reads the winner; the reader fsyncs the name before using it |
+| `Governor.createSession` | "is the path already registered?" → dispatch `create` | preflight only; Prime converges the path to one session and the registry converges the record; a lost race here costs a converged `create`, never a second logical root |
+| `Governor.probeStoredResult` | identity file == record? digest == record? → send | read-only fences; nothing is written on the way to the socket and a mismatch sends nothing |
+
+No production code writes an authority file by `rename`; `writeFileDurable`
+remains for the suite's negative controls.
+
 ## D8 — explicit session paths
 
 Every Governor-created session, resident or client-owned, carries a
@@ -391,10 +448,11 @@ goes through `governor/fs/durable.ts`:
 
 | helper | sequence | used for |
 | --- | --- | --- |
-| `writeFileDurable` | write temp → `fsync` temp → close → `rename` → `fsync` parent | session records |
+| `writeFileDurable` | write temp → `fsync` temp → close → `rename` → `fsync` parent | no production caller since the registry moved to versions; the suite's negative controls use it to stage the lost update |
 | `createFileExclusiveDurable` | write temp → `fsync` temp → close → `link` (fails `EEXIST`, never replaces) → `fsync` parent → unlink temp; the `EEXIST` loser also `fsync`s the parent before it reads the winner (the winner may have died between its link and its own fsync); a name that vanishes between the `EEXIST` and the read is reported `vanished` for the caller to retry, never thrown | client identity, recovery lease, every ledger version |
 | `unlinkDurable` | `unlink` → `fsync` parent | lease release; the dead lease inside a reclaim's critical section |
-| `mkdirDurable` | for each missing component, top-down: `mkdir` → `fsync` ITS parent (the `EEXIST` loser fsyncs too) | the state directory, `mutations/`, each record directory, `sessions/` |
+| `mkdirDurable` | for each missing component, top-down: `mkdir` → `fsync` ITS parent (the `EEXIST` loser and the already-exists case fsync too) | the state directory, `mutations/`, `sessions/`, each record directory |
+| `VersionStore` (`governor/fs/versioned.ts`) | `mkdirDurable` record dir → exclusive create of `v(N+1).json`; retry on `EEXIST` against the new record | mutation records, session records |
 
 The exclusive create publishes an already-complete, already-fsynced file,
 so no concurrent reader can observe an empty or partial identity or lease,
@@ -451,14 +509,20 @@ would have truncated the record.
   version carries the whole record, so a record with thousands of
   versions costs quadratic bytes; writes per record are bounded by its
   lifecycle, not by anything here.
-- **Readers trust names that writers made durable.** The create paths
-  (`createFileExclusiveDurable`, `mkdirDurable`, including their losers
-  and the already-exists case) fsync the parent before relying on a name.
-  Plain reads (`#current`, `readClientIdentity`, `inspectRecoveryLease`)
-  rely on that: the state directory and `mutations/` are fsynced at
-  Governor construction and each record directory at every dispatch, so
-  by the time a read happens the names it depends on have been confirmed
-  by a writer in this or an earlier process.
+- **A name is visible before it is durable.** A `link` or `rename` is
+  visible to other processes before its creator's parent-directory fsync
+  completes, so a reader cannot assume a name it found is durable. Where
+  a read leads to external action the reader confirms the name itself:
+  the client identity is fsynced at load before it is stamped on any
+  envelope; a supersede's claim, a probe and every dispatch write a
+  version (which fsyncs the record directory) before or as part of the
+  action; the create paths (`createFileExclusiveDurable`, `mkdirDurable`,
+  their losers and the already-exists case) fsync the parent before
+  returning. What is NOT confirmed by a plain read is the current version
+  of a record another process just published; the consequence of losing
+  it to power failure is that the record reverts to its previous version,
+  which the next adoption or write re-derives from. No read of that kind
+  precedes an external effect without a write of its own.
 - **Abandonment inside a live process is not adopted.** If the Governor
   process survives but its own dispatch path fails after DISPATCHED
   (the send throws something other than transport loss or timeout, or
