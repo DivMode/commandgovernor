@@ -8,20 +8,26 @@
  * never used as a key. The Rust oracle called the same thing a "session
  * incarnation" (WRK-018, `stale_session_incarnation`) and this is its port.
  *
- * Storage is a directory of JSON files written atomically (temp file, fsync,
- * rename). No database: the record set is small, and a file per session means
- * two Governor processes on one state dir contend per session, not globally.
+ * Storage is a directory of JSON files written durably (`governor/fs/durable.ts`:
+ * temp file, fsync, rename, fsync of the directory). No database: the record
+ * set is small, and a file per session means two Governor processes on one
+ * state dir contend per session, not globally.
  *
  * The recovery lease is the fence that makes "reopen exactly once" true under
- * concurrency. It is an `O_EXCL` create of `<sessionId>.recovery.lock`; a
- * holder whose pid is gone is reclaimed with a report, a holder whose pid is
- * alive is never overridden. "Cannot tell" (EPERM) counts as alive.
+ * concurrency. It is an exclusive, durable create of
+ * `<sessionId>.json.recovery.lock` carrying the holder's `(pid, processStartId)`.
+ * A holder whose process identity proves it over (`gone` or `replaced`) is
+ * reclaimed with a report; a holder that is `current`, or whose identity
+ * cannot be established (`unknown`), is never overridden. A recycled pid
+ * therefore cannot keep a dead Governor's lease alive, and a lease the
+ * Governor cannot inspect cannot be stolen.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { isProcessAlive } from "../prime/substrate.ts";
+import { createFileExclusiveDurable, unlinkDurable, writeFileDurable } from "../fs/durable.ts";
+import { classifyProcessIdentity, currentProcessIdentity, identityProvesProcessOver, LIVE_PROBE, type ProcessIdentity, type ProcessIdentityVerdict, type ProcessProbe } from "../process/identity.ts";
 import type { CanonicalSessionPath } from "./paths.ts";
 
 export type IncarnationCause = "create" | "reopen" | "converged";
@@ -90,11 +96,14 @@ export class RecoveryLeaseHeld extends Error {
 	readonly code = "recovery_lease_held" as const;
 	readonly sessionId: string;
 	readonly holder: RecoveryLeaseRecord;
-	constructor(sessionId: string, holder: RecoveryLeaseRecord) {
-		super(`recovery of ${sessionId} is owned by ${holder.ownerToken} (pid ${holder.pid})`);
+	/** Why the holder was honoured: its process is `current`, or its identity is `unknown`. */
+	readonly holderIdentity: ProcessIdentityVerdict;
+	constructor(sessionId: string, holder: RecoveryLeaseRecord, holderIdentity: ProcessIdentityVerdict) {
+		super(`recovery of ${sessionId} is owned by ${holder.ownerToken} (pid ${holder.pid}, process ${holderIdentity})`);
 		this.name = "RecoveryLeaseHeld";
 		this.sessionId = sessionId;
 		this.holder = holder;
+		this.holderIdentity = holderIdentity;
 	}
 }
 
@@ -102,26 +111,25 @@ export interface RecoveryLeaseRecord {
 	readonly sessionId: string;
 	readonly ownerToken: string;
 	readonly pid: number;
+	/** The holder process's start identity, when it could be read at acquisition. */
+	readonly processStartId?: string;
 	readonly acquiredAt: string;
 }
 
 export interface RecoveryLease {
 	readonly record: RecoveryLeaseRecord;
-	/** True when a dead holder's lease was taken over; reported, never silent. */
+	/** The dead or replaced holder whose lease was taken over; reported, never silent. */
 	readonly reclaimedFrom?: RecoveryLeaseRecord;
+	/** The identity verdict that justified the reclaim. */
+	readonly reclaimedBecause?: ProcessIdentityVerdict;
 	release(): void;
 }
 
-function writeAtomic(path: string, contents: string): void {
-	const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-	const fd = openSync(temp, "w", 0o600);
-	try {
-		writeSync(fd, contents);
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
-	}
-	renameSync(temp, path);
+export interface SessionRegistryOptions {
+	/** How holder processes are inspected. Injectable so the suite can fabricate pid reuse. */
+	readonly processProbe?: ProcessProbe;
+	/** This process's identity as written into leases it takes. */
+	readonly self?: ProcessIdentity;
 }
 
 function readJson<T>(path: string): T | undefined {
@@ -133,12 +141,29 @@ function readJson<T>(path: string): T | undefined {
 	}
 }
 
+function isLeaseRecord(value: unknown): value is RecoveryLeaseRecord {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		typeof record.sessionId === "string" &&
+		typeof record.ownerToken === "string" &&
+		typeof record.pid === "number" &&
+		Number.isInteger(record.pid) &&
+		(record.processStartId === undefined || typeof record.processStartId === "string") &&
+		typeof record.acquiredAt === "string"
+	);
+}
+
 export class SessionRegistry {
 	readonly dir: string;
+	readonly #probe: ProcessProbe;
+	readonly #self: ProcessIdentity | undefined;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, options: SessionRegistryOptions = {}) {
 		this.dir = join(stateDir, "sessions");
 		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+		this.#probe = options.processProbe ?? LIVE_PROBE;
+		this.#self = options.self;
 	}
 
 	#recordPath(sessionId: string): string {
@@ -148,6 +173,10 @@ export class SessionRegistry {
 
 	#leasePath(sessionId: string): string {
 		return `${this.#recordPath(sessionId)}.recovery.lock`;
+	}
+
+	#write(sessionId: string, record: SessionRecord): void {
+		writeFileDurable(this.#recordPath(sessionId), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
 	}
 
 	get(sessionId: string): SessionRecord | undefined {
@@ -207,7 +236,7 @@ export class SessionRegistry {
 		const bound: Incarnation = { ...known, generation };
 		const incarnations = [...record.incarnations];
 		incarnations[index] = bound;
-		writeAtomic(this.#recordPath(sessionId), `${JSON.stringify({ ...record, incarnations }, null, 2)}\n`);
+		this.#write(sessionId, { ...record, incarnations });
 		return bound;
 	}
 
@@ -257,7 +286,7 @@ export class SessionRegistry {
 				},
 			],
 		};
-		writeAtomic(this.#recordPath(input.sessionId), `${JSON.stringify(record, null, 2)}\n`);
+		this.#write(input.sessionId, record);
 		return record;
 	}
 
@@ -286,60 +315,72 @@ export class SessionRegistry {
 			openedBy: input.openedBy,
 		};
 		const updated: SessionRecord = { ...record, incarnations: [...record.incarnations, incarnation] };
-		writeAtomic(this.#recordPath(input.sessionId), `${JSON.stringify(updated, null, 2)}\n`);
+		this.#write(input.sessionId, updated);
 		return { record: updated, incarnation, appended: true };
+	}
+
+	/** The lease on disk for `sessionId`, if any, with the verdict on its holder's process. */
+	inspectRecoveryLease(sessionId: string): { holder: RecoveryLeaseRecord; identity: ProcessIdentityVerdict } | undefined {
+		let raw: unknown;
+		try {
+			raw = readJson<unknown>(this.#leasePath(sessionId));
+		} catch (error) {
+			if (!(error instanceof SyntaxError)) throw error;
+			raw = null; // present but not JSON: an uninspectable holder, handled below
+		}
+		if (raw === undefined) return undefined;
+		if (!isLeaseRecord(raw)) {
+			// A lease file that is not a lease record has no inspectable holder. It
+			// is honoured, because "unknown" is never a licence to reclaim.
+			return { holder: { sessionId, ownerToken: "<unreadable>", pid: -1, acquiredAt: "" }, identity: "unknown" };
+		}
+		return { holder: raw, identity: classifyProcessIdentity(raw, this.#probe) };
 	}
 
 	/**
 	 * Take the recovery lease for `sessionId`, or throw {@link RecoveryLeaseHeld}.
 	 *
-	 * Atomic by `O_EXCL`. A lease whose holder pid no longer exists is stale
-	 * and is reclaimed exactly once, with the dead holder reported; a lease
-	 * whose holder is alive -- or cannot be inspected -- is honoured.
+	 * Atomic and durable by `createFileExclusiveDurable`. A lease whose holder
+	 * process is proven over (`gone` or `replaced` by pid reuse) is reclaimed
+	 * exactly once, with the dead holder reported; a lease whose holder is
+	 * `current`, or whose identity is `unknown`, is honoured.
 	 */
 	acquireRecoveryLease(sessionId: string, ownerToken: string): RecoveryLease {
 		this.require(sessionId);
 		const path = this.#leasePath(sessionId);
+		const self = this.#self ?? currentProcessIdentity();
 		const record: RecoveryLeaseRecord = {
 			sessionId,
 			ownerToken,
-			pid: process.pid,
+			pid: self.pid,
+			...(self.processStartId !== undefined ? { processStartId: self.processStartId } : {}),
 			acquiredAt: new Date().toISOString(),
 		};
 		let reclaimedFrom: RecoveryLeaseRecord | undefined;
+		let reclaimedBecause: ProcessIdentityVerdict | undefined;
 		for (let attempt = 0; attempt < 2; attempt += 1) {
-			try {
-				const fd = openSync(path, "wx", 0o600);
-				try {
-					writeSync(fd, `${JSON.stringify(record)}\n`);
-					fsyncSync(fd);
-				} finally {
-					closeSync(fd);
-				}
+			const created = createFileExclusiveDurable(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+			if (created.outcome === "created") {
 				return {
 					record,
-					...(reclaimedFrom ? { reclaimedFrom } : {}),
+					...(reclaimedFrom ? { reclaimedFrom, reclaimedBecause } : {}),
 					release: () => {
 						const onDisk = readJson<RecoveryLeaseRecord>(path);
-						if (onDisk && onDisk.ownerToken === ownerToken) unlinkSync(path);
+						if (onDisk && onDisk.ownerToken === ownerToken) unlinkDurable(path);
 					},
 				};
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-				const holder = readJson<RecoveryLeaseRecord>(path);
-				if (!holder) continue; // released between our EEXIST and our read
-				if (holder.ownerToken === ownerToken || isProcessAlive(holder.pid)) {
-					throw new RecoveryLeaseHeld(sessionId, holder);
-				}
-				reclaimedFrom = holder;
-				try {
-					unlinkSync(path);
-				} catch (unlinkError) {
-					if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError;
-				}
 			}
+			const inspected = this.inspectRecoveryLease(sessionId);
+			if (!inspected) continue; // released between our EEXIST and our read
+			const { holder, identity } = inspected;
+			if (holder.ownerToken === ownerToken || !identityProvesProcessOver(identity)) {
+				throw new RecoveryLeaseHeld(sessionId, holder, identity);
+			}
+			reclaimedFrom = holder;
+			reclaimedBecause = identity;
+			unlinkDurable(path);
 		}
-		const holder = readJson<RecoveryLeaseRecord>(path);
-		throw new RecoveryLeaseHeld(sessionId, holder ?? record);
+		const inspected = this.inspectRecoveryLease(sessionId);
+		throw new RecoveryLeaseHeld(sessionId, inspected?.holder ?? record, inspected?.identity ?? "unknown");
 	}
 }

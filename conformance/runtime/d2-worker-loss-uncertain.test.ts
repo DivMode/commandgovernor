@@ -106,9 +106,9 @@ describe("D2: worker transport lost after the external effect", () => {
 
 		// Falsification: the same captured response under a naive policy is a definite failure.
 		assert.ok(probed);
-		const naive = classifyMutationOutcome({ kind: "response", response: probed }, NAIVE_POLICY);
+		const naive = classifyMutationOutcome({ kind: "response", commandType: "execute_bash_and_wait", response: probed }, NAIVE_POLICY);
 		assert.equal(naive.verdict, "failed", "the negative control: a naive classifier would call this FAILED");
-		const strict = classifyMutationOutcome({ kind: "response", response: probed }, DEFAULT_POLICY);
+		const strict = classifyMutationOutcome({ kind: "response", commandType: "execute_bash_and_wait", response: probed }, DEFAULT_POLICY);
 		assert.equal(strict.verdict, "uncertain");
 
 		// And the consequence the bake-off measured: a client that trusted FAILED retried under a new id and

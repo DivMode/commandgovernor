@@ -21,9 +21,10 @@
  * `supersedes` link, never an automatic one.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { writeFileDurable } from "../fs/durable.ts";
 import type { DaemonResponse } from "../prime/protocol.ts";
 import type { PreEffectProof, UncertainReason } from "./classify.ts";
 
@@ -71,16 +72,14 @@ export class MutationLedgerError extends Error {
 	}
 }
 
+/**
+ * Every record write is durable through `writeFileDurable`: temp, fsync,
+ * rename, fsync of the containing directory. The ledger is the authority a
+ * later Governor consults about what may have been sent, so a directory
+ * entry lost to power failure would be a lost authority, not a lost cache.
+ */
 function writeAtomic(path: string, contents: string): void {
-	const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-	const fd = openSync(temp, "w", 0o600);
-	try {
-		writeSync(fd, contents);
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
-	}
-	renameSync(temp, path);
+	writeFileDurable(path, contents, { mode: 0o600 });
 }
 
 export class MutationLedger {
@@ -179,7 +178,7 @@ export class MutationLedger {
 	}
 
 	markFailed(commandId: string, proof: PreEffectProof, response: DaemonResponse): MutationRecord {
-		return this.#transition(commandId, ["DISPATCHED"], { at: new Date().toISOString(), to: "FAILED", reason: `typed pre-effect rejection ${proof.code}`, proof, response });
+		return this.#transition(commandId, ["DISPATCHED"], { at: new Date().toISOString(), to: "FAILED", reason: `typed pre-effect rejection ${proof.commandType} + ${proof.code}`, proof, response });
 	}
 
 	markUncertain(commandId: string, uncertainReason: UncertainReason, response?: DaemonResponse, detail?: string): MutationRecord {

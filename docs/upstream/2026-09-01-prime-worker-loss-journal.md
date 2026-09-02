@@ -1,9 +1,10 @@
 # Upstream proposal: do not journal a worker-transport loss as a definite result
 
-Status: **drafted, not filed.** Filing an issue or pull request on
-`PrimeIntellect-ai/prime-agent` is an outward-facing action left to the
-repository owner; the text below is ready to paste. Command Governor's own
-guard (`governor/mutation/classify.ts`) does not depend on this landing.
+Status: **filed** by the repository owner as
+[PrimeIntellect-ai/prime-agent#1974](https://github.com/PrimeIntellect-ai/prime-agent/issues/1974).
+The text below is what was proposed. Command Governor's own guard
+(`governor/mutation/classify.ts` with the reviewed proof matrix in
+`governor/mutation/proof.ts`) does not depend on this landing.
 
 ## Issue text
 

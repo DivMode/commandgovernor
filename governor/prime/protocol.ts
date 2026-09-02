@@ -68,16 +68,22 @@ export const DAEMON_ERROR_CODES: readonly DaemonErrorCode[] = [
 ];
 
 /**
- * Error codes the supervisor can only produce BEFORE a command reaches a
- * worker. Each is thrown by `createOrReuseWorker` / session resolution in the
- * supervisor process itself (daemon-errors.ts `serializeDaemonError`), never
- * relayed from a worker that may already have acted. A failure carrying one of
- * these is therefore positive proof that no external effect happened.
+ * The codes `serializeDaemonError` (daemon-errors.ts) can produce. Both the
+ * supervisor's and the WORKER's catch paths run it, so a typed code may be
+ * relayed from a worker that has already acted (`daemon-mode.ts` writes
+ * `failure(..., serializeDaemonError(error))` for a handler that threw).
  *
- * `command_result_uncertain` is deliberately absent: it is the substrate's own
- * statement that the outcome is unknown.
+ * This is a VOCABULARY, not a proof: whether a given code was thrown before
+ * or after a command's external effect depends on the command, and is
+ * recorded per reviewed `(commandType, code)` pair in
+ * `governor/mutation/proof.ts`. Nothing may treat membership here as
+ * evidence that nothing happened.
+ *
+ * `command_result_uncertain` is absent because the journal path, not the
+ * serializer, emits it: it is the substrate's own statement that the outcome
+ * is unknown.
  */
-export const PRE_EFFECT_ERROR_CODES: ReadonlySet<DaemonErrorCode> = new Set<DaemonErrorCode>([
+export const SERIALIZED_ERROR_CODES: ReadonlySet<DaemonErrorCode> = new Set<DaemonErrorCode>([
 	"missing_session_cwd",
 	"session_import_file_not_found",
 	"session_already_active",

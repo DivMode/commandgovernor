@@ -18,9 +18,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
 
+import { ClientIdentityError, loadOrCreateClientIdentity, readClientIdentity } from "./prime/client-identity.ts";
 import { DaemonClient, RequestTimeout, TransportLost, connectWithRetry } from "./prime/daemon-client.ts";
 import { buildLaunchEnv, type LaunchEnvOptions } from "./prime/env.ts";
 import {
@@ -35,6 +35,7 @@ import { expectedSubstrate } from "./prime/substrate.ts";
 import { assertProductionPolicy, classifyMutationOutcome, type ClassificationPolicy, DEFAULT_POLICY, type Verdict } from "./mutation/classify.ts";
 import type { DaemonEventCursor } from "./prime/protocol.ts";
 import { MutationLedger, type MutationRecord, type ResolutionEvidence } from "./mutation/ledger.ts";
+import { currentProcessIdentity } from "./process/identity.ts";
 import { canonicalSessionPath, type CanonicalSessionPath } from "./session/paths.ts";
 import { type Incarnation, RecoveryLeaseHeld, type SessionRecord, SessionRegistry } from "./session/registry.ts";
 
@@ -114,12 +115,25 @@ export class NotRecoverable extends Error {
 	}
 }
 
-function stableClientId(stateDir: string): string {
-	const path = join(stateDir, "client-id");
-	if (existsSync(path)) return readFileSync(path, "utf8").trim();
-	const id = `cg:${randomUUID()}`;
-	writeFileSync(path, `${id}\n`, { mode: 0o600 });
-	return id;
+/**
+ * The Governor cannot prove that the Prime journal identity it would present
+ * equals the one under which a command was dispatched. Thrown before any
+ * socket I/O; nothing was sent.
+ */
+export class ClientIdentityMismatch extends Error {
+	readonly code = "client_identity_mismatch" as const;
+	readonly commandId: string;
+	readonly recorded: string;
+	readonly current: string | undefined;
+	readonly reason: string;
+	constructor(commandId: string, recorded: string, current: string | undefined, reason: string) {
+		super(`refusing to probe ${commandId}: ${reason} (record ${recorded}, current ${current ?? "<none>"}); nothing was sent`);
+		this.name = "ClientIdentityMismatch";
+		this.commandId = commandId;
+		this.recorded = recorded;
+		this.current = current;
+		this.reason = reason;
+	}
 }
 
 function summaryOf(value: unknown, what: string): SessionSummary {
@@ -142,9 +156,11 @@ export class Governor {
 		mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
 		this.options = options;
 		this.stateDir = options.stateDir;
-		this.clientId = stableClientId(options.stateDir);
+		// One journal identity per state directory, created atomically and
+		// durably, never overwritten (governor/prime/client-identity.ts).
+		this.clientId = loadOrCreateClientIdentity(options.stateDir).record.clientId;
 		this.ownerToken = `${this.clientId}#${process.pid}#${randomUUID().slice(0, 8)}`;
-		this.registry = new SessionRegistry(options.stateDir);
+		this.registry = new SessionRegistry(options.stateDir, { self: currentProcessIdentity() });
 		this.ledger = new MutationLedger(options.stateDir);
 		// The policy is not injectable. The naive policy exists for the pure
 		// classifier tests only; a Governor always runs the production one, and
@@ -319,21 +335,57 @@ export class Governor {
 			commandType: command.type,
 			...identity,
 		});
-		let verdict: Verdict;
-		try {
-			const response = await client.request(command, commandId, timeoutMs);
-			verdict = classifyMutationOutcome({ kind: "response", response }, this.#policy);
-		} catch (error) {
-			if (error instanceof TransportLost) {
-				verdict = classifyMutationOutcome({ kind: "transport_lost", detail: error.message }, this.#policy);
-			} else if (error instanceof RequestTimeout) {
-				verdict = classifyMutationOutcome({ kind: "timeout", timeoutMs }, this.#policy);
-			} else {
-				throw error;
-			}
-		}
+		const verdict = await this.#send(client, command, commandId, timeoutMs);
 		const record = this.#record(commandId, verdict);
 		return { record, verdict };
+	}
+
+	/** Send and classify. The command type the Governor sent is the classifier's, not the response's. */
+	async #send(client: DaemonClient, command: DaemonCommand, commandId: string, timeoutMs: number): Promise<Verdict> {
+		const commandType = command.type;
+		try {
+			const response = await client.request(command, commandId, timeoutMs);
+			return classifyMutationOutcome({ kind: "response", commandType, response }, this.#policy);
+		} catch (error) {
+			if (error instanceof TransportLost) {
+				return classifyMutationOutcome({ kind: "transport_lost", commandType, detail: error.message }, this.#policy);
+			}
+			if (error instanceof RequestTimeout) {
+				return classifyMutationOutcome({ kind: "timeout", commandType, timeoutMs }, this.#policy);
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * Prove that re-presenting `record.commandId` would go out under exactly
+	 * `record.clientId`, or refuse. Three things must agree with the record:
+	 * the identity file on disk right now (re-read, not cached, so a replaced
+	 * or corrupted file is caught), this Governor's own id, and the id the
+	 * live connection stamps on envelopes. Returns the connection to use.
+	 */
+	#assertProbeIdentity(record: MutationRecord): DaemonClient {
+		const recorded = record.clientId;
+		let onDisk: string;
+		try {
+			onDisk = readClientIdentity(this.stateDir).clientId;
+		} catch (error) {
+			if (error instanceof ClientIdentityError) {
+				throw new ClientIdentityMismatch(record.commandId, recorded, undefined, `identity file ${error.code}: ${error.message}`);
+			}
+			throw error;
+		}
+		if (onDisk !== recorded) {
+			throw new ClientIdentityMismatch(record.commandId, recorded, onDisk, "the identity file no longer carries the record's clientId");
+		}
+		if (this.clientId !== recorded) {
+			throw new ClientIdentityMismatch(record.commandId, recorded, this.clientId, "this Governor's clientId differs from the record's");
+		}
+		const client = this.client;
+		if (client.clientId !== recorded) {
+			throw new ClientIdentityMismatch(record.commandId, recorded, client.clientId, "the live connection would stamp a different clientId on the envelope");
+		}
+		return client;
 	}
 
 	#record(commandId: string, verdict: Verdict): MutationRecord {
@@ -360,15 +412,26 @@ export class Governor {
 		if (record.state !== "UNCERTAIN") {
 			throw new Error(`${commandId} is ${record.state}; only an UNCERTAIN command may be probed`);
 		}
+		if (command.type !== record.commandType) {
+			throw new Error(`refusing to probe ${commandId}: the record is a ${record.commandType}, not a ${command.type}; a probe re-presents the same command`);
+		}
+		// The journal identity is `clientId + commandId`. The record's clientId is
+		// the authority; the probe goes out only if the identity on disk, this
+		// Governor, and the connection that would carry the envelope all agree
+		// with it. Any doubt fails closed before the socket is touched.
+		const client = this.#assertProbeIdentity(record);
 		let verdict: Verdict;
 		try {
-			const response = await this.client.request(command, commandId, timeoutMs);
+			const response = await client.request(command, commandId, timeoutMs);
 			this.ledger.recordProbe(commandId, { response });
-			verdict = classifyMutationOutcome({ kind: "response", response }, this.#policy);
+			verdict = classifyMutationOutcome({ kind: "response", commandType: command.type, response }, this.#policy);
 		} catch (error) {
 			if (error instanceof TransportLost || error instanceof RequestTimeout) {
 				this.ledger.recordProbe(commandId, { detail: error.message });
-				verdict = classifyMutationOutcome({ kind: error instanceof TransportLost ? "transport_lost" : "timeout", detail: error.message, timeoutMs }, this.#policy);
+				verdict =
+					error instanceof TransportLost
+						? classifyMutationOutcome({ kind: "transport_lost", commandType: command.type, detail: error.message }, this.#policy)
+						: classifyMutationOutcome({ kind: "timeout", commandType: command.type, timeoutMs }, this.#policy);
 			} else {
 				throw error;
 			}

@@ -30,7 +30,7 @@ describe("MutationLedger (D2)", () => {
 		const uncertain = ledger.markUncertain("cg-2", "untyped_failure", bad);
 		assert.equal(uncertain.state, "UNCERTAIN");
 		assert.throws(() => ledger.markCompleted("cg-2", ok), /not a legal transition/);
-		assert.throws(() => ledger.markFailed("cg-2", { kind: "typed_pre_effect_rejection", code: "session_already_active" }, bad), /not a legal transition/);
+		assert.throws(() => ledger.markFailed("cg-2", { kind: "typed_pre_effect_rejection", commandType: "create", code: "session_already_active" }, bad), /not a legal transition/);
 		assert.throws(() => ledger.markUncertain("cg-2", "timeout"), /not a legal transition/);
 		const resolved = ledger.resolveUncertain("cg-2", { kind: "effect_observed", by: "t", detail: "d", observedAt: "now" });
 		assert.equal(resolved.state, "COMPLETED");

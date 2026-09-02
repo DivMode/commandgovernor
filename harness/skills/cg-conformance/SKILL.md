@@ -36,8 +36,9 @@ never bootstrapped. The runtime tier runs sequentially because it kills
 supervisors and workers on purpose.
 
 Set `CG_KEEP_FIXTURE=1` to keep a failed fixture's root for inspection
-(ledger under `governor/<name>/mutations`, registry under
-`governor/<name>/sessions`, Prime's journal under
+(ledger under `governor/<name>/mutations`, registry and recovery leases
+under `governor/<name>/sessions`, the journal identity at
+`governor/<name>/client-identity.json`, Prime's journal under
 `agent/daemon-workers/*/command-journal.jsonl`, the wire log at
 `wire.jsonl` with env values redacted).
 

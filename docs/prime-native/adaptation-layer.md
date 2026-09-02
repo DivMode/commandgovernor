@@ -9,15 +9,19 @@ leave to the client.
 
 ```text
 Command Governor
-  governor/governor.ts            the one object that speaks to a supervisor
-  governor/mutation/classify.ts   D2: structural outcome classification
-  governor/mutation/ledger.ts     D2: durable intent, one id forever
-  governor/session/registry.ts    D1: logical sessions, incarnations, lease
-  governor/session/paths.ts       D8: canonical, fenced sessionPath
-  governor/prime/env.ts           positive environment allowlist
-  governor/prime/daemon-client.ts JSONL client with the pin guard
-  governor/prime/protocol.ts      the narrow protocol slice, diffed vs the pin
-  governor/prime/substrate.ts     pins.json reader, supervisor spawn/stop
+  governor/governor.ts              the one object that speaks to a supervisor
+  governor/mutation/classify.ts     D2: structural outcome classification
+  governor/mutation/proof.ts        D2: the reviewed (command, code) proof matrix
+  governor/mutation/ledger.ts       D2: durable intent, one id forever
+  governor/session/registry.ts      D1: logical sessions, incarnations, lease
+  governor/session/paths.ts         D8: canonical, fenced sessionPath
+  governor/fs/durable.ts            durable write / exclusive create / unlink
+  governor/process/identity.ts      (pid, processStartId) verdicts for fences
+  governor/prime/client-identity.ts one journal identity per state directory
+  governor/prime/env.ts             positive environment allowlist
+  governor/prime/daemon-client.ts   JSONL client with the pin guard
+  governor/prime/protocol.ts        the narrow protocol slice, diffed vs the pin
+  governor/prime/substrate.ts       pins.json reader, supervisor spawn/stop
                 │
         public daemon protocol v7 over a Unix socket
                 │
@@ -66,25 +70,63 @@ yields the typed `command_result_uncertain`.
 **The structural discriminator.** Prime's typed error vocabulary is closed
 and tiny: `missing_session_cwd`, `session_import_file_not_found`,
 `session_already_active`, `command_result_uncertain`. The first three are
-produced only by the supervisor itself during session resolution, before a
-worker could have received the command (`daemon-errors.ts`
-`serializeDaemonError` is their sole producer). So:
+what `serializeDaemonError` (`daemon-errors.ts`) can produce. That is a
+*vocabulary*, not a proof. The serializer runs in the supervisor's catch
+path **and in the worker's** (`daemon-mode.ts`), so a typed code can be
+relayed from a worker that has already acted, and whether a given code was
+thrown before or after a command's external effect depends on the command.
+The pinned build has a real case:
+
+```text
+import_jsonl
+  -> worker AgentSessionRuntime.importFromJsonl
+  -> copyFileSync(resolvedPath, destinationPath)      <- the effect
+  -> SessionManager.open(...)
+  -> assertSessionCwdExists(...)
+  -> MissingSessionCwdError
+  -> typed errorInfo.code = missing_session_cwd
+```
+
+`missing_session_cwd` arrives with the transcript already copied into the
+session directory. A classifier that took any serialised code as pre-effect
+proof (the one this PR shipped before review) called that FAILED, which is
+false. Proof is therefore a property of the **pair** `(commandType, code)`,
+and only of pairs a human has read the pinned source for
+(`governor/mutation/proof.ts`, `REVIEWED_PROOFS`). The classifier keys on
+the command type the Governor *sent*, never on the `command` field the
+response claims.
+
+| command | code | reviewed timing | thrown at (pin 514633727) |
+| --- | --- | --- | --- |
+| `create` | `session_already_active` | pre-effect | supervisor `createOrReuseWorker` → `reuseWorkerForCreate`, before `launchWorker` |
+| `import_jsonl` | `session_import_file_not_found` | pre-effect | `importFromJsonl`, first statement, before `mkdirSync`/lease/`copyFileSync` |
+| `import_jsonl` | `missing_session_cwd` | **post-effect** | `importFromJsonl` → `assertSessionCwdExists`, after `copyFileSync` |
+
+Everything not in the table is unreviewed. So:
 
 | observation | verdict |
 | --- | --- |
 | `success: true` | COMPLETED |
-| `errorInfo.code` in the pre-effect set | FAILED, with the code as proof |
+| `errorInfo.code` reviewed **pre-effect** for this command | FAILED, with the review as proof |
+| `errorInfo.code` reviewed **post-effect** for this command | UNCERTAIN (`typed_failure_post_effect`) |
+| `errorInfo.code` known but the pair unreviewed, or the command unknown | UNCERTAIN (`typed_failure_unreviewed`) |
+| `errorInfo.code` unknown to the pin | UNCERTAIN (`unknown_error_code`) |
 | `errorInfo.code = command_result_uncertain` | UNCERTAIN (substrate says so) |
-| any other `success: false` (untyped, or an unknown code) | UNCERTAIN |
+| any other `success: false` (untyped) | UNCERTAIN |
 | socket lost, write failed, timeout | UNCERTAIN |
 
-No error text is read. A future Prime that rewords the message, or adds a
-new typed code the Governor has not reviewed, lands in UNCERTAIN, not
-FAILED: the guard fails closed by construction. `assertProductionPolicy`
-refuses any policy that maps untyped failure or transport loss to FAILED,
-and `conformance/tier1/prime-protocol.test.ts` diffs the vocabulary and the
-read/mutating command split against the pinned build so a re-pin cannot
-widen either silently.
+No error text is read. A future Prime that rewords a message, adds a code,
+or moves a throw past an effect lands in UNCERTAIN, not FAILED: the guard
+fails closed by construction. `assertProductionPolicy` refuses any policy
+that maps untyped failure or transport loss to FAILED, or that treats a code
+as proof regardless of command. `conformance/tier1/prime-protocol.test.ts`
+diffs the vocabulary and the read/mutating split against the pinned build,
+asserts that the worker's catch path does serialise typed codes, and pins
+the source facts behind each row of the table (the copy precedes the cwd
+check in `importFromJsonl`; the existence check is its first statement;
+`reuseWorkerForCreate` throws before `launchWorker`), so a re-pin cannot
+move a throw silently. Adding a reviewed pair requires adding its source
+fact there; the test counts the rows.
 
 **Why this is not brittle string matching.** The Issue #17 fallback trigger
 ("if the only possible implementation is matching `Daemon worker socket
@@ -111,19 +153,49 @@ pure classifier tests and the D2 test's re-classification of a captured
 response; a `Governor` always constructs with `DEFAULT_POLICY` and asserts
 it is a production policy every time.
 
-The Governor's `clientId` is stable per state directory (`<stateDir>/client-id`),
-because Prime's idempotency key is `clientId + commandId`; a Governor that
-minted a fresh client id per process would turn every probe into new work.
+**Journal identity.** Prime's idempotency key is `clientId + commandId`.
+The Governor's `clientId` is one per state directory
+(`<stateDir>/client-identity.json`, `governor/prime/client-identity.ts`):
+created atomically with an fsynced temp file published by `link(2)` (which
+cannot replace an existing name) and a directory fsync, so two Governors
+performing first initialisation at once converge on one id and no reader
+ever sees a partial file; read back byte-for-byte on every restart; and
+never overwritten -- a missing, unreadable or malformed file is a typed
+error, not a reason to mint again.
 
-**Regression test.** `conformance/runtime/d2-worker-loss-uncertain.test.ts`
+The `MutationRecord` stores the `clientId` a command was dispatched under,
+and that record is the authority when the command is probed.
+`probeStoredResult` re-reads the identity file, and refuses with
+`client_identity_mismatch` **before any socket I/O** unless the file, this
+Governor's id and the live connection's id all equal the record's. A
+Governor that restarted over a re-initialised state directory therefore
+cannot re-present an old `commandId` under a new `clientId` (which Prime
+would run as new work); the record stays UNCERTAIN for a human. A probe
+must also name the record's command type. `conformance/tier1/governor-probe-identity.test.ts`
+proves each refusal against a fake daemon socket that records every byte
+it receives, and `client-identity.test.ts` races eight processes through
+first initialisation.
+
+**Regression tests.** `conformance/runtime/d2-worker-loss-uncertain.test.ts`
 is the exact s1-07 (c) reproducer: effect on disk, SIGKILL the worker,
 assert UNCERTAIN, same id, one record, no dispatch; reopen the root; probe
 the stored failure (still UNCERTAIN, still one line); resolve from
 evidence; then re-classify the captured response under `NAIVE_POLICY` and
-assert it would have been FAILED. The runtime tier and the `harness` CI job
-run it on every pull request.
+assert it would have been FAILED.
+`conformance/runtime/d2-import-jsonl-post-effect.test.ts` is the typed
+post-effect reproducer against the pinned daemon: write a source JSONL
+whose header `cwd` does not exist, dispatch `import_jsonl`, prove the copy
+is in the session directory byte-for-byte, prove the response is typed
+`missing_session_cwd`, prove the Governor recorded UNCERTAIN with
+`typed_failure_post_effect`, and prove the same response under
+`LEGACY_GLOBAL_CODE_POLICY` (the pre-review classifier) would have been
+FAILED; its positive control imports a nonexistent source and gets the
+reviewed pre-effect FAILED with nothing written. The runtime tier and the
+`harness` CI job run both on every pull request.
 
-**Upstream.** A focused fix proposal is drafted in
+**Upstream.** The worker-loss journal defect is filed as
+[PrimeIntellect-ai/prime-agent#1974](https://github.com/PrimeIntellect-ai/prime-agent/issues/1974);
+the proposal text is in
 [`../upstream/2026-09-01-prime-worker-loss-journal.md`](../upstream/2026-09-01-prime-worker-loss-journal.md).
 The Governor-side guard is sufficient on its own and does not depend on
 it landing.
@@ -145,9 +217,10 @@ active-session id and a visible `prime-agent.worker_recovery` marker.
 1. reads the summary; `workerState` decides, `activity` is ignored;
 2. `ready` with the registry's current id → `healthy`; `ready` with a
    different id → someone else reopened, record it as `converged`;
-3. `failed` → take the recovery lease for the session (`O_EXCL` file; a
-   dead holder is reclaimed with a report, a live or unknowable holder is
-   honoured); re-check the summary under the lease;
+3. `failed` → take the recovery lease for the session (an exclusive,
+   durable create of `<sessionId>.json.recovery.lock` recording the
+   holder's `(pid, processStartId)`; see below); re-check the summary under
+   the lease;
 4. dispatch exactly one `create` on the registry's canonical `sessionPath`
    through the same ledger as any mutation;
 5. refuse to bind if the reopened `sessionId` differs from the logical one
@@ -187,6 +260,60 @@ TOKEN/SECRET/PASSWORD/KEY and prove from a worker's `env` that it did not
 arrive while an explicitly granted control variable did. The wire evidence
 log records `launchEnv` as key names only.
 
+**Lease holder identity.** A pid is recycled, so a lease that recorded only
+a pid could look live because an unrelated process inherited the number.
+The lease records the holder's `(pid, processStartId)` -- the kernel start
+time from `/proc/<pid>/stat` on Linux, `ps -o lstart=` on macOS, the same
+pair Prime's own session lease and worker registry use -- and
+`governor/process/identity.ts` classifies a holder as `current`,
+`replaced` (alive, different start identity: pid reuse), `gone` (not
+alive) or `unknown` (no recorded or no observable start identity;
+"cannot signal" counts as alive). The lease is reclaimed, with the old
+holder reported, **only** on `gone` or `replaced`; `current` and `unknown`
+are honoured, and so is a lease file that is not a readable record.
+`conformance/tier1/registry.test.ts` stages pid reuse with this process's
+own pid under a foreign start identity, and each conservative branch with a
+fabricated probe.
+
+## Durability contract
+
+The Governor's invariant is *durable intent before external I/O*: the
+ledger's DISPATCHED record exists before the envelope is written to the
+socket, the registry's incarnation before the next fenced dispatch, the
+recovery lease before the reopen is sent, and the client identity before
+the first command. "Exists" means survives power loss, not only the death
+of the Governor process, because the next Governor reads these files to
+decide what may already have happened in the world.
+
+A temp file + `fsync` + `rename` gives crash-atomic *contents* but not a
+durable *name*: on ext4/xfs/btrfs and APFS the rename is a directory
+operation, and an unsynced directory entry can be lost on power failure
+while the file's bytes survive. Every authority-bearing write therefore
+goes through `governor/fs/durable.ts`:
+
+| helper | sequence | used for |
+| --- | --- | --- |
+| `writeFileDurable` | write temp → `fsync` temp → close → `rename` → `fsync` parent | mutation records, session records |
+| `createFileExclusiveDurable` | write temp → `fsync` temp → close → `link` (fails `EEXIST`, never replaces) → `fsync` parent → unlink temp | client identity, recovery lease |
+| `unlinkDurable` | `unlink` → `fsync` parent | lease release |
+
+The exclusive create publishes an already-complete, already-fsynced file,
+so no concurrent reader can observe an empty or partial identity or lease,
+which an `O_EXCL` open followed by a write would allow. A failed directory
+`fsync` is an error: a record whose name is not known to be durable is not
+reported as written.
+
+What is relied on, per platform: on Linux, `fsync(2)` on the parent
+directory fd makes the `rename`/`link`/`unlink` entry durable (the
+documented ext4/xfs requirement, and the sequence SQLite and PostgreSQL
+use). On macOS, Node's `fs.fsyncSync` reaches libuv `uv__fs_fsync`, which
+issues `fcntl(F_FULLFSYNC)` (flush through the drive cache; plain
+`fsync(2)` on macOS does not) and falls back to `fsync(2)` where that is
+refused, e.g. on a directory fd. Nothing here is claimed for NFS.
+`conformance/tier1/durable.test.ts` records the exact call sequence
+through an instrumented `fs` and asserts the order and the failure
+behaviour, since power loss itself cannot be staged in a test.
+
 ## Known limits, recorded rather than discovered later
 
 - **The fences are properties of the Governor's API, not of the process.**
@@ -194,10 +321,20 @@ log records `launchEnv` as key names only.
   conformance suite needs the raw protocol for its negative controls. A
   caller that speaks to the socket directly bypasses D8 preflight, the
   ledger and the incarnation fence. Nothing automatic does so.
-- **One state directory per fleet.** The recovery lease and the stable
-  client id both live in the state directory. Two Governors with different
-  state directories are two clients to Prime: Prime converges their
-  reopens, but each would ledger its own `create`.
+- **One state directory per fleet.** The recovery lease and the client
+  identity (`client-identity.json`) both live in the state directory. Two
+  Governors with different state directories are two clients to Prime:
+  Prime converges their reopens, but each would ledger its own `create`,
+  and neither can probe the other's UNCERTAIN records (the identity fence
+  refuses, by design).
+- **Only three `(command, code)` pairs are reviewed.** Every other typed
+  failure is UNCERTAIN, including `create` + `missing_session_cwd`, which
+  is thrown in the worker after a session lease was taken. Widening the
+  matrix is a source review plus a pinned source-fact assertion, never a
+  runtime observation.
+- **The pinned Prime is not itself durability-hardened.** The Governor's
+  contract covers the Governor's records. Prime's own journal and lease
+  files are written as Prime writes them.
 - **An UNCERTAIN `create` leaves no registry record.** If the create
   succeeded and only the response was lost, Prime holds a session the
   registry does not know; a repeat create on the same path converges
