@@ -3,21 +3,25 @@
 - **Status:** Accepted
 - **Date:** 2026-09-02
 - **Refines:** ADR 0008 and ADR 0009
-- **Research:** [`../research/2026-09-02-command-governor-composition-deduplication-audit.md`](../research/2026-09-02-command-governor-composition-deduplication-audit.md)
+- **Research:**
+  - [`../research/2026-09-02-command-governor-composition-deduplication-audit.md`](../research/2026-09-02-command-governor-composition-deduplication-audit.md)
+  - [`../research/2026-09-01-deepseek-harness-architecture-donor-review.md`](../research/2026-09-01-deepseek-harness-architecture-donor-review.md)
 
 ## Context
 
 ADR 0008 made the decisive architecture pivot: Command Governor stopped being a standalone Rust-first agent runtime and became a Pi-family harness/distribution. It explicitly required a composition-first order: use Pi core, compose reviewed packages, contribute generic gaps upstream, add Command-Governor-specific extensions only for real product-specific gaps, and fork core only as a last resort.
 
-ADR 0009 then selected Prime Agent as the initial substrate candidate because Prime already contains the durable long-running runtime machinery Command Governor would otherwise need to build: resident workers, session leases, recovery, mutation journals, schedules, goals, RLM children, agent messaging, and ACP.
+ADR 0009 then selected Prime Agent as the initial substrate candidate because Prime already contains the durable long-running runtime machinery Command Governor would otherwise need to build: resident workers, session leases, recovery, mutation journals, schedules, goals, RLM children, agent messaging, continual refinement, and ACP.
 
 Despite those decisions, merged PR #18 grew a large external Prime adaptation layer. The code received extensive correctness review, but the review answered the wrong first question: **"is this implementation correct?"** before establishing **"should this implementation exist at all in the selected architecture?"**
 
-A later de-duplication audit showed that Prime and the current Pi/Prime package ecosystem already cover more of Command Governor's intended surface than the implementation plan assumed. Existing packages now provide strong task/evidence gates, independent review semantics, PR review, multi-agent delegation, ChatGPT transports, memory, and governance workflows. Draft PR #19 repeated the same risk by translating useful DeepSeek Harness donor patterns into another generic `governor/composition/*` layer before proving those custom components were required.
+A later de-duplication audit showed that Prime and the current Pi/Prime package ecosystem already cover more of Command Governor's intended surface than the implementation plan assumed. Existing packages now provide strong task/evidence gates, independent review semantics, PR review, multi-agent delegation, ChatGPT transports, memory, and governance workflows.
 
-The problem is therefore not a missing reliability invariant. It is an **implementation-boundary failure**: a correct architecture decision can still be defeated if later implementation work treats every discovered edge case as justification for another permanent Governor subsystem.
+Draft PR #19 repeated the same risk with DeepSeek Harness: it contained valuable donor research, but translated the donor into another generic `governor/composition/*` implementation before proving those custom components were required.
 
-This ADR makes the implementation boundary explicit and durable.
+The problem is therefore not a missing reliability invariant. It is an **implementation-boundary failure**: a correct architecture decision can still be defeated if later implementation work treats every discovered edge case or attractive donor pattern as justification for another permanent Governor subsystem.
+
+This ADR makes the implementation boundary explicit and durable and records what we actually want to take from DeepSeek Harness without cloning its runtime topology.
 
 ## Decision
 
@@ -91,13 +95,188 @@ In particular, the external D1/D2/D8 adaptation must be tested through the actua
 
 Correct code may be deleted when the architecture no longer needs it.
 
-### 6. DeepSeek Harness remains a donor, not permission to recreate its subsystems
+## DeepSeek Harness donor decision
 
-The DeepSeek Harness research is retained as useful design evidence. Its capability seams, event/provenance patterns, workflow ideas, and provider-neutral composition can inform Command Governor.
+The original donor review inspected `deepseek-ai/deepseek-harness` at `4e84901e6471b79ec0338099867ebb4606d12bb5` (`0.1.2-alpha.4`). This ADR refreshes the donor against current `master` on 2026-09-02:
 
-But donor quality does not establish a missing product capability. Before implementing a DeepSeek-derived event spine, child runtime, mailbox, workflow engine, sandbox contract, or other generic subsystem, the same existence test applies against current Prime/Pi/packages.
+```text
+49a606bc5b5934603f22a26957a07dc799ab0291
+0.1.2-alpha.5 line
+```
 
-### 7. Existing package and transport capabilities are evaluated before bespoke replacements
+DeepSeek Harness remains a **first-class architecture donor**, not the Command Governor substrate. Prime remains the selected durability substrate candidate. We take DeepSeek's best structural rules only when they improve the Prime/Pi composition without creating a second generic runtime.
+
+### 6. Take DeepSeek's capability-seam discipline — ADOPT THE RULE
+
+DeepSeek Harness uses Cordis so model adapters, tools, session services, agent loops, workflows, approvals, credentials, and other behavior are plugins/services rather than privileged core patches. Registrations are reversible effects and profiles/bundles assemble the product from ordered layers.
+
+Command Governor should adopt the structural rule:
+
+- depend on narrow capability contracts rather than concrete runtimes;
+- keep one active authority for singleton concerns;
+- make resolved composition inspectable and versioned;
+- prefer reversible plugin/package composition over core patches;
+- treat runtime/package provenance as part of the resolved loadout.
+
+**Do not import Cordis or rebuild its service framework inside Governor.** Prime/Pi extension/package surfaces are the first implementation vehicle. DeepSeek supplies design evidence, not permission to introduce another plugin kernel.
+
+Primary donor sources: DeepSeek `docs/architecture.md`, profiles/bundles documentation, and generated Cordis service catalogs.
+
+### 7. Take event/provenance ideas only for genuinely Governor-owned facts — ADAPT
+
+DeepSeek's Session is an append-only typed `SessionEvent` log and derives LLM history from it. Its persistence seam stores the same event vocabulary rather than maintaining a parallel stored-message type. Projections derive current state from the log; durable metadata such as cwd/lineage/version lives separately in the session header.
+
+Useful rules:
+
+- append-only facts beat mutable inferred state;
+- derived/projection state must be reconstructible;
+- generated facts should cite their source facts where relevant;
+- unknown required persisted facts fail closed rather than silently disappearing;
+- explicit flush/checkpoint points make durability/error boundaries observable;
+- storage implementations should share one semantic contract.
+
+But **Prime owns the generic worker/session transcript and persistence plane**. Command Governor must not create another generic event-sourced session log merely because the DeepSeek design is strong.
+
+Apply the pattern only to a small set of exact Governor-owned product facts that cannot safely live in an existing Prime/Pi/package authority.
+
+Primary donor sources: `docs/subsystems/session.md`, `docs/subsystems/persistence.md`, `packages/session/README.md`.
+
+### 8. Take durable Session vs process-local Activation semantics — ADOPT THE CONCEPT
+
+DeepSeek explicitly distinguishes a persistent Session from one process-local Activation/residency epoch for continuable subagents.
+
+That distinction is useful for reasoning about restart-safe identity:
+
+- durable session identity is not process identity;
+- stale process-local handles do not authorize new mutations;
+- lineage/provenance does not automatically grant live authority;
+- restart may materialize a new Activation for the same durable Session.
+
+Prime already owns its own generation/session/worker mechanics. Governor should reuse those mechanics and borrow the conceptual distinction where it improves policy/conformance vocabulary.
+
+### 9. Take fail-loud provider capability negotiation — ADOPT
+
+DeepSeek's subagent seam supports multiple providers behind one contract and checks provider capabilities before starting work. Unsupported persona/tool-filter/schema/depth features fail with typed errors rather than being accepted and silently ignored.
+
+Command Governor should require the same behavior from selected Prime/Pi child/delegation paths:
+
+- declare required capabilities before delegation;
+- reject unsupported authority/safety/correctness requirements loudly;
+- never silently downgrade a role's required tool restrictions, output contract, depth bound, or model/loadout requirement.
+
+Do not implement another generic subagent registry if Prime or an existing package already supplies the needed provider-neutral delegation.
+
+Primary donor source: `docs/subsystems/subagent.md`.
+
+### 10. Steal the durable-mailbox invariant from DeepSeek Agent Teams, not the whole Team runtime — ADAPT
+
+DeepSeek's experimental Agent Teams layer uses durable team/member/task/message identities and a persistent peer mailbox. The earlier donor review identified the strongest pattern as **persist-before-deliver and reconcile queued-minus-confirmed delivery**.
+
+That is valuable wherever Command Governor has a true cross-agent/cross-process delivery obligation:
+
+```text
+durable admission
+  -> dispatch attempt
+  -> durable/observable target acceptance
+  -> explicit delivery confirmation
+  -> obligation closes
+```
+
+However, current DeepSeek continuable-subagent documentation also exposes an important boundary: `startContinuable()` can return after inbox acceptance before that message has necessarily reached durable Session persistence. That is exactly why we must **not** blindly treat DeepSeek core inbox acceptance as our durability definition.
+
+Use the Team mailbox pattern as a conformance requirement when the selected Prime/Pi package path lacks equivalent durable admission/confirmation. Do not preemptively build a generic Governor mailbox.
+
+Primary donor sources: `docs/subsystems/agent-team.md`, `docs/subsystems/subagent.md`.
+
+### 11. Benchmark DeepSeek workflows; do not automatically build a Governor workflow engine — BENCHMARK / DONOR
+
+DeepSeek's workflow seam runs a model-written orchestration script in a bounded worker-thread engine. Strong ideas include:
+
+- metadata validated as plain data before script evaluation;
+- engine-wide child-provider and total-agent ceilings the script cannot override;
+- bounded cancellation and holder-owned disposal;
+- child cleanup/quiescence before disposal completes;
+- fatal orchestration-contract errors remain fatal instead of being converted into ordinary child failures;
+- observer events receive cloned data snapshots rather than live mutation handles;
+- durable presentation records describe starts/ends without becoming execution authority.
+
+These are excellent orchestration design rules.
+
+Command Governor should first compare them against Prime RLM, existing Pi workflow packages, and ordinary model/tool orchestration. Only a demonstrated product gap justifies a custom workflow engine.
+
+Primary donor source: `docs/subsystems/workflow.md`.
+
+### 12. Benchmark PTC / `run_code` against Prime RLM and native tools — BENCHMARK
+
+DeepSeek's PTC mode replaces a large visible native-tool schema with a `run_code` transport plus a generated typed SDK. Sub-calls re-enter the normal tool pipeline, successful values stay typed/structured, and intermediate values can remain outside the model conversation.
+
+Potential benefit: fewer model/tool round trips and less schema/context churn for tool-heavy work.
+
+Command Governor should benchmark:
+
+```text
+native Prime/Pi tool calls
+vs Prime persistent RLM
+vs DeepSeek-style PTC/run_code
+vs a hybrid
+```
+
+Measure correctness, fresh/cached/total tokens, latency, retries, tool count, persistence semantics, and attack surface. Do not select PTC from theoretical token savings alone.
+
+Primary donor sources: DeepSeek PTC Agent Notes (`2026-06-15-ptc.md`, `2026-07-20-ptc-typed-tool-returns.md`) and `packages/core/tools`.
+
+### 13. Take fail-closed one-shot approval semantics — ADAPT
+
+DeepSeek's approval seam has a small closed outcome vocabulary. Only `allowed-once` grants the asked-about action; rejected/cancelled/unavailable fail closed. Missing or throwing answerers do not silently allow work. Approval audit pairs are durable in the requesting Session, while tool arguments are not duplicated into the approval record.
+
+Command Governor should preserve these principles for any genuinely user-owned decision surface:
+
+- approval binds to one exact action/revision;
+- no answer is not approval;
+- answerer failure is not approval;
+- a later plugin cannot widen an authoritative denial;
+- audit identity must correlate request and decision without duplicating sensitive payloads.
+
+Use an existing Prime/Pi approval/permission primitive first when it satisfies the contract.
+
+Primary donor source: `docs/subsystems/approval.md`.
+
+### 14. Take credential references and per-operation resolution — ADAPT
+
+DeepSeek keeps credential references in config and secret values in a separate provider. Consumers re-resolve credentials per operation, configuration surfaces can inspect configured/source/writable state without receiving the secret, and serialized read-modify-write protects rotating credential records.
+
+Useful rules:
+
+- configuration carries secret references, not secret values;
+- read/status surfaces never return secrets;
+- credentials are resolved at the operation boundary rather than copied into long-lived model/session state;
+- writes that would be shadowed by a higher-priority source fail instead of pretending to succeed;
+- token refresh/rotation uses serialized read-modify-write.
+
+Apply through existing OS/Nix/Prime/Pi secret surfaces where possible. Do not create a Governor secret manager merely to mimic DeepSeek.
+
+Primary donor source: `docs/subsystems/credentials.md`.
+
+### 15. Take model-visible/cost/component discipline — ADAPT
+
+DeepSeek's architecture repeatedly separates model-visible state from host-only state and documents which plugins affect prompts/tool schemas/session logs. Its generated service catalogs and component grouping make composition consequences inspectable.
+
+Command Governor should preserve a lightweight form of this discipline for selected components:
+
+- know whether a component changes model-visible prompt/tool context;
+- know its provider/model/runtime authority;
+- know its persistent stores and external I/O;
+- measure token/cache/cost impact before making a component default.
+
+This belongs in package selection/conformance metadata, not in another generic runtime registry unless one is actually required.
+
+### 16. DeepSeek remains a specialist-worker/interoperability candidate, not the durability authority
+
+DeepSeek Harness supports ACP and provider-neutral subagent backends and may be useful later as an ACP-compatible specialist worker. It does not replace Prime merely because its architecture is elegant or popular.
+
+Prime remains preferred for the currently selected core durability semantics. A substrate change requires a future ADR and real failure/recovery evidence.
+
+### 17. Existing package and transport capabilities are evaluated before bespoke replacements
 
 The de-duplication audit identifies current candidates including `pi-squad`, `pi-tasks`, `pi-subagents`, `pi-pr-review`, `pi-governance-pipeline`, `pi-oracle`, `pi-gpt`, and `pi-observational-memory`.
 
@@ -105,7 +284,7 @@ These names are not permanently blessed dependencies. They are evidence that Com
 
 For ChatGPT Web specifically, existing Pi-native transports are tested before any new Chrome/CDP/browser transport is built.
 
-### 8. Generic upstream gaps should move upstream when practical
+### 18. Generic upstream gaps should move upstream when practical
 
 If a missing primitive is generic to Prime/Pi rather than unique to Command Governor, prefer an upstream fix or contribution. A local compatibility shim may bridge the gap only when the actual product path requires it.
 
@@ -117,23 +296,25 @@ A TEMP WORKAROUND must state:
 - the minimum local delta;
 - the condition under which the workaround is removed.
 
-### 9. Sandboxing is optional hardening for the trusted-local product
+### 19. Sandboxing is optional hardening for the trusted-local product
 
 Command Governor does not require sandboxing merely to operate in the trusted-local use case. Isolation remains useful and may be required for intentionally untrusted repositories, plugins, skills, or other workloads, but it is not a prerequisite for the core package topology.
 
 This refines ADR 0009's broader sandbox language. Security hardening must not force a second runtime architecture where none is needed.
 
-### 10. Repository state must make pivots unambiguous
+### 20. Repository state must make pivots unambiguous
 
 When an accepted architecture change supersedes active implementation work:
 
 - useful research/evidence is preserved on `main`;
 - stale implementation PRs are closed or explicitly retargeted;
 - stale roadmap language is corrected;
-- root agent instructions point to the current ADRs and research;
+- README/ADRs/current research clearly identify the current direction;
 - future sessions must not infer current direction from an old open branch or a previously green PR.
 
 `main` plus accepted ADRs are the architecture authority. Open branches and old implementation plans are not.
+
+Global Claude Code and Codex behavior/instructions are managed declaratively by `DivMode/nix-config`; this repository must not duplicate that global policy in repo-local `CLAUDE.md` or `AGENTS.md` files.
 
 ## Immediate implications
 
@@ -144,7 +325,8 @@ For the current repository:
 - audit PR #18 production modules under USE EXISTING / PLUGIN / TEMP WORKAROUND / DELETE;
 - build the smallest viable `@commandgovernor/harness` package path;
 - run the D1/D2/D8 failure cases through that actual path;
-- bake existing task/review/ChatGPT/memory candidates before implementing equivalents;
+- bake existing task/review/ChatGPT/memory/workflow candidates before implementing equivalents;
+- include DeepSeek donor patterns in those bake-offs, especially capability seams, fail-loud negotiation, durable mailboxes, workflow bounds, PTC, approvals, and credential references;
 - retain focused conformance tests that protect real product invariants;
 - remove tests whose only purpose is protecting a subsystem that is deleted;
 - update ADR 0009 acceptance only from the final proven topology, not the superseded post-#18 S2/S3 roadmap.
@@ -172,6 +354,7 @@ Their behavioral reliability requirements remain valuable where retained by ADR 
 - future sessions have a clear ownership boundary rather than reconstructing it from chat history;
 - implementation size is constrained by demonstrated product need rather than by how many edge cases can be modeled locally;
 - Prime/Pi ecosystem improvements can delete Command Governor code instead of creating permanent duplicate authorities;
+- strong DeepSeek design patterns can improve Governor without importing another runtime;
 - correctness review and architectural necessity become separate questions;
 - expensive reviewed work can be salvaged without becoming permanent through sunk-cost reasoning;
 - stale PRs and old roadmaps cannot silently become the next session's plan.
@@ -181,7 +364,8 @@ Their behavioral reliability requirements remain valuable where retained by ADR 
 - some previously reviewed custom code may be removed;
 - package evaluation and upstream source inspection are required before adding generic capabilities;
 - package churn means evidence occasionally needs refreshing;
-- a narrow workaround may need to be maintained until an upstream defect is fixed.
+- a narrow workaround may need to be maintained until an upstream defect is fixed;
+- donor ideas require measurement and integration work instead of direct copying.
 
 These costs are preferable to maintaining another general-purpose agent/control-plane stack beside Prime.
 
