@@ -113,6 +113,22 @@ describe("MutationLedger (D2)", () => {
 		assert.deepEqual([...ledger.adoptAbandoned().strays].sort(), ["notes.txt", "stray dir"]);
 	});
 
+	it("refuses to start over records in the pre-version layout, and reports empty record directories", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cg-ledger-"));
+		const ledger = new MutationLedger(dir);
+		ledger.recordDispatch(identity("cg-real"));
+		writeFileSync(join(ledger.dir, "cg-old.json"), "{}");
+		assert.throws(() => new MutationLedger(dir), (e: unknown) => e instanceof MutationLedgerError && e.code === "unreadable_layout" && /cg-old\.json/.test(e.message));
+		rmSync(join(ledger.dir, "cg-old.json"));
+		mkdirSync(join(ledger.dir, "cg-half"));
+		const again = new MutationLedger(dir);
+		assert.deepEqual(again.list().map((r) => r.commandId), ["cg-real"]);
+		assert.deepEqual(again.empty(), ["cg-half"]);
+		assert.deepEqual(again.adoptAbandoned().empty, ["cg-half"]);
+		assert.equal(again.recordDispatch({ ...identity("cg-half") }).version, 1, "a later create of that id heals it");
+		assert.deepEqual(again.empty(), []);
+	});
+
 	it("a version file with a non-canonical name is not a version, and a gap in the history is a typed error", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cg-ledger-"));
 		const ledger = new MutationLedger(dir);

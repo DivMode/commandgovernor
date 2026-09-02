@@ -188,8 +188,9 @@ export interface SessionRegistryOptions {
 	readonly maxAttempts?: number;
 }
 
-const SESSION_ID = /^[A-Za-z0-9._-]+$/;
-const LEASE_SUFFIX = /\.json\.recovery\.(lock|reclaim)$/;
+const LEASE_SUFFIX = /\.json\.recovery\.(lock|reclaim)(\.[^/]*\.tmp)?$/;
+/** A session id; never one that would spell another session's lease name. */
+const SESSION_ID = /^(?!.*\.json\.recovery\.(lock|reclaim)$)[A-Za-z0-9._-]+$/;
 
 function readRaw(path: string): string | undefined {
 	try {
@@ -224,6 +225,8 @@ export class SessionRegistry {
 		this.#store = new VersionStore<SessionRecord>(this.dir, {
 			idPattern: SESSION_ID,
 			ignore: (name) => LEASE_SUFFIX.test(name),
+			// `<id>.json` files are the pre-version layout; starting over them would hide their records.
+			refuseStrays: /\.json$/,
 			...(options.hooks ? { hooks: options.hooks } : {}),
 			...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
 		});
@@ -246,10 +249,15 @@ export class SessionRegistry {
 		try {
 			return this.#store.update(sessionId, derive);
 		} catch (error) {
-			if (error instanceof VersionStoreError && error.code === "unknown_record") throw new UnknownSessionError(sessionId);
-			if (error instanceof VersionStoreError && error.code === "bad_id") throw new Error(`refusing to use ${JSON.stringify(sessionId)} as a file name`);
-			throw error;
+			return this.#translate(sessionId, error);
 		}
+	}
+
+	/** The store's errors in the registry's vocabulary. */
+	#translate(sessionId: string, error: unknown): never {
+		if (error instanceof VersionStoreError && error.code === "unknown_record") throw new UnknownSessionError(sessionId);
+		if (error instanceof VersionStoreError && error.code === "bad_id") throw new Error(`refusing to use ${JSON.stringify(sessionId)} as a file name`);
+		throw error;
 	}
 
 	/** The path of the current version of `sessionId`; for operators and tests. */
@@ -257,8 +265,7 @@ export class SessionRegistry {
 		try {
 			return this.#store.currentVersionPath(sessionId);
 		} catch (error) {
-			if (error instanceof VersionStoreError && error.code === "unknown_record") throw new UnknownSessionError(sessionId);
-			throw error;
+			return this.#translate(sessionId, error);
 		}
 	}
 
@@ -267,17 +274,21 @@ export class SessionRegistry {
 		try {
 			return this.#store.history(sessionId);
 		} catch (error) {
-			if (error instanceof VersionStoreError && error.code === "unknown_record") throw new UnknownSessionError(sessionId);
-			throw error;
+			return this.#translate(sessionId, error);
 		}
+	}
+
+	/** Entries under `sessions/` that are neither records nor lease files, and record directories with no version. Never read. */
+	strays(): { strays: string[]; empty: string[] } {
+		const { strays, empty } = this.#store.entries();
+		return { strays, empty };
 	}
 
 	get(sessionId: string): SessionRecord | undefined {
 		try {
 			return this.#store.get(sessionId);
 		} catch (error) {
-			if (error instanceof VersionStoreError && error.code === "bad_id") throw new Error(`refusing to use ${JSON.stringify(sessionId)} as a file name`);
-			throw error;
+			return this.#translate(sessionId, error);
 		}
 	}
 

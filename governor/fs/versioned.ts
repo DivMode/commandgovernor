@@ -48,7 +48,7 @@ export interface Versioned {
 	readonly version: number;
 }
 
-export type VersionStoreErrorCode = "unknown_record" | "duplicate_record" | "contended" | "corrupt_history" | "bad_id";
+export type VersionStoreErrorCode = "unknown_record" | "duplicate_record" | "contended" | "corrupt_history" | "bad_id" | "unreadable_layout";
 
 export class VersionStoreError extends Error {
 	readonly code: VersionStoreErrorCode;
@@ -81,6 +81,12 @@ export interface VersionStoreOptions {
 	readonly idPattern?: RegExp;
 	/** Names under the store that are known not to be records and are not reported as strays (e.g. lease files). */
 	readonly ignore?: (name: string) => boolean;
+	/**
+	 * Strays matching this pattern make construction fail: they are records in
+	 * a layout this store does not read, and reading nothing while they exist
+	 * would silently discard history.
+	 */
+	readonly refuseStrays?: RegExp;
 }
 
 /**
@@ -121,6 +127,12 @@ export class VersionStore<T extends Versioned> {
 		this.#hooks = options.hooks ?? {};
 		this.#idPattern = options.idPattern ?? DEFAULT_ID;
 		this.#ignore = options.ignore ?? (() => false);
+		if (options.refuseStrays) {
+			const refused = this.entries().strays.filter((name) => options.refuseStrays!.test(name));
+			if (refused.length > 0) {
+				throw new VersionStoreError("unreadable_layout", refused.join(","), `${dir} holds ${refused.length} file(s) in a layout this store does not read (${refused.slice(0, 5).join(", ")}${refused.length > 5 ? ", ..." : ""}); refusing to start over them`);
+			}
+		}
 	}
 
 	recordDir(id: string): string {
@@ -132,15 +144,23 @@ export class VersionStore<T extends Versioned> {
 		return join(this.recordDir(id), `v${version}.json`);
 	}
 
-	/** Record ids under the store, and the entries that are neither records nor ignored. */
-	entries(): { ids: string[]; strays: string[] } {
+	/**
+	 * Record ids under the store; the entries that are neither records nor
+	 * ignored (`strays`); and record directories holding no published version
+	 * (`empty`: a creator died between `mkdir` and its `link`; a later create
+	 * of that id heals it). Nothing here is read.
+	 */
+	entries(): { ids: string[]; strays: string[]; empty: string[] } {
 		const ids: string[] = [];
 		const strays: string[] = [];
+		const empty: string[] = [];
 		for (const entry of readdirSync(this.dir, { withFileTypes: true })) {
-			if (entry.isDirectory() && this.#idPattern.test(entry.name)) ids.push(entry.name);
-			else if (!this.#ignore(entry.name)) strays.push(entry.name);
+			if (entry.isDirectory() && this.#idPattern.test(entry.name)) {
+				if (readdirSync(join(this.dir, entry.name)).some((name) => VERSION_FILE.test(name))) ids.push(entry.name);
+				else empty.push(entry.name);
+			} else if (!this.#ignore(entry.name)) strays.push(entry.name);
 		}
-		return { ids, strays };
+		return { ids, strays, empty };
 	}
 
 	/** The highest version on disk for `id`, or undefined for no record. */

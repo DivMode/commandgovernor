@@ -180,14 +180,28 @@ resolved in between, or two Governors could both pass the check and both
 send. So the supersede first writes `supersededBy: R` onto O by
 compare-and-swap, refused unless O is UNCERTAIN and unclaimed at the
 moment the write lands (`supersedes_not_uncertain`, `already_superseded`),
-and only then creates R's record, and only then can R be sent. A
+and only then creates R's record, then **confirms** the claim on O by a
+second compare-and-swap (`confirmedAt`), and only then can R be sent. A
 resolution that lands first makes the claim fail and R is never created;
-a claim that lands first makes the second claim fail. Exact evidence
-about O may still resolve it afterwards (the claim stays on the record).
-A claim whose claimant died between the claim and the create is released
-by `adoptAbandoned` under the same process-identity fence adoption uses,
-and reported as `pendingClaims` while the claimant is alive or cannot be
-told. `ledger-cas.test.ts` stages claim-vs-resolution, claim-vs-claim and
+a claim that lands first makes the second claim fail. The confirm also
+requires O still UNCERTAIN: exact evidence that lands between the claim
+and the confirm wins, R is marked never sent, and the claim stays on the
+resolved record as history (sending a replacement after the original was
+proven to have happened would duplicate the effect). Evidence that lands
+after the confirm resolves O with the confirmed claim on it; R may already
+be out. The claim is two-phase so that its release cannot race its create: an
+unconfirmed claim whose replacement is absent and whose claimant is proven
+over is released by `adoptAbandoned` (the release re-checks the claim,
+its confirmation and the replacement's absence inside its own CAS);
+a confirmed claim is never released, because its replacement may have
+gone out; a created-but-unconfirmed replacement (the claimant died between
+create and confirm) is left to the human, who sees R adopted UNCERTAIN
+and O still claimed. A claimant whose confirmation finds its claim gone
+marks R **never sent** (DISPATCHED → FAILED, the dispatcher's own proof)
+and reports `claim_lost` instead of a record to dispatch; a claimant whose
+create fails releases the claim it took. At most one replacement is ever
+sent for one uncertain record. A claim is reported as `pendingClaims`
+while the claimant is alive or cannot be told. `ledger-cas.test.ts` stages claim-vs-resolution, claim-vs-claim and
 the dying claimant; `ledger-race.test.ts` releases six real superseders
 and two resolvers on one record. `probeStoredResult` re-presents the same `clientId + commandId`
 to fetch Prime's stored result; a stored untyped failure is still
@@ -355,7 +369,8 @@ one.
 | ledger transitions, probes, outcomes, claim, claim release | read → derive → write | per-record CAS (`VersionStore.update`); preconditions re-checked inside the derivation |
 | ledger `recordDispatch` (new id) | "does the id exist?" → create | exclusive create of `v1.json`; the early check is a courtesy, the `link` is the fence |
 | ledger `recordDispatch({ supersedes })` | "is O uncertain and unclaimed?" → create R → send R | the claim is a CAS write on O; R is created only after it lands; a resolution or another claim landing first refuses it |
-| ledger claim release | "does R exist?" → release | R is unique to the dead claimant, who cannot create it; the release CAS re-checks the claim is still the one classified |
+| ledger claim release | "is the claim unconfirmed, R absent, claimant over?" → release | every condition is re-checked inside the release CAS, including R's absence; a claimant that creates R in the window then either confirms first (the release lands on a confirmed claim and refuses) or finds its claim gone at confirm time and marks R never sent. A confirmed claim is never released |
+| ledger `recordDispatch({ supersedes })`, phase two | create R → confirm claim → return | the confirm is a CAS on O that requires the claim to be this R's; if it is not, R is marked never sent and `claim_lost` is thrown before the Governor can send |
 | ledger `recordOutcome` after adoption | "is it UNCERTAIN?" → resolve | the resolution is itself a CAS with the same precondition; the response was appended as a probe first, so nothing is lost if it is refused |
 | registry `recordGeneration`, `recordIncarnation` | read → derive → write | per-record CAS; `NO_CHANGE` for idempotent writes |
 | registry `create` | "is the id known? is the path bound?" → create | exclusive create of `v1.json`; a duplicate id converges on the winner; a duplicate path for a different id cannot arise because Prime maps one path to one `sessionId` |
@@ -523,6 +538,19 @@ would have truncated the record.
   it to power failure is that the record reverts to its previous version,
   which the next adoption or write re-derives from. No read of that kind
   precedes an external effect without a write of its own.
+- **A replacement that does not declare `supersedes` is invisible to the
+  claim.** The ledger serialises replacements that name the record they
+  replace. A second command for the same intent issued as an ordinary
+  dispatch is, to the ledger, an unrelated command; the human-decision
+  path that mints replacements always names the record.
+- **A claim on a record that was later resolved stays on it.** Evidence
+  may resolve a claimed record; the claim remains as history. A claim on a
+  resolved record whose claimant died is not reported by `adoptAbandoned`
+  (it only inspects UNCERTAIN records); the record itself shows it.
+- **Pre-version records are refused, not migrated.** A `<id>.json` file
+  under `mutations/` or `sessions/` (the layout before compare-and-swap
+  versions) makes construction fail with `unreadable_layout` rather than
+  silently starting over it; nothing shipped in that layout.
 - **Abandonment inside a live process is not adopted.** If the Governor
   process survives but its own dispatch path fails after DISPATCHED
   (the send throws something other than transport loss or timeout, or

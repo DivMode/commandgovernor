@@ -12,11 +12,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { writeFileDurable } from "../../governor/fs/durable.ts";
+import { VersionStoreError } from "../../governor/fs/versioned.ts";
 import { canonicalSessionPath } from "../../governor/session/paths.ts";
 import { SessionRegistry, type SessionRegistryOptions, StaleIncarnationError } from "../../governor/session/registry.ts";
 
@@ -99,6 +100,24 @@ describe("D1: registry writes are compare-and-swap", () => {
 		const other = new SessionRegistry(stateDir);
 		const converged = other.create({ sessionId: "s", sessionPath: registry.require("s").sessionPath, lifecycle: "resident", activeSessionId: "A2", openedBy: "g2" });
 		assert.deepEqual(converged.incarnations.map((inc) => [inc.activeSessionId, inc.cause]), [["A", "create"], ["A2", "converged"]]);
+	});
+
+	it("refuses to start over pre-version session records, reports strays, and refuses ids that spell lease names", () => {
+		const { stateDir, registry } = fresh();
+		writeFileSync(join(registry.dir, "old.json"), "{}");
+		assert.throws(() => new SessionRegistry(stateDir), (e: unknown) => e instanceof VersionStoreError && e.code === "unreadable_layout" && /old\.json/.test(e.message));
+		rmSync(join(registry.dir, "old.json"));
+		writeFileSync(join(registry.dir, "s.json.recovery.lock"), "{}");
+		writeFileSync(join(registry.dir, "notes.txt"), "x");
+		mkdirSync(join(registry.dir, "half"));
+		const again = new SessionRegistry(stateDir);
+		assert.deepEqual(again.strays(), { strays: ["notes.txt"], empty: ["half"] }, "lease files are not strays; empty record dirs are reported");
+		assert.deepEqual(again.list().map((r) => r.sessionId), ["s"]);
+		for (const bad of ["a/b", "x.json.recovery.lock", "y.json.recovery.reclaim", ""]) {
+			assert.throws(() => again.get(bad), /refusing to use/, bad);
+			assert.throws(() => again.history(bad), /refusing to use/, bad);
+			assert.throws(() => again.currentVersionPath(bad), /refusing to use/, bad);
+		}
 	});
 
 	it("negative control: the pre-review rename-in-place from a stale snapshot drops the appended incarnation", () => {

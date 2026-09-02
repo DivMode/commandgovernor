@@ -33,13 +33,15 @@
  * between, or two Governors could both pass the check and both send a
  * replacement. So `recordDispatch({ supersedes: O })` first writes
  * `supersededBy: R` onto O by compare-and-swap, which requires O to be
- * UNCERTAIN and unclaimed at the moment the write lands; only then is R's
- * record created and only then may R be sent. A resolution that lands
- * first makes the claim fail; a claim that lands first makes the second
- * claim fail. Exact evidence about O may still resolve it afterwards (the
- * claim is on the record for the human who reads it). A claim whose
- * claimant died before creating R is released by {@link adoptAbandoned}
- * under the same process-identity fence adoption uses.
+ * UNCERTAIN and unclaimed at the moment the write lands; then R's record
+ * is created; then the claim is CONFIRMED on O by a second CAS that again
+ * requires O UNCERTAIN; only then may R be sent. A resolution that lands
+ * before the claim makes it fail; one that lands between claim and confirm
+ * makes the confirm fail and R is marked never sent; a claim that lands
+ * first makes the second claim fail. Evidence that lands after the confirm
+ * resolves O with the claim on it. A claim whose claimant died before
+ * creating R is released by {@link adoptAbandoned} under the same
+ * process-identity fence adoption uses; a confirmed claim never is.
  *
  * Two facts every record carries so that the crash window the ledger exists
  * for cannot swallow an obligation:
@@ -88,8 +90,10 @@ export interface MutationTransition {
 	readonly response?: DaemonResponse;
 	/** For an adoption: the verdict on the dispatching process and who adopted. */
 	readonly adoption?: { readonly dispatcher: DispatcherIdentity; readonly verdict: ProcessIdentityVerdict; readonly adoptedBy: DispatcherIdentity };
-	/** For a supersede claim taken or released. */
-	readonly claim?: { readonly action: "taken" | "released"; readonly replacement: string; readonly by: DispatcherIdentity; readonly verdict?: ProcessIdentityVerdict };
+	/** For a supersede claim taken, confirmed or released. */
+	readonly claim?: { readonly action: "taken" | "confirmed" | "released"; readonly replacement: string; readonly by: DispatcherIdentity; readonly verdict?: ProcessIdentityVerdict };
+	/** For a DISPATCHED record its own dispatcher proved was never sent. */
+	readonly neverSent?: { readonly by: DispatcherIdentity; readonly reason: string };
 }
 
 /** The Governor process that wrote a record, in the same terms as a recovery lease holder. */
@@ -97,12 +101,21 @@ export interface DispatcherIdentity extends ProcessIdentity {
 	readonly ownerToken: string;
 }
 
-/** The durable claim that a replacement command is being dispatched for an uncertain record. */
+/**
+ * The durable claim that a replacement command is being dispatched for an
+ * uncertain record. Two-phase: `taken` before the replacement record exists,
+ * `confirmed` once it does and before it is sent. Only an unconfirmed claim
+ * whose replacement is absent and whose claimant is proven over can be
+ * released; a confirmed claim never is, because its replacement may have
+ * gone out.
+ */
 export interface SupersedeClaim {
 	/** The replacement command id. */
 	readonly commandId: string;
 	readonly claimedBy: DispatcherIdentity;
 	readonly claimedAt: string;
+	/** Set by the claimant after the replacement record exists and before the replacement is sent. */
+	readonly confirmedAt?: string;
 }
 
 /** Field names that carry environment values, at any depth, and are never stored in a record. */
@@ -142,8 +155,10 @@ export type MutationLedgerErrorCode =
 	| "unknown_command"
 	| "supersedes_not_uncertain"
 	| "already_superseded"
+	| "claim_lost"
 	| "contended"
-	| "corrupt_history";
+	| "corrupt_history"
+	| "unreadable_layout";
 
 export class MutationLedgerError extends Error {
 	readonly code: MutationLedgerErrorCode;
@@ -168,6 +183,8 @@ export interface AdoptionReport {
 	readonly pendingClaims: readonly { readonly record: MutationRecord; readonly verdict: ProcessIdentityVerdict }[];
 	/** Entries under `mutations/` that are not record directories. Ignored by every listing and reported here. */
 	readonly strays: readonly string[];
+	/** Record directories with no published version (a creator died before its link). Invisible to listings; reported here. */
+	readonly empty: readonly string[];
 }
 
 /**
@@ -234,6 +251,8 @@ function translate(error: unknown): never {
 				throw new MutationLedgerError("corrupt_history", error.message);
 			case "bad_id":
 				throw new Error(`refusing to use ${JSON.stringify(error.id)} as a file name`);
+			case "unreadable_layout":
+				throw new MutationLedgerError("unreadable_layout", error.message);
 		}
 	}
 	throw error;
@@ -249,10 +268,16 @@ export class MutationLedger {
 	constructor(stateDir: string, options: MutationLedgerOptions = {}) {
 		this.dir = join(stateDir, "mutations");
 		this.#hooks = options.hooks ?? {};
-		this.#store = new VersionStore<MutationRecord>(this.dir, {
-			hooks: this.#hooks,
-			...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
-		});
+		try {
+			this.#store = new VersionStore<MutationRecord>(this.dir, {
+				hooks: this.#hooks,
+				// `<id>.json` files are the pre-version layout; starting over them would hide their records.
+				refuseStrays: /\.json$/,
+				...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
+			});
+		} catch (error) {
+			translate(error);
+		}
 		this.#probe = options.processProbe ?? LIVE_PROBE;
 		const self = options.self ?? { pid: process.pid };
 		// The default token carries randomness: a token derived from the pid
@@ -305,6 +330,11 @@ export class MutationLedger {
 		return this.#store.entries().strays;
 	}
 
+	/** Record directories with no published version; never read, always reported. */
+	empty(): string[] {
+		return this.#store.entries().empty;
+	}
+
 	list(): MutationRecord[] {
 		return this.#store.list().sort((a, b) => a.dispatchedAt.localeCompare(b.dispatchedAt) || a.commandId.localeCompare(b.commandId));
 	}
@@ -336,35 +366,20 @@ export class MutationLedger {
 		const undecidable: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
 		const releasedClaims: MutationRecord[] = [];
 		const pendingClaims: { record: MutationRecord; verdict: ProcessIdentityVerdict }[] = [];
-		const strays = this.strays();
+		const { strays, empty } = this.#store.entries();
 		for (const record of this.list()) {
 			if (record.state === "UNCERTAIN" && record.supersededBy) {
 				const claim = record.supersededBy;
-				const replacement = this.get(claim.commandId);
-				if (replacement !== undefined && replacement.supersedes === record.commandId) continue; // the replacement exists: the claim is doing its job
+				if (claim.confirmedAt !== undefined) continue; // confirmed: the replacement exists and may have gone out; never released
+				if (this.get(claim.commandId) !== undefined) continue; // created but not yet confirmed: the claimant is between its create and its confirm (or died there); left for the human
 				const verdict = claim.claimedBy.ownerToken === this.#self.ownerToken ? "current" : classifyProcessIdentity(claim.claimedBy, this.#probe);
 				if (!identityProvesProcessOver(verdict)) {
 					pendingClaims.push({ record, verdict });
 					continue;
 				}
-				releasedClaims.push(
-					this.#update(record.commandId, (current) => {
-						if (current.state !== "UNCERTAIN" || !current.supersededBy || current.supersededBy.commandId !== claim.commandId) return NO_CHANGE;
-						const { supersededBy: _released, ...rest } = current;
-						return {
-							...rest,
-							transitions: [
-								...current.transitions,
-								{
-									at: new Date().toISOString(),
-									to: "UNCERTAIN",
-									reason: `supersede claim by ${claim.commandId} released: the claimant (pid ${claim.claimedBy.pid}) is ${verdict} and never created the replacement`,
-									claim: { action: "released", replacement: claim.commandId, by: this.#self, verdict },
-								},
-							],
-						};
-					}),
-				);
+				const released = this.#releaseClaim(record.commandId, claim.commandId, `the claimant (pid ${claim.claimedBy.pid}) is ${verdict} and never created the replacement`, verdict);
+				const last = released.transitions[released.transitions.length - 1];
+				if (released.version > record.version && last?.claim?.action === "released" && last.claim.by.ownerToken === this.#self.ownerToken) releasedClaims.push(released);
 				continue;
 			}
 			if (record.state !== "DISPATCHED") continue;
@@ -403,7 +418,36 @@ export class MutationLedger {
 				if (!(error instanceof MutationLedgerError) || error.code !== "illegal_transition") throw error;
 			}
 		}
-		return { adopted, inFlight, undecidable, releasedClaims, pendingClaims, strays };
+		return { adopted, inFlight, undecidable, releasedClaims, pendingClaims, strays, empty };
+	}
+
+	/**
+	 * Release an unconfirmed claim on `superseded` whose replacement does not
+	 * exist. Every condition is re-checked inside the compare-and-swap,
+	 * including the replacement's absence, so a claimant creating it in the
+	 * meantime makes this write land on a record whose claim it then refuses
+	 * to touch (and that claimant's own confirmation, or its `claim_lost`,
+	 * decides what happens to the replacement).
+	 */
+	#releaseClaim(superseded: string, replacement: string, why: string, verdict?: ProcessIdentityVerdict): MutationRecord {
+		return this.#update(superseded, (current) => {
+			const claim = current.supersededBy;
+			if (current.state !== "UNCERTAIN" || !claim || claim.commandId !== replacement || claim.confirmedAt !== undefined) return NO_CHANGE;
+			if (this.get(replacement) !== undefined) return NO_CHANGE;
+			const { supersededBy: _released, ...rest } = current;
+			return {
+				...rest,
+				transitions: [
+					...current.transitions,
+					{
+						at: new Date().toISOString(),
+						to: "UNCERTAIN",
+						reason: `supersede claim by ${replacement} released: ${why}`,
+						claim: { action: "released", replacement, by: this.#self, ...(verdict !== undefined ? { verdict } : {}) },
+					},
+				],
+			};
+		});
 	}
 
 	/**
@@ -450,11 +494,49 @@ export class MutationLedger {
 			transitions: [{ at: now, to: "DISPATCHED", reason: input.supersedes !== undefined ? `intent recorded before send; supersedes ${input.supersedes}` : "intent recorded before send" }],
 			...(input.supersedes !== undefined ? { supersedes: input.supersedes } : {}),
 		};
+		let created: MutationRecord;
 		try {
-			return this.#store.create(input.commandId, record);
+			created = this.#store.create(input.commandId, record);
 		} catch (error) {
+			// The claim this process just took must not outlive the create it was
+			// taken for: release it (same preconditions as an adopter's release,
+			// re-checked inside the CAS) and report the create's failure.
+			if (input.supersedes !== undefined) this.#releaseClaim(input.supersedes, input.commandId, "the claimant's create of the replacement failed");
 			return translate(error);
 		}
+		if (input.supersedes !== undefined) {
+			// Phase two: confirm the claim now that the replacement exists, and
+			// strictly before it can be sent. A claim that was released in between
+			// (only a misclassified claimant identity can cause that) means the
+			// replacement must NOT go out: it is marked never sent, and the
+			// caller sees `claim_lost` instead of a record to dispatch.
+			const confirmed = this.#update(input.supersedes, (current) => {
+				const claim = current.supersededBy;
+				if (current.state !== "UNCERTAIN" || !claim || claim.commandId !== input.commandId) return NO_CHANGE;
+				if (claim.confirmedAt !== undefined) return NO_CHANGE;
+				const confirmedAt = new Date().toISOString();
+				return {
+					...current,
+					supersededBy: { ...claim, confirmedAt },
+					transitions: [...current.transitions, { at: confirmedAt, to: "UNCERTAIN", reason: `supersede claim by ${input.commandId} confirmed: the replacement record exists`, claim: { action: "confirmed", replacement: input.commandId, by: this.#self } }],
+				};
+			});
+			if (confirmed.supersededBy?.commandId !== input.commandId || confirmed.supersededBy.confirmedAt === undefined) {
+				this.markNeverSent(input.commandId, `the supersede claim on ${input.supersedes} was lost before the replacement could be sent`);
+				throw new MutationLedgerError("claim_lost", `${input.commandId}: the claim on ${input.supersedes} was released or replaced before it could be confirmed; the replacement was recorded as never sent and must not be dispatched`);
+			}
+		}
+		return created;
+	}
+
+	/**
+	 * The dispatcher's own proof that a DISPATCHED command never reached the
+	 * socket: DISPATCHED -> FAILED. Only the process that would have sent it
+	 * can know this, which is why it is a ledger operation and not evidence
+	 * a human supplies.
+	 */
+	markNeverSent(commandId: string, reason: string): MutationRecord {
+		return this.#transition(commandId, ["DISPATCHED"], { at: new Date().toISOString(), to: "FAILED", reason: `never sent: ${reason}`, neverSent: { by: this.#self, reason } });
 	}
 
 	/**
@@ -468,6 +550,10 @@ export class MutationLedger {
 				throw new MutationLedgerError("supersedes_not_uncertain", `${superseded} is ${current.state}, not UNCERTAIN; only an uncertain mutation may be superseded`);
 			}
 			if (current.supersededBy !== undefined) {
+				const mine = current.supersededBy.commandId === replacement && current.supersededBy.claimedBy.ownerToken === this.#self.ownerToken && current.supersededBy.confirmedAt === undefined;
+				// This ledger re-driving its own unconfirmed claim for the same replacement (after a
+				// transient failure between claim and create) continues where it left off.
+				if (mine) return NO_CHANGE;
 				throw new MutationLedgerError("already_superseded", `${superseded} is already superseded by ${current.supersededBy.commandId} (claimed by ${current.supersededBy.claimedBy.ownerToken}); a second replacement is refused`);
 			}
 			const claimedAt = new Date().toISOString();

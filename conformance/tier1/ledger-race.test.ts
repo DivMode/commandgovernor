@@ -92,23 +92,33 @@ describe("D2: real processes racing on one record", () => {
 		const outcomes = await race(stateDir, "cg-o", roles);
 		const claims = outcomes.filter((o) => o.role === "supersede");
 		const won = claims.filter((o) => o.outcome === "ok");
-		assert.ok(won.length <= 1, `at most one replacement was claimed: ${JSON.stringify(outcomes)}`);
+		assert.ok(won.length <= 1, `at most one replacement may be sent: ${JSON.stringify(outcomes)}`);
 		for (const lost of claims.filter((o) => o.outcome !== "ok")) {
-			assert.ok(lost.code === "already_superseded" || lost.code === "supersedes_not_uncertain", `a losing supersede is refused by the claim, not last-writer-wins: ${JSON.stringify(lost)}`);
+			// A loser is refused at the claim (someone else claimed, or a resolution landed first), or, having claimed,
+			// finds at the confirm that a resolution landed in between: then its replacement is marked never sent.
+			assert.ok(lost.code === "already_superseded" || lost.code === "supersedes_not_uncertain" || lost.code === "claim_lost", `a losing supersede is refused, not last-writer-wins: ${JSON.stringify(lost)}`);
 		}
 		const replacements = ledger.list().filter((r) => r.supersedes === "cg-o");
-		assert.equal(replacements.length, won.length, "exactly the winning replacement exists, no other");
+		const sendable = replacements.filter((r) => r.state === "DISPATCHED");
+		assert.equal(sendable.length, won.length, "exactly the winning replacement is sendable, no other");
+		for (const never of replacements.filter((r) => r.state !== "DISPATCHED")) {
+			assert.equal(never.state, "FAILED");
+			assert.ok(never.transitions[never.transitions.length - 1]!.neverSent, `a replacement that lost at the confirm is marked never sent: ${never.commandId}`);
+			assert.ok(claims.some((o) => o.code === "claim_lost" && o.tag === never.commandId));
+		}
 		const final = ledger.require("cg-o");
 		const history = ledger.history("cg-o");
 		const claimVersion = history.findIndex((v) => v.supersededBy !== undefined);
+		const confirmVersion = history.findIndex((v) => v.supersededBy?.confirmedAt !== undefined);
 		const resolvedVersion = history.findIndex((v) => v.state !== "UNCERTAIN" && v.state !== "DISPATCHED");
 		if (won.length === 1) {
 			assert.equal(final.supersededBy?.commandId, won[0]!.tag);
-			// The claim landed while the record was still UNCERTAIN: strictly before any resolution.
-			if (resolvedVersion >= 0) assert.ok(claimVersion < resolvedVersion, `claim v${claimVersion + 1} precedes resolution v${resolvedVersion + 1}`);
+			assert.ok(final.supersededBy?.confirmedAt, "the winner's claim is confirmed");
+			// Claim and confirm both landed while the record was still UNCERTAIN: strictly before any resolution.
+			if (resolvedVersion >= 0) assert.ok(confirmVersion < resolvedVersion, `confirm v${confirmVersion + 1} precedes resolution v${resolvedVersion + 1}`);
 		} else {
-			assert.equal(final.supersededBy, undefined);
-			assert.ok(resolvedVersion >= 0, "if no claim won, a resolution must have landed first");
+			assert.ok(resolvedVersion >= 0, "if no replacement is sendable, a resolution must have landed (before any claim, or between a claim and its confirm)");
+			if (claimVersion >= 0) assert.ok(claimVersion < resolvedVersion && final.supersededBy?.confirmedAt === undefined, "an unconfirmed claim overtaken by a resolution stays unconfirmed on the resolved record");
 		}
 		const resolvers = outcomes.filter((o) => o.role.startsWith("resolve"));
 		assert.ok(resolvers.filter((o) => o.outcome === "ok").length <= 1);
