@@ -96,10 +96,12 @@ workers on purpose, and every file ends by sweeping its own process tree
   `list --json` names a `sessionFile` that exists; after SIGKILL of worker
   and supervisor `-r` reopens with unchanged `sessionId` and `sessionFile`.
 - **LOAD-001** the Command Governor package and every `packages[]` entry
-  register their tools, commands or skills on the pinned Prime, observed
-  positively (the mock model's `tools` array, the skill roster or a
-  registered command), with a deliberately broken extension as the negative
-  control, because extension load failures are silent in headless modes.
+  register their tools, commands, skills or model providers on the pinned
+  Prime, observed positively (the mock model's `tools` array, the skill
+  roster, a registered command, or the provider's models in
+  `get_available_models`), with a deliberately broken extension as the
+  negative control, because extension load failures are silent in headless
+  modes. Vendored packages are installed by path from the checkout.
   The role files under `harness/agents/` are installed into the fixture
   project's `.pi/agents/` and observed through the delegation package
   itself, which is what reads them.
@@ -115,6 +117,14 @@ workers on purpose, and every file ends by sweeping its own process tree
   (003). Credential-free, no network. The correlation rules themselves are
   prose in the skill and are not re-encoded as tests: a test of a checker
   that lives in the test file measures nothing about the product.
+- **BRIDGE-001…004** (`conformance/runtime/claude-bridge-boundary.test.ts`)
+  the subscription-only invariant on the vendored bridge's own `child-env`
+  module, credential-free: a poisoned inherited environment never reaches
+  the Claude Code child while harmless variables do; an API key, an OAuth
+  token and a bearer resolved by the harness (Prime-shaped and Pi-shaped
+  registries) are each refused before any child; the same registries with
+  no credential pass. Also asserts the shipped module contains no credential
+  injection at all.
 - **GATE-001** Prime's `--autonomous --autonomous-gate "<cmd>"` is a
   host-owned gate: with an identical scripted model, a run does not finish
   while the gate command fails, and finishes once the test (not the model)
@@ -124,11 +134,13 @@ workers on purpose, and every file ends by sweeping its own process tree
 
 ### Opt-in live lane — not in the merge gate
 
-- **LIVE-001…003** (`conformance/runtime/live-chatgpt.test.ts`) runs only
+- **LIVE-001…004** (`conformance/runtime/live-chatgpt.test.ts`) runs only
   with `CG_LIVE=1` and a Codex login: inside a real Prime worker, the
   pinned `pi-gpt` reads the account, sends into a temporary chat (nothing
   is kept), and, with `CG_FOREMAN_THREAD` set, reads the exact foreman
-  thread with message ids. It exists because every other test is blind to
+  thread with message ids; LIVE-004 asks a Claude model through
+  `claude-bridge` with no credential in Prime, so the answer proves Claude
+  Code's own login carried it (plan-billed). It exists because every other test is blind to
   the provider: TRN measures the package against a mock and cannot fail
   when chatgpt.com changes its endpoints, build strings or security-control
   checks. This lane can. Run it before relying on the foreman loop and after

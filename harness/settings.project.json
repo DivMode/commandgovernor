@@ -22,12 +22,16 @@
     "  @gotgenes/pi-permission-system  does not load on Prime and cannot see",
     "                   kernel-side bash() even when patched",
     "  pi-observational-memory / pi-continual-harness  not baked; Prime's",
-    "                   continual harness is the default memory owner"
+    "                   continual harness is the default memory owner",
+    "  pi-claude-agent-sdk  vendored + patched for Prime: Claude models through the real",
+    "                   Claude Code binary on its own login (plan billing). No Anthropic",
+    "                   credential is configured in Prime, on purpose."
   ],
   "packages": [
     "npm:pi-tasks@0.2.5",
     "npm:@gotgenes/pi-subagents@21.4.0",
     "npm:pi-pr-review@1.17.10",
-    "../../pins/packages/pi-gpt-0.4.3"
+    "../../pins/packages/pi-gpt-0.4.3",
+    "../../pins/packages/pi-claude-agent-sdk-0.8.6"
   ]
 }

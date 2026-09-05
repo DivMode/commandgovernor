@@ -159,6 +159,24 @@
       "authority": "foreman-transport",
       "registers": "gpt_account_status, gpt_list_models, gpt_chat, gpt_list_chats, gpt_get_conversation, gpt_get_message tools; /gpt-observer command (observer extension, off by default); chatgpt skill",
       "note": "Direct ChatGPT Web transport over chatgpt.com/backend-api with the user's Codex login token (~/.codex/auth.json); its send path solves the provider's sentinel/proof-of-work/turnstile checks. Adopted 2026-09-04 on the user's explicit decision to accept that account risk (ADR 0008 §8, amended). Vendored: scripts/bootstrap.sh verifies the committed tarball against `integrity`, extracts it to `source` and applies `patches` (two guards in gpt_chat: a failed leaf read fails the call instead of sending with a fabricated parent; a reply from another conversation id fails instead of being reported as the requested thread's). Measured on Prime 0.9.1: loads unmodified and patched; the token reads browser-created threads; a send into an exact pre-existing browser thread and a correlated readback both succeeded, from a script and from inside a Prime worker (docs/research/2026-09-04-zero-custom-code-proof.md §6). Not durable across a send: the delivery id goes in the message body and an ambiguous send is resolved by readback, never by resend (harness/skills/cg-foreman)."
+    },
+    {
+      "source": "./pins/packages/pi-claude-agent-sdk-0.8.6",
+      "origin": "npm:pi-claude-agent-sdk@0.8.6",
+      "tarball": "pins/packages/pi-claude-agent-sdk-0.8.6.tgz",
+      "patches": [
+        "pins/patches/pi-claude-agent-sdk-0.8.6-prime-compat.patch"
+      ],
+      "lockfile": "pins/packages/pi-claude-agent-sdk-0.8.6.package-lock.json",
+      "exactVersion": "0.8.6",
+      "integrity": "sha512-nVyqRVm5yu78K8TbAkdY7UORg0olyn6QNNaaAKUcFsizuB961+XQdlu5qoYOzZknXXNULY0Cs45UYjy8iS01Yw==",
+      "repository": "https://github.com/pi-pod/pi-claude-agent-sdk",
+      "gitHead": "5293c03fc1e250725c9e23472eec767a5a302caf",
+      "license": "MIT",
+      "reviewedAt": "2026-09-05",
+      "authority": "claude-model-provider",
+      "registers": "model provider `claude-bridge` with nine Claude models (Fable 5.1/5, Opus 5/4.8/4.7/4.6, Sonnet 5/4.6, Haiku 4.5); no tools, no commands",
+      "note": "Runs the real Claude Code binary (the Agent SDK's bundled one, or `claude` on PATH via pathToClaudeCodeExecutable) as a Prime model provider with Prime's tools bridged through it: the T3 Code pattern inside Prime. Unpatched it does NOT load on Prime (measured with Prime's own loader 2026-09-05): it imports `@earendil-works/pi-ai/compat` (Prime has no compat export; getModels is on pi-ai's main entry), `CONFIG_DIR_NAME` (Prime defines `.prime/agent` but does not export it) and `ModelRegistry.getProviderAuth` (Prime's resolver is getApiKeyAndHeaders). The committed patch fixes those three and replaces upstream's credential injection with an enforced boundary: every inherited Claude/Anthropic variable is stripped from the child, and any Anthropic credential the harness resolves (API key, OAuth token, bearer) is REFUSED before a child is spawned; the child can only authenticate with Claude Code's own login (macOS Keychain). Prime never holds or forwards an Anthropic token. Enforced on the shipped module by conformance/runtime/claude-bridge-boundary.test.ts (BRIDGE-001…004) and at the product surface (a Prime-configured API key is refused before any Claude Code child exists, measured 2026-09-05). Measured after the patch: Prime's loader loads it; get_available_models lists provider claude-bridge with nine models; a run with --provider claude-bridge --model claude-haiku-4-5 and no Prime credential answered the exact probe token through the user's Claude Code login in two seconds, plan-billed. Before the boundary existed, a Claude Code child given an invalid API key was observed to hang; the refusal now happens before any child. Dependencies come from the committed lockfile at bootstrap."
     }
   ],
   "concerns": [
@@ -287,6 +305,13 @@
       "phase": "optional-hardening",
       "plannedOwner": "an OS isolation mechanism applied to the Prime kernel process for untrusted workloads",
       "note": "Optional for the trusted-local product (ADR 0010 §19); the load-bearing control for destructive work until tool gating exists."
+    },
+    {
+      "concern": "claude-model-provider",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "./pins/packages/pi-claude-agent-sdk-0.8.6",
+      "note": "Claude models on the user's Max subscription inside Prime, through the real Claude Code binary and its own login (plan billing, the T3 Code pattern). Enforced product invariant, not convention: the vendored bridge strips every inherited Anthropic variable from the child and refuses any Anthropic credential the harness resolves (API key, OAuth, bearer) before a child is spawned (BRIDGE-001…004 on the shipped module). Prime's built-in Claude Pro/Max login is therefore unusable for inference here as well as excluded by policy: it is Prime's own OAuth client speaking Claude Code's wire shape, which Anthropic bills as third-party extra usage per token and its terms do not permit. Measured live 2026-09-05."
     }
   ]
 }
