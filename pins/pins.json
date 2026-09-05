@@ -26,6 +26,7 @@
     "A bare name, a branch, or a tag is not a pin and the conformance suite",
     "rejects it. Two entries may not own the same concern.",
     "",
+    "A vendored entry (tarball + patches) is pinned by the committed tarball's sha512 and installed by path; `origin` records where it came from. This is how a needed package with no maintainable upstream is kept in this repository instead of waited on.",
     "Concerns (concerns[]): one owner per concern with its ADR 0010 disposition. Assigned owners are `prime-agent`, a packages[] source, or a repository path. Unassigned concerns name a planned owner and a phase so they cannot be adopted by accident."
   ],
   "schemaVersion": 3,
@@ -143,16 +144,21 @@
       "note": "Reviewed-head binding (40/64-hex SHA, frozen), staleness re-check at publish, stale APPROVE refused by default, publicationAttemptId for idempotent retries. Loads on the pinned Prime (measured 2026-09-04). Live GitHub publishing is exercised only with real credentials."
     },
     {
-      "source": "npm:pi-gpt@0.4.3",
+      "source": "./pins/packages/pi-gpt-0.4.3",
+      "origin": "npm:pi-gpt@0.4.3",
+      "tarball": "pins/packages/pi-gpt-0.4.3.tgz",
+      "patches": [
+        "pins/patches/pi-gpt-0.4.3-foreman-guards.patch"
+      ],
       "exactVersion": "0.4.3",
       "integrity": "sha512-tYeYG9kZMIzRouw+YxNphvtdOE0qw5CbtXiPTRltSevCW0hgVQbTJps3AU1G4J7KYR0P9RUEJyKmoLbJBBPtPw==",
-      "repository": "https://github.com/davidroman0O/pi-gpt (declared; returns 404 — the npm tarball is the only obtainable source)",
+      "repository": "https://github.com/davidroman0O/pi-gpt (declared; returns 404). The npm tarball is committed under pins/packages/ so nothing depends on the registry or the author.",
       "gitHead": "d0be5dc743d1edf223f5ebb63f85a4744e76e92f",
       "license": "MIT",
       "reviewedAt": "2026-09-04",
       "authority": "foreman-transport",
       "registers": "gpt_account_status, gpt_list_models, gpt_chat, gpt_list_chats, gpt_get_conversation, gpt_get_message tools; /gpt-observer command (observer extension, off by default); chatgpt skill",
-      "note": "Direct ChatGPT Web transport over chatgpt.com/backend-api with the user's Codex login token (~/.codex/auth.json); its send path solves the provider's sentinel/proof-of-work/turnstile checks. Adopted 2026-09-04 on the user's explicit decision to accept that account risk (ADR 0008 §8, amended). Measured on Prime 0.9.1: loads unmodified; the token reads browser-created threads and the project conversation list; a send into an exact pre-existing browser thread and a correlated readback both succeeded (docs/research/2026-09-04-zero-custom-code-proof.md §6). Not durable across a send: the delivery id goes in the message body and an ambiguous send is resolved by readback, never by resend (harness/skills/cg-foreman). Known defects carried as upstream reports: no assertion that the returned conversation_id equals the requested one; a swallowed leafMessageId failure sends with a fabricated parent."
+      "note": "Direct ChatGPT Web transport over chatgpt.com/backend-api with the user's Codex login token (~/.codex/auth.json); its send path solves the provider's sentinel/proof-of-work/turnstile checks. Adopted 2026-09-04 on the user's explicit decision to accept that account risk (ADR 0008 §8, amended). Vendored: scripts/bootstrap.sh verifies the committed tarball against `integrity`, extracts it to `source` and applies `patches` (two guards in gpt_chat: a failed leaf read fails the call instead of sending with a fabricated parent; a reply from another conversation id fails instead of being reported as the requested thread's). Measured on Prime 0.9.1: loads unmodified and patched; the token reads browser-created threads; a send into an exact pre-existing browser thread and a correlated readback both succeeded, from a script and from inside a Prime worker (docs/research/2026-09-04-zero-custom-code-proof.md §6). Not durable across a send: the delivery id goes in the message body and an ambiguous send is resolved by readback, never by resend (harness/skills/cg-foreman)."
     }
   ],
   "concerns": [
@@ -223,7 +229,7 @@
       "concern": "independent-acceptance",
       "status": "assigned",
       "disposition": "USE EXISTING",
-      "owner": "npm:pi-gpt@0.4.3",
+      "owner": "./pins/packages/pi-gpt-0.4.3",
       "note": "worker finished != work accepted. The acceptance record is the foreman's correlated reply in its ChatGPT thread (cg-foreman skill: echoes the delivery id, names the head SHA), written by a model the implementer does not run; GitHub merge follows that verdict and is bound to the same head. GitHub review is NOT the boundary on this repository: protect-main requires zero approving reviews and the foreman's GitHub connector is the same user as the PR author (measured by the foreman 2026-09-05), so pi-pr-review's reviewed-head binding guards GitHub-side reviews but does not constitute acceptance. Prime's --autonomous-gate can require the verdict before a run may finish. On a single-user machine no local file, env var or extension tool is an identity boundary, so no local plugin can provide this property; the proposed cg_accept plugin was not built."
     },
     {
@@ -244,7 +250,7 @@
       "concern": "foreman-transport",
       "status": "assigned",
       "disposition": "USE EXISTING",
-      "owner": "npm:pi-gpt@0.4.3",
+      "owner": "./pins/packages/pi-gpt-0.4.3",
       "note": "Exact pre-existing ChatGPT thread, message ids, active-branch readback; send and correlated readback measured live 2026-09-05 (UTC) on the user's real foreman thread. The correlation rules (CG-D envelope, reply echo, stale-revision rejection, never resend on ambiguity) are the cg-foreman skill, not code. pi-oracle stays the browser-backed alternative once its Prime patch lands upstream (docs/upstream/); @cobuild/review-gpt is UNLICENSED and a standalone CLI. Command Governor owns no browser runtime."
     },
     {

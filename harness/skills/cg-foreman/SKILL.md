@@ -54,9 +54,10 @@ what survives a crash mid-send.
 
 `gpt_chat({ conversation_id, prompt, model, thinking_effort })` with the
 thread's own model (read `default_model_slug` from the conversation) and
-`temporary: false`. Assert that the returned `conversation_id` equals the
-one requested; `pi-gpt` does not, and a mismatch means the reply landed in
-another thread and must be treated as **not delivered**.
+`temporary: false`. The vendored, patched `pi-gpt` fails the call if the
+backend answers from another conversation, or if the thread's leaf could not
+be read before sending. Treat either failure as **not delivered** and go to
+the ambiguous-send rule below; never take a failed call as a sent message.
 
 Thinking models answer asynchronously: the call may return empty text after
 its five-minute poll. That is not a failure. Go to readback.

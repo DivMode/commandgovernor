@@ -404,4 +404,4 @@ Refinements recorded at acceptance:
   repository's ruleset requires no approvals and the foreman shares the
   author's GitHub identity (measured 2026-09-05). S6 (ChatGPT foreman) is
   met on the pinned `pi-gpt`: an exact user-created thread, a correlated
-  round trip, and ambiguity resolved by readback (proof §6; TRN-000…005).
+  round trip, and ambiguity resolved by readback (proof §6; TRN-000…003).

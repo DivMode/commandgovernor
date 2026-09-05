@@ -36,4 +36,8 @@ under `.pi/agents/` as an agent type, whatever its shape.
 ## Project settings (`settings.project.json`)
 
 Copy to `<project>/.prime/agent/settings.json` (or merge). Prime installs the
-listed packages on startup; versions must equal `pins/pins.json`.
+listed packages on startup; versions must equal `pins/pins.json`. The
+vendored `pi-gpt` is listed by a path relative to that settings file, which
+resolves when this repository is the project; another project installs it
+with `prime-agent package install --local <repo>/pins/packages/pi-gpt-0.4.3`
+after `scripts/bootstrap.sh` has extracted and patched it.

@@ -49,8 +49,10 @@ Credential-free, seconds, run in parallel:
   (`prime-agent --version`, sibling versions). No upstream Pi co-install.
 - **PKG-001** every entry in `packages[]` is an exact npm version or a
   40-character commit, with a `sha512-` integrity, license, review date and
-  exactly one owned concern; no two entries own the same concern. The rules run over
-  fabricated violating records first so they are shown able to fail.
+  exactly one owned concern; no two entries own the same concern. A vendored
+  entry (committed tarball plus patches under `pins/`) is pinned by the
+  tarball's sha512. The rules run over fabricated violating records first
+  so they are shown able to fail.
 - **OWN-001** one owner per concern in the manifest; unassigned concerns
   are named, not implied.
 - **JSON-001** every committed JSON document parses.
@@ -101,16 +103,18 @@ workers on purpose, and every file ends by sweeping its own process tree
   The role files under `harness/agents/` are installed into the fixture
   project's `.pi/agents/` and observed through the delegation package
   itself, which is what reads them.
-- **TRN-000…005** the ChatGPT foreman transport, on the pinned `pi-gpt`
-  package's own modules (tarball integrity checked against the manifest)
-  against a mock backend served by the test: exact-thread binding under the
-  current leaf with the caller's message id, persistently; the correlation
-  rules (echo, stale head, moved branch) decidable from the readback; the
-  package's redaction destroying an all-digit delivery id (why ids carry
-  letters); an ambiguous send producing exactly one request and being
-  resolved by reading (accepted-then-cut lands, rejected does not); thread
-  drift visible in the returned id. Credential-free: the live round trip is
-  evidence in the proof document, not a test.
+- **TRN-000…003** the ChatGPT foreman transport, on the vendored `pi-gpt`
+  tree bootstrap extracted and patched, against a mock backend served by
+  the test. Three things that would break the foreman loop if a re-vendor
+  or re-base changed them: the committed tarball hashes to the pin and the
+  tree carries the patch (000); a send lands in the requested thread under
+  its current leaf with the caller's message id, persistently, and reads
+  back on the active branch (001); an ambiguous send is exactly one request
+  and is classified by reading, never by resending (002); the repository's
+  patch holds on the shipped `gpt_chat` tool, with the passing control
+  (003). Credential-free, no network. The correlation rules themselves are
+  prose in the skill and are not re-encoded as tests: a test of a checker
+  that lives in the test file measures nothing about the product.
 - **GATE-001** Prime's `--autonomous --autonomous-gate "<cmd>"` is a
   host-owned gate: with an identical scripted model, a run does not finish
   while the gate command fails, and finishes once the test (not the model)
@@ -118,14 +122,21 @@ workers on purpose, and every file ends by sweeping its own process tree
 - **CLEAN-001** every file ends with zero processes referencing its
   fixture root.
 
-### Not in the merge gate
+### Opt-in live lane — not in the merge gate
 
-Scenarios that need a real model provider, the user's ChatGPT login, or a
-package that does not yet load on the pinned Prime are recorded in the
-proof document with the exact user steps or upstream change they wait on.
-They are not stubbed into the suite. The merge gate on `main` is the
-`protect-main` ruleset, whose required checks are exactly the two `harness`
-jobs this workflow emits.
+- **LIVE-001…003** (`conformance/runtime/live-chatgpt.test.ts`) runs only
+  with `CG_LIVE=1` and a Codex login: inside a real Prime worker, the
+  pinned `pi-gpt` reads the account, sends into a temporary chat (nothing
+  is kept), and, with `CG_FOREMAN_THREAD` set, reads the exact foreman
+  thread with message ids. It exists because every other test is blind to
+  the provider: TRN measures the package against a mock and cannot fail
+  when chatgpt.com changes its endpoints, build strings or security-control
+  checks. This lane can. Run it before relying on the foreman loop and after
+  any sign of transport drift. It is skipped, with its reason, in CI.
+
+Scenarios that need a real model provider are not stubbed into the suite.
+The merge gate on `main` is the `protect-main` ruleset, whose required
+checks are exactly the two `harness` jobs this workflow emits.
 
 ## Falsifying controls
 

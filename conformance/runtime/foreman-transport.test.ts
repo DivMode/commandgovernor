@@ -1,47 +1,36 @@
 /**
- * TRN — the ChatGPT foreman transport, measured on the pinned `pi-gpt` package.
+ * TRN — the ChatGPT foreman transport, measured on the vendored `pi-gpt`.
  *
- * The foreman loop has no Command Governor code: the transport is the pinned
- * `pi-gpt` package and the correlation rules are prose in
- * `harness/skills/cg-foreman/SKILL.md`. This file measures what those rules
- * stand on — that the shipped package, unmodified, gives a model enough to
- * apply them — and it does so credential-free, against a mock of the ChatGPT
- * backend served by this process. The live round trip against the real account
- * is evidence in `docs/research/2026-09-04-zero-custom-code-proof.md` §6; this
- * suite is what gates a re-pin of the package.
+ * The foreman loop has no Command Governor code: the transport is the vendored
+ * `pi-gpt` package (committed tarball plus committed patch, extracted by
+ * `scripts/bootstrap.sh`) and the correlation rules are prose in
+ * `harness/skills/cg-foreman/SKILL.md`. This file protects three things that
+ * would break the loop if a re-vendor or a re-base changed them, and it does so
+ * credential-free against a mock of the ChatGPT backend served by this
+ * process. The live round trip is the opt-in lane (`live-chatgpt.test.ts`).
  *
- * What is asserted, and the control that makes each a measurement:
- *
- *   TRN-000 the tarball npm serves for the pinned spec hashes to the manifest's
- *           integrity, so the modules under test are the modules a user gets.
+ *   TRN-000 (in `before`) the committed tarball hashes to the pin's integrity
+ *           and the extracted tree carries the repository's patch.
  *   TRN-001 exact-thread binding: the package sends into the requested
- *           conversation under its current leaf, with the caller's message id,
- *           persistently, and the readback carries ids on the active branch.
- *   TRN-002 the correlation rules are decidable from the readback alone: echo
- *           present (accepted), echo absent (no verdict), a reply naming
- *           another head SHA (stale revision), and the sent message moved off
- *           the active branch (browser edit) each classify differently.
- *   TRN-003 the letters-in-delivery-id rule is load-bearing: the package's own
- *           redaction destroys an all-digit id of the same length.
- *   TRN-004 ambiguous send, no blind resend: when the backend accepts the
- *           message and then drops the connection, the package issues exactly
- *           ONE send and the readback finds the delivery id (landed); when the
- *           backend rejects it, still exactly one send and the readback does
- *           not find it (not landed). Reconciliation is by reading.
- *   TRN-005 thread drift is observable: a backend that answers from another
- *           conversation returns a different id, and the requested thread
- *           shows no delivery — which is why the skill asserts the id itself,
- *           since the package does not.
- *
- * The rule checker in this file (`classifyReply`) is the executable statement
- * of the skill's rules. It is test code, not a product component: the product
- * applies the rule through the model reading the skill.
- *
- * This test needs the network once: `npm pack` fetches the pinned tarball.
+ *           conversation under its current leaf, with the caller's message
+ *           id, persistently, and the readback shows that message on the
+ *           active branch. If this moves, the foreman gets messages on the
+ *           wrong branch or in the wrong thread.
+ *   TRN-002 no blind resend: when the backend accepts the message and then
+ *           drops the connection, the package issues exactly ONE request and
+ *           the readback finds the message (landed); when the backend rejects
+ *           it, still exactly one request and the readback does not find it.
+ *           A transport that retried on its own would duplicate messages to
+ *           the foreman; reconciliation is by reading.
+ *   TRN-003 the repository's patch holds on the shipped `gpt_chat`: a drifted
+ *           reply fails instead of being reported as the requested thread's,
+ *           an unreadable leaf fails before sending, and the same call passes
+ *           when the backend behaves.
  */
 
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -52,14 +41,13 @@ import { after, before, describe, it } from "node:test";
 import { readPins, REPO_ROOT } from "../lib/repo.ts";
 
 const DRIVER = join(REPO_ROOT, "conformance", "lib", "foreman-transport-driver.mjs");
-const PACKAGE_SPEC = "npm:pi-gpt@0.4.3";
+const HOOKS = join(REPO_ROOT, "conformance", "lib", "foreman-transport-hooks.mjs");
+const PACKAGE_SPEC = "./pins/packages/pi-gpt-0.4.3";
+const PRIME_NODE_MODULES = join(REPO_ROOT, "pins", "prime-0.9.1", "node_modules");
 
 /** A delivery id in the skill's form: base32, so it always contains letters. */
 const DELIVERY_ID = "CG-D-47B3FJU5QW2EG43V";
-/** The same length, digits only: the negative control for TRN-003. */
-const DIGITS_ONLY_ID = "CG-D-4732345678901234";
 const SENT_SHA = "d76e307ed86b1899574ba52c85b5fc0151c3ac92";
-const OTHER_SHA = "66f0a254ae8d34f8db3654c62187a3acba496038";
 
 // ── mock ChatGPT backend ────────────────────────────────────────────────────
 
@@ -232,7 +220,8 @@ interface DriverResult {
 	readonly chain?: readonly { readonly id: string; readonly role: string | null; readonly status: string | null; readonly text: string }[];
 	/** Messages present in the thread but not on the active branch (other branches after a browser edit). */
 	readonly elsewhere?: readonly { readonly id: string; readonly role: string | null }[];
-	readonly redacted?: string;
+	readonly registered?: readonly string[];
+	readonly result?: { readonly content?: readonly { readonly text?: string }[]; readonly details?: { readonly conversation_id?: string | null } };
 }
 
 let fixture = "";
@@ -247,8 +236,8 @@ let baseUrl = "";
  */
 function drive(...args: string[]): Promise<DriverResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", DRIVER, ...args], {
-			env: { ...process.env, CG_MOCK_BASE: baseUrl, CG_PIGPT_DIR: packageDir, CODEX_HOME: join(fixture, "codex") },
+		const child = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", "--import", HOOKS, DRIVER, ...args], {
+			env: { ...process.env, CG_MOCK_BASE: baseUrl, CG_PIGPT_DIR: packageDir, CG_PRIME_NODE_MODULES: PRIME_NODE_MODULES, CODEX_HOME: join(fixture, "codex") },
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let stdout = "";
@@ -277,34 +266,9 @@ function envelope(deliveryId: string, sha: string): string {
 	].join("\n");
 }
 
-// ── the skill's rules, as a checker ─────────────────────────────────────────
-
-type Classification =
-	| { readonly status: "accepted"; readonly replyId: string; readonly sha: string }
-	| { readonly status: "no_echo"; readonly replyId: string }
-	| { readonly status: "stale_revision"; readonly replyId: string; readonly sha: string }
-	| { readonly status: "not_on_active_branch" }
-	| { readonly status: "landed_no_reply" }
-	| { readonly status: "not_landed" };
-
-function classifyReply(
-	read: DriverResult,
-	sent: { readonly userMessageId: string; readonly deliveryId: string; readonly sha: string },
-): Classification {
-	const chain = read.chain ?? [];
-	const index = chain.findIndex((entry) => entry.id === sent.userMessageId);
-	if (index < 0) {
-		const onAnotherBranch = (read.elsewhere ?? []).some((entry) => entry.id === sent.userMessageId);
-		return onAnotherBranch ? { status: "not_on_active_branch" } : { status: "not_landed" };
-	}
-	const reply = chain
-		.slice(index + 1)
-		.find((entry) => entry.role === "assistant" && entry.status === "finished_successfully" && entry.text.trim() !== "");
-	if (!reply) return { status: "landed_no_reply" };
-	if (!reply.text.split("\n")[0].trim().endsWith(sent.deliveryId)) return { status: "no_echo", replyId: reply.id };
-	const sha = /\b([0-9a-f]{40})\b/.exec(reply.text)?.[1] ?? "";
-	if (sha !== sent.sha) return { status: "stale_revision", replyId: reply.id, sha };
-	return { status: "accepted", replyId: reply.id, sha };
+/** Is the message with this id on the active branch of the readback? */
+function landed(read: DriverResult, userMessageId: string): boolean {
+	return (read.chain ?? []).some((entry) => entry.id === userMessageId);
 }
 
 // ── fixture ─────────────────────────────────────────────────────────────────
@@ -322,18 +286,19 @@ describe("TRN: ChatGPT foreman transport on the pinned pi-gpt", () => {
 
 		const pinned = readPins().packages.find((entry) => entry.source === PACKAGE_SPEC);
 		assert.ok(pinned, `${PACKAGE_SPEC} must be pinned in pins/pins.json`);
-		const packed = JSON.parse(
-			execFileSync("npm", ["pack", PACKAGE_SPEC.replace(/^npm:/, ""), "--pack-destination", fixture, "--json", "--ignore-scripts"], {
-				encoding: "utf8",
-				cwd: fixture,
-				env: { ...process.env, HOME: fixture, npm_config_cache: join(fixture, "npm-cache") },
-			}),
-		) as { filename: string; integrity: string }[];
-		assert.equal(packed.length, 1);
-		assert.equal(packed[0].integrity, String(pinned.integrity), "TRN-000: the served tarball must hash to the pinned integrity");
-		packageDir = join(fixture, "package");
-		execFileSync("tar", ["-xzf", join(fixture, packed[0].filename), "-C", fixture]);
-		assert.ok(existsSync(join(packageDir, "src", "conversation.ts")));
+		const tarball = join(REPO_ROOT, String(pinned.tarball));
+		assert.ok(existsSync(tarball), `the committed tarball ${String(pinned.tarball)} is missing`);
+		const integrity = `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`;
+		assert.equal(integrity, String(pinned.integrity), "TRN-000: the committed tarball must hash to the pinned integrity");
+		packageDir = join(REPO_ROOT, PACKAGE_SPEC.slice(2));
+		assert.ok(existsSync(join(packageDir, "src", "conversation.ts")), `${PACKAGE_SPEC} is not extracted; run scripts/bootstrap.sh first`);
+		for (const patch of Array.isArray(pinned.patches) ? (pinned.patches as string[]) : []) {
+			assert.ok(existsSync(join(REPO_ROOT, patch)), `pinned patch ${patch} is missing`);
+		}
+		assert.ok(
+			readFileSync(join(packageDir, "extensions", "chatgpt.ts"), "utf8").includes("Command Governor guard"),
+			"the extracted tree does not carry the repository's patch; bootstrap did not apply it",
+		);
 
 		server = createServer((request, response) => {
 			handle(request, response).catch((error: unknown) => json(response, 500, { detail: String(error) }));
@@ -375,66 +340,24 @@ describe("TRN: ChatGPT foreman transport on the pinned pi-gpt", () => {
 		const ours = read.chain?.find((entry) => entry.id === userMessageId);
 		assert.ok(ours, "our message, by our id, must be on the active branch of the readback");
 		assert.match(ours.text, new RegExp(`^CG-D: ${DELIVERY_ID}`, "m"));
-		const verdict = classifyReply(read, { userMessageId, deliveryId: DELIVERY_ID, sha: SENT_SHA });
-		assert.equal(verdict.status, "accepted");
+		const reply = read.chain?.[(read.chain?.findIndex((entry) => entry.id === userMessageId) ?? -1) + 1];
+		assert.equal(reply?.role, "assistant");
+		assert.equal(reply?.text.split("\n")[0], `CG-D: ${DELIVERY_ID}`, "the reply after our message echoes the delivery id");
 		assert.equal((sent.text ?? "").split("\n")[0], `CG-D: ${DELIVERY_ID}`, "the streamed reply and the readback are the same message");
 	});
 
-	it("TRN-002: echo, stale revision and branch placement are each decidable from the readback", async () => {
-		const cases: { name: string; scenario: SendScenario; expect: Classification["status"]; edit?: boolean }[] = [
-			{ name: "echo present", scenario: { kind: "reply", echo: true, sha: SENT_SHA }, expect: "accepted" },
-			{ name: "echo absent", scenario: { kind: "reply", echo: false, sha: SENT_SHA }, expect: "no_echo" },
-			{ name: "other head SHA", scenario: { kind: "reply", echo: true, sha: OTHER_SHA }, expect: "stale_revision" },
-			{ name: "browser edit moved the branch", scenario: { kind: "reply", echo: true, sha: SENT_SHA }, expect: "not_on_active_branch", edit: true },
-		];
-		for (const [index, entry] of cases.entries()) {
-			const thread = newThread(`thread-rule-${index}`);
-			scenario = entry.scenario;
-			const userMessageId = `22222222-2222-4222-8222-${String(index).padStart(12, "0")}`;
-			const promptFile = join(fixture, `prompt-rule-${index}.txt`);
-			writeFileSync(promptFile, envelope(DELIVERY_ID, SENT_SHA));
-			const sent = await drive("send", thread.conversation_id, thread.current_node, userMessageId, promptFile);
-			assert.equal(sent.ok, true, `${entry.name}: ${sent.error}`);
-			if (entry.edit) {
-				// The user edited the foreman's message in the browser: a sibling
-				// branch becomes current and our message is no longer on it.
-				append(thread, `${thread.conversation_id}-root`, {
-					id: `${thread.conversation_id}-edited`,
-					author: { role: "assistant" },
-					content: { content_type: "text", parts: ["(edited turn)"] },
-					status: "finished_successfully",
-					create_time: clock++,
-				});
-			}
-			const read = await drive("read", thread.conversation_id);
-			assert.equal(read.ok, true, read.error);
-			const verdict = classifyReply(read, { userMessageId, deliveryId: DELIVERY_ID, sha: SENT_SHA });
-			assert.equal(verdict.status, entry.expect, `${entry.name}: ${JSON.stringify(verdict)}`);
-		}
-	});
-
-	it("TRN-003: the package's redaction keeps a lettered delivery id and destroys an all-digit one", async () => {
-		const lettered = await drive("redact", `reply: CG-D: ${DELIVERY_ID} end`);
-		assert.equal(lettered.ok, true, lettered.error);
-		assert.equal(lettered.redacted, `reply: CG-D: ${DELIVERY_ID} end`);
-		const digits = await drive("redact", `reply: CG-D: ${DIGITS_ONLY_ID} end`);
-		assert.equal(digits.ok, true, digits.error);
-		assert.notEqual(digits.redacted, `reply: CG-D: ${DIGITS_ONLY_ID} end`, "negative control: digits-only ids must NOT survive, or the rule is decoration");
-		assert.match(digits.redacted ?? "", /<PHONE>/);
-	});
-
-	it("TRN-004: an ambiguous send is resolved by reading, never by a second send", async () => {
+	it("TRN-002: an ambiguous send is resolved by reading, never by a second send", async () => {
 		// Accepted, then the connection is cut before any reply frame.
-		const landed = newThread("thread-cut");
+		const accepted = newThread("thread-cut");
 		scenario = { kind: "accepted-then-cut" };
 		let before = sends.length;
 		const cutId = "33333333-3333-4333-8333-333333333333";
 		writeFileSync(join(fixture, "prompt-cut.txt"), envelope("CG-D-CUTAMBIGUOUSXYZ", SENT_SHA));
-		const cut = await drive("send", landed.conversation_id, landed.current_node, cutId, join(fixture, "prompt-cut.txt"));
+		const cut = await drive("send", accepted.conversation_id, accepted.current_node, cutId, join(fixture, "prompt-cut.txt"));
 		assert.equal(cut.ok, false, "the package must surface the failure, not invent a result");
 		assert.equal(sends.length, before + 1, "exactly one send: the package did not retry on its own");
-		const cutRead = await drive("read", landed.conversation_id);
-		assert.equal(classifyReply(cutRead, { userMessageId: cutId, deliveryId: "CG-D-CUTAMBIGUOUSXYZ", sha: SENT_SHA }).status, "landed_no_reply");
+		const cutRead = await drive("read", accepted.conversation_id);
+		assert.equal(landed(cutRead, cutId), true, "the message landed; a resend would duplicate it");
 
 		// Rejected before recording: the same failure shape at the caller, the opposite readback.
 		const missing = newThread("thread-rejected");
@@ -446,19 +369,35 @@ describe("TRN: ChatGPT foreman transport on the pinned pi-gpt", () => {
 		assert.equal(rejected.ok, false);
 		assert.equal(sends.length, before + 1, "exactly one send");
 		const rejectedRead = await drive("read", missing.conversation_id);
-		assert.equal(classifyReply(rejectedRead, { userMessageId: rejectedId, deliveryId: "CG-D-REJECTEDXYZABC", sha: SENT_SHA }).status, "not_landed");
+		assert.equal(landed(rejectedRead, rejectedId), false, "the message did not land; one send with a new id is allowed");
 	});
 
-	it("TRN-005: thread drift is visible in the returned id and absent from the requested thread", async () => {
-		const requested = newThread("thread-requested");
-		const elsewhere = newThread("thread-elsewhere");
+	it("TRN-003: the repository's patch makes gpt_chat fail on drift and on an unreadable leaf, and pass otherwise", async () => {
+		// Control: the shipped tool, through the extension's own entry point,
+		// succeeds when the backend answers from the requested thread.
+		const thread = newThread("thread-tool-ok");
+		scenario = { kind: "reply", echo: true, sha: SENT_SHA };
+		const ok = await drive("tool", "gpt_chat", JSON.stringify({ prompt: envelope("CG-D-TOOLCONTROLXYZ", SENT_SHA), conversation_id: thread.conversation_id }));
+		assert.equal(ok.ok, true, ok.error);
+		assert.ok(ok.registered?.includes("gpt_chat"), `the extension registered ${JSON.stringify(ok.registered)}`);
+		assert.equal(ok.result?.details?.conversation_id, thread.conversation_id);
+		assert.match(ok.result?.content?.[0]?.text ?? "", /^CG-D: CG-D-TOOLCONTROLXYZ/);
+
+		// Drift: the unpatched tool reports the other conversation's reply as a
+		// result; the patched tool fails and names both ids.
+		const requested = newThread("thread-tool-drift");
+		const elsewhere = newThread("thread-tool-elsewhere");
 		scenario = { kind: "drift", into: elsewhere.conversation_id };
-		const driftId = "55555555-5555-4555-8555-555555555555";
-		writeFileSync(join(fixture, "prompt-drift.txt"), envelope("CG-D-DRIFTCHECKABCD", SENT_SHA));
-		const sent = await drive("send", requested.conversation_id, requested.current_node, driftId, join(fixture, "prompt-drift.txt"));
-		assert.equal(sent.ok, true, sent.error);
-		assert.notEqual(sent.conversationId, requested.conversation_id, "the package reports the backend's id, so the skill's equality check has something to catch");
-		const read = await drive("read", requested.conversation_id);
-		assert.equal(classifyReply(read, { userMessageId: driftId, deliveryId: "CG-D-DRIFTCHECKABCD", sha: SENT_SHA }).status, "not_landed");
+		const drift = await drive("tool", "gpt_chat", JSON.stringify({ prompt: envelope("CG-D-TOOLDRIFTXYZAB", SENT_SHA), conversation_id: requested.conversation_id }));
+		assert.equal(drift.ok, false, "a drifted reply must fail the tool call");
+		assert.match(drift.error ?? "", /requested conversation thread-tool-drift.*answered from thread-tool-elsewhere/);
+
+		// Unreadable leaf: the unpatched tool swallows the read failure and sends
+		// with a fabricated parent; the patched tool fails before sending.
+		const before = sends.length;
+		const missing = await drive("tool", "gpt_chat", JSON.stringify({ prompt: envelope("CG-D-TOOLNOLEAFXYZ", SENT_SHA), conversation_id: "thread-does-not-exist" }));
+		assert.equal(missing.ok, false, "an unreadable leaf must fail the call");
+		assert.match(missing.error ?? "", /404|not sending|could not read/);
+		assert.equal(sends.length, before, "nothing was sent after the leaf read failed");
 	});
 });

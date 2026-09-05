@@ -120,11 +120,18 @@ amendment), and a compatibility risk: pinned client build strings and the
 solvers can stop working without notice, and the package has no public
 repository to track. The transport never receives any credential other than
 that token; Command Governor runs no browser and stores no session material.
-The `cg-foreman` skill binds every send to the thread's current leaf and
-resolves an ambiguous send by reading, never by resending, so a transport
-failure cannot duplicate a message to the foreman. The browser-backed
-alternative, `pi-oracle`, waits on its compatibility patch under
-`docs/upstream/`.
+The package is vendored (`pins/packages/`) with a committed patch
+(`pins/patches/`) so that nothing depends on the registry or the author, and
+so that its two shipped defects are closed in this repository: `gpt_chat`
+now fails instead of reporting another conversation's reply as the requested
+thread's, and fails before sending when the thread's leaf cannot be read
+instead of sending under a fabricated parent (TRN-003). The `cg-foreman`
+skill binds every send to the thread's current leaf and resolves an
+ambiguous send by reading, never by resending, so a transport failure cannot
+duplicate a message to the foreman. Provider drift is detected by the opt-in
+live lane (LIVE-001…003), the only test that can fail when chatgpt.com
+changes. The browser-backed alternative, `pi-oracle`, has its compatibility
+patch recorded under `docs/upstream/`.
 
 ## Residual risks, stated
 
@@ -133,5 +140,5 @@ alternative, `pi-oracle`, waits on its compatibility patch under
 | Destructive shell/Python inside the kernel cannot be gated by any extension | open; upstream hook or OS sandbox |
 | Silent extension load failure in headless modes | mitigated by the package-load conformance probe |
 | `ctx.hasUI` true in headless modes misleads approval logic | open upstream; no approval package admitted |
-| Undocumented ChatGPT transport (`pi-gpt`) | accepted by the user; account and compatibility risk recorded; sends bound to the leaf and reconciled by readback (TRN-004) |
+| Undocumented ChatGPT transport (`pi-gpt`) | accepted by the user; vendored and patched in-repo (TRN-003); sends bound to the leaf and reconciled by readback (TRN-002); provider drift caught by the opt-in live lane |
 | Package churn (daily releases, version floors, no Prime compatibility statements) | every re-pin re-runs the load probe and the black-box suite |
