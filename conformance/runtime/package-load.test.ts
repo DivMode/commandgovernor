@@ -82,6 +82,11 @@ const EXPECTED: Record<string, { tools: string[]; commands: string[]; note?: str
 		commands: ["pr-review", "pr-review-publish"],
 		note: "Its review tools are host-gated: registered, but advertised to the model only once a /pr-review invocation binds, so the wire tool list at idle is the wrong channel for it.",
 	},
+	"npm:pi-gpt@0.4.3": {
+		tools: ["gpt_account_status", "gpt_list_models", "gpt_chat", "gpt_list_chats", "gpt_get_conversation", "gpt_get_message"],
+		commands: ["gpt-observer"],
+		note: "The foreman transport. Its ChatGPT client is constructed lazily on first tool use, so registration needs no Codex login; the fixture has none. The observer extension registers only its command and is off by default.",
+	},
 };
 
 /** What the Command Governor package itself must register. It ships no extensions. */

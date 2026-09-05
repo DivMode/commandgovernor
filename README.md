@@ -46,19 +46,20 @@ only.
 | delegated work survives worker, supervisor and client restarts | Prime: per-path session leases, `prime-agent -r <sessionFile>`, supervisor replacement | `conformance/runtime/d1-*` |
 | an ambiguous external effect is never blindly replayed | Prime: worker recovery marker, no stock client re-issues a mutation | `conformance/runtime/d2-*` |
 | every session has an explicit durable transcript | Prime | `conformance/runtime/d8-*` |
-| worker finished ≠ work accepted; stale revisions cannot be accepted | GitHub review/merge by the reviewer of record; `pi-pr-review` reviewed-head binding; Prime `--autonomous-gate` | `pins.json` concerns; package-load and gate tests |
+| worker finished ≠ work accepted; stale revisions cannot be accepted | the foreman's correlated ChatGPT reply (delivery id echoed, head SHA named) is the acceptance record; GitHub merge follows it; Prime `--autonomous-gate` | `conformance/runtime/foreman-transport` (TRN); `pins.json` concerns; gate test |
 | the pin is exactly what the release published | `pins/`, `scripts/bootstrap.sh` | `conformance/tier1/pin.test.ts` |
 | one owner per concern; every package pinned, licensed, and observed to load | `pins/pins.json` | `conformance/tier1`, `conformance/runtime/package-load` |
 
-Two requirements have **no enforcement point on the current substrate** and
-are documented as open rather than claimed:
+One requirement has **no enforcement point on the current substrate** and
+is documented as open rather than claimed: user-owned approval of high-risk
+actions (Prime has no permission system and its Python kernel runs shell
+commands below every extension hook; see
+[`docs/threat-model.md`](docs/threat-model.md)).
 
-- user-owned approval of high-risk actions (Prime has no permission system and
-  its Python kernel runs shell commands below every extension hook; see
-  [`docs/threat-model.md`](docs/threat-model.md));
-- the ChatGPT Web foreman transport (no admissible transport loads on Prime
-  unmodified; the upstream-ready compatibility patch for `pi-oracle` is under
-  [`docs/upstream/`](docs/upstream/)).
+The ChatGPT Web foreman transport is the pinned `pi-gpt` package, driving
+ChatGPT's undocumented backend with the user's Codex login. It was adopted
+on the user's explicit acceptance of the account risk (ADR 0008 §8
+amendment) and measured live on the exact foreman thread.
 
 ## Use it
 

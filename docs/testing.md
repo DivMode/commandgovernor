@@ -101,6 +101,16 @@ workers on purpose, and every file ends by sweeping its own process tree
   The role files under `harness/agents/` are installed into the fixture
   project's `.pi/agents/` and observed through the delegation package
   itself, which is what reads them.
+- **TRN-000…005** the ChatGPT foreman transport, on the pinned `pi-gpt`
+  package's own modules (tarball integrity checked against the manifest)
+  against a mock backend served by the test: exact-thread binding under the
+  current leaf with the caller's message id, persistently; the correlation
+  rules (echo, stale head, moved branch) decidable from the readback; the
+  package's redaction destroying an all-digit delivery id (why ids carry
+  letters); an ambiguous send producing exactly one request and being
+  resolved by reading (accepted-then-cut lands, rejected does not); thread
+  drift visible in the returned id. Credential-free: the live round trip is
+  evidence in the proof document, not a test.
 - **GATE-001** Prime's `--autonomous --autonomous-gate "<cmd>"` is a
   host-owned gate: with an identical scripted model, a run does not finish
   while the gate command fails, and finishes once the test (not the model)
@@ -110,10 +120,12 @@ workers on purpose, and every file ends by sweeping its own process tree
 
 ### Not in the merge gate
 
-Scenarios that need a real model provider, a logged-in ChatGPT browser
-profile, or a package that does not yet load on the pinned Prime are
-recorded as pending in the proof document with the exact user steps or
-upstream change they wait on. They are not stubbed into the suite.
+Scenarios that need a real model provider, the user's ChatGPT login, or a
+package that does not yet load on the pinned Prime are recorded in the
+proof document with the exact user steps or upstream change they wait on.
+They are not stubbed into the suite. The merge gate on `main` is the
+`protect-main` ruleset, whose required checks are exactly the two `harness`
+jobs this workflow emits.
 
 ## Falsifying controls
 

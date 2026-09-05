@@ -9,8 +9,9 @@ locked: [inherit_context]
      Install: copy into the project's .pi/agents/. On Prime Agent a read-only
      reviewer cannot be expressed by tool allowlist (the single built-in tool
      is the kernel), so this role's independence is not a tool restriction:
-     it is the rule that the acceptance record is written on GitHub by the
-     reviewer of record, never by this agent and never by the implementer.
+     it is the rule that the acceptance record is the foreman's correlated
+     reply in its own ChatGPT thread (skills/cg-foreman), never anything this
+     agent or the implementer writes.
      A reviewer that changes the code under review has ended the review. -->
 
 You are the reviewer. Your job is to read what was actually done and say what is

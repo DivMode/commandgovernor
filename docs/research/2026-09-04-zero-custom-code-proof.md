@@ -35,7 +35,7 @@ one disposition:
 | `governor/mutation/{ledger,classify,proof,digest}.ts` (D2 ledger and classifier) | 1,248 | **DELETE** | Prime worker recovery marker (`prime-agent.worker_recovery`, "not replayed"); no stock client re-issues a mutation |
 | `governor/fs/*`, `governor/process/*` (durable FS, process identity) | 668 | **DELETE** | existed only to support the stores above |
 | `governor/prime/*` (protocol slice, daemon client, env allowlist, substrate reader, client identity) | 1,140 | **DELETE** | Prime's own clients; pin facts asserted from the manifest by the conformance suite |
-| `harness/extensions/cg-foreman/transport.ts` (types-only transport stub) | 277 | **DELETE** | correlation rules belong in a skill over an existing transport; none loads on Prime yet |
+| `harness/extensions/cg-foreman/transport.ts` (types-only transport stub) | 277 | **DELETE** | correlation rules are the `cg-foreman` skill over the pinned `pi-gpt` transport (§6) |
 | `harness/authorities.json`, `harness/agents/role.schema.json` | 189 | **DELETE** (merged) | `pins/pins.json` `concerns[]`; roles in `@gotgenes/pi-subagents` agent-file format |
 | `crates/*` (frozen Rust oracle) | 49,142 | **DELETE** | `docs/research/2026-09-01-rust-invariant-catalog.md` and Git history (PR #24) |
 | `harness/agents/*.md`, `prompts/`, `skills/` | 495 (prose) | **USE EXISTING** format | Agent Skills, Prime prompt templates, pi-subagents agent files |
@@ -171,16 +171,25 @@ the agent loop, not a security boundary". It was not built.
 The record an implementer genuinely cannot write is external. Per ADR 0008
 invariant 9 and this machine's orchestration policy, GitHub is the
 engineering source of truth and the ChatGPT foreman is the reviewer of
-record and merge authority. Therefore:
+record and merge authority. An earlier revision of this proof named the
+GitHub pull-request review as that record, on the grounds that GitHub
+refuses an author's self-approval. The foreman measured that claim on
+2026-09-05 and it failed: on this repository the `protect-main` ruleset
+requires zero approving reviews, and the foreman's GitHub connector is the
+same GitHub user as the PR author, so GitHub refused *its* review too. One
+GitHub identity cannot be a boundary against itself. Therefore:
 
-- the **acceptance record** is the GitHub pull-request review or merge by
-  the reviewer of record, bound to the head SHA; GitHub refuses an author's
-  self-approval and merge is the foreman's;
-- **stale acceptance** is refused by `pi-pr-review`'s reviewed-head binding
-  (`allowStaleApprovals` defaults false) and by GitHub's head-SHA semantics;
+- the **acceptance record** is the foreman's correlated reply in its own
+  ChatGPT thread: a message that echoes the delivery id and names the head
+  SHA, written by a model the implementer does not run, in a thread the
+  implementer can append to but not author as the foreman (§6). GitHub merge
+  happens only after that verdict, and is bound to the same head SHA;
+- **stale acceptance** is refused by the correlation rule (a verdict naming
+  another head is recorded as rejected) and by `pi-pr-review`'s reviewed-head
+  binding (`allowStaleApprovals` defaults false) for GitHub-side reviews;
 - **candidate completion stays review-blocked** because the run may be
-  wired with `--autonomous-gate` to a command that checks the GitHub review
-  decision, and the model cannot satisfy that gate by talking;
+  wired with `--autonomous-gate` to a command that checks for the correlated
+  verdict, and the model cannot satisfy that gate by talking;
 - **restart** changes nothing: the gate reads external state;
 - **evidence** is the `pi-tasks` ledger inside the session, advisory by
   design, with its bypass recorded rather than hidden.
@@ -190,28 +199,54 @@ That is `USE EXISTING` plus prompts and configuration. The role files
 `@gotgenes/pi-subagents`' format; the `cg-review` prompt carries the review
 procedure.
 
-## 6. ChatGPT foreman loop — no admissible transport loads on Prime yet
+## 6. ChatGPT foreman loop — `pi-gpt`, measured live on the exact thread
 
 | Candidate | Result on Prime 0.9.1 |
 | --- | --- |
-| `pi-oracle` 0.7.20 (MIT) | **does not load**, silently: imports `CONFIG_DIR_NAME`, `ProjectTrustStore`, `hasTrustRequiringProjectResources` as runtime values Prime does not export; branches on `ctx.mode`, which Prime lacks; touches `ctx.ui.theme` while Prime reports `hasUI === true` headlessly, which throws and kills the daemon worker (a Prime bug). With a 21-line feature-detection patch plus one compatibility module it loads unmodified, registers all five tools, records the exact `chatgpt.com/c/<id>`, and its job record and `lifecycleEvents` survive `SIGKILL` of the detached worker. Patch and issue drafts: `docs/upstream/2026-09-04-pi-oracle-*`. Every read of the thread is also a write (a mandatory archive upload), so ambiguous sends are reconciled by a read-shaped follow-up, not a `readSince`. |
-| `pi-gpt` 0.4.3 | loads unmodified, has message ids and a true history read, but zero durability, a declared repository that is 404, no LICENSE file in the tarball, and it drives undocumented `chatgpt.com/backend-api` endpoints with the user's Codex OAuth token behind emulated security-control headers. **Rejected** (ADR 0008 §8: bypassing provider security controls is not a product requirement). |
-| `@cobuild/review-gpt` 0.5.145 (published 2026-09-04) | implements Gate P4 almost clause by clause (`--chat-url`, never auto-resend, atomic capture sidecar with committed-user-turn identity, refuses ambiguous wakes, `--response-marker` correlation). **`UNLICENSED`**, no LICENSE anywhere; unusable without a grant. |
+| `pi-gpt` 0.4.3 (MIT) | **adopted.** Loads unmodified. Message ids and a true active-branch read. Continues any conversation id with no provenance gate. Drives `chatgpt.com/backend-api` with the user's Codex login token and solves the provider's sentinel/proof-of-work/turnstile checks on the send path. Declared repository returns 404, so the npm tarball (integrity in `pins/pins.json`) is the only source. Zero durability across a send; the delivery id in the body plus readback is the reconciliation. Two shipped defects carried as compatibility risks: no assertion that the returned `conversation_id` equals the requested one; a swallowed `leafMessageId` failure sends with a fabricated parent. |
+| `pi-oracle` 0.7.20 (MIT) | **does not load**, silently: imports `CONFIG_DIR_NAME`, `ProjectTrustStore`, `hasTrustRequiringProjectResources` as runtime values Prime does not export; branches on `ctx.mode`, which Prime lacks; touches `ctx.ui.theme` while Prime reports `hasUI === true` headlessly, which throws and kills the daemon worker (a Prime bug). With a 21-line feature-detection patch plus one compatibility module it loads unmodified, registers all five tools, records the exact `chatgpt.com/c/<id>`, and its job record and `lifecycleEvents` survive `SIGKILL` of the detached worker. Patch and issue drafts: `docs/upstream/2026-09-04-pi-oracle-*`. Remains the browser-backed alternative once upstream lands the patch. |
+| `@cobuild/review-gpt` 0.5.145 | implements the same envelope ideas as a standalone browser CLI (not a Pi extension); `UNLICENSED`. Not adopted. |
 
-The correlation semantics survive as a design, not code: an envelope of
-`CG-D-<id>` / `CG-TASK` / `CG-REV` / `CG-REPLY-CONTRACT` lines, the reply
-must echo the delivery id, a reply naming an older revision is recorded as
-rejected, an ambiguous send is classified from the transport's own durable
-`lifecycleEvents` and never resent. Those rules belong in a skill over the
-transport once one loads. The `<PHONE>` redaction that motivated the
-letters-in-delivery-id rule is `pi-gpt`'s, not `pi-oracle`'s; the rule is
-still right.
+An earlier revision rejected `pi-gpt` under ADR 0008 §8 without running the
+probe the transport review had recommended. The user, as the account owner,
+then explicitly accepted the terms and account-suspension risk and asked for
+the best-working transport; ADR 0008 §8 carries that amendment. Judged on
+capability alone, `pi-gpt` is the only candidate that loads on the pinned
+Prime today, and the only one with message identity.
 
-The authenticated round trip could not run: it needs the compatibility fix
-upstream (or a licence grant for review-gpt), `zstd` and `agent-browser` on
-the machine (Nix-managed), a one-time `/oracle-auth` cookie import in an
-interactive TUI, and an exact conversation URL from the user. Command
-Governor owns zero browser runtime either way.
+The live round trip ran on 2026-09-05 (UTC) against the real account, through
+`pi-gpt` 0.4.3's own modules, unmodified, using the Codex login token, into
+the foreman thread the user created in the browser
+(`https://chatgpt.com/c/6a97b52c-90e0-83ea-9dfd-56fdba1c1855`, ChatGPT project
+"commandgovernor", 1,803 nodes before the send):
+
+| Step | Observed |
+| --- | --- |
+| read the thread | current leaf `1de4fce8…` = the foreman's handoff message; bound to it |
+| durable pre-send record | delivery id `CG-D-47B3FJU5QW2EG43V`, conversation id, parent id, our message id `e46474dc…`, written before the send |
+| send (sentinel + proof-of-work + turnstile inside the package) | 07:52:57Z; the message is in the thread at 07:53:00Z with our id and parent = bound leaf; `complete()` returned the requested conversation id |
+| readback | the foreman ran 40 tool calls against GitHub, then answered at 07:56:54Z (message `6f1e1dec…`); first line `CG-D: CG-D-47B3FJU5QW2EG43V`, `VERDICT: REQUEST_CHANGES`, three numbered items, bound to head `d76e307…` |
+| effect | exactly one: the three items became this revision of PR #24 |
+
+Python `urllib` with the same token got a Cloudflare challenge page; Node's
+`fetch` with the package's header set did not. The read leg needs no
+security-control tokens; the send leg does, and the package solved them.
+The foreman's own reply was the first measurement of item 1 below: it tried
+to submit a review on GitHub and was refused because it is the same GitHub
+user as the author, which is why the thread verdict, not the GitHub review,
+is the acceptance record (§5).
+
+The correlation rules are the `cg-foreman` skill (`harness/skills/cg-foreman`),
+not code: the `CG-D` / `CG-TASK` / `CG-REV` / `CG-REPLY-CONTRACT` envelope,
+the reply must echo the delivery id, a reply naming another head is recorded
+as rejected, a send is bound to the thread's current leaf, and an ambiguous
+send is classified by reading the thread and never resent. The delivery id
+must contain letters because `pi-gpt`'s readback redaction replaces any run
+of ten or more digits with `<PHONE>`. The credential-free conformance file
+`conformance/runtime/foreman-transport.test.ts` (TRN-000…005) measures, on
+the pinned package's own modules against a mock backend, that those rules
+are decidable from what the package sends and reads back, with negative
+controls for each; §12.
 
 ## 7. Tool gating and user-owned decisions — an upstream gap no plugin can close
 
@@ -320,7 +355,7 @@ The PR was retargeted onto `main` and finished on its branch.
 | Rust source + tests (`crates/`) | 49,142 (110 files) | 0 |
 | shell (`scripts/bootstrap.sh`, `scripts/conformance.sh`) | 251 | 276 |
 | harness configuration and prose (roles, skill, prompt, manifest, settings) | 495 | 398 |
-| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 3,721 in 8 test files (+8 lib); 82 tests, 13 suites, ~3 min |
+| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,126 in 9 test files (+9 lib); 88 tests, 14 suites, ~3 min |
 | tracked files | 238 | 91 |
 | Prime pin | 0.8.1 | 0.9.1 |
 | pinned packages | 0 | 3 |
@@ -335,17 +370,17 @@ Which external capability replaced each deleted subsystem:
 | durable filesystem helpers, process-identity probe | nothing needed; they served the two stores above |
 | daemon client, protocol slice, version gate | Prime's own clients; `daemon_hello` compared with the manifest by the conformance suite |
 | environment allowlist | not needed; Command Governor runs no process of its own |
-| foreman transport stub | correlation rules as a future skill over `pi-oracle` once upstream accepts the compatibility patch |
+| foreman transport stub | the `cg-foreman` skill over the pinned `pi-gpt`; TRN-000…005 in the suite |
 | role schema and its validator | `@gotgenes/pi-subagents` agent-file format, observed through the package by LOAD-001 |
 | authorities inventory | `pins/pins.json` `concerns[]`, checked by OWN-001 |
 | Rust oracle | `docs/research/2026-09-01-rust-invariant-catalog.md`, Git history, and the black-box suite for the semantics that survived |
 
 ## 13. Open items that only the user or upstream can close
 
-1. **ChatGPT foreman authenticated proof:** an exact `https://chatgpt.com/c/<id>`;
-   `zstd` and `agent-browser` in the Nix configuration; one `/oracle-auth`
-   in an interactive TUI; and either the pi-oracle compatibility patch
-   landing upstream or a decision to run the proof on upstream Pi.
+1. **Browser-backed transport alternative:** `pi-oracle` waits on its
+   compatibility patch upstream, plus `zstd` and `agent-browser` in the Nix
+   configuration and one `/oracle-auth`. Not needed for the product: the
+   authenticated round trip ran on `pi-gpt` (§6).
 2. **Filing upstream:** the Prime gaps in
    `docs/upstream/2026-09-04-prime-extension-and-daemon-gaps.md` and the
    pi-oracle issue/patch, through Prime's Discussions gate and pi-oracle's

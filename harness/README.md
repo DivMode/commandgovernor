@@ -23,8 +23,9 @@ Then delegate with the `subagent` tool, e.g.
 
 The bodies encode the independence rule (ADR 0008 invariant 8): the
 implementer never approves its own work, the reviewer never reviews work it
-implemented and never approves, and the acceptance record is written on
-GitHub by the reviewer of record. On Prime Agent the only built-in tool is
+implemented and never approves, and the acceptance record is the foreman's
+correlated reply in its ChatGPT thread (`skills/cg-foreman`), with GitHub
+merge after it. On Prime Agent the only built-in tool is
 the Python kernel, so a role cannot be made read-only by tool allowlist; the
 frontmatter comments say so rather than implying a restriction that does not
 exist.

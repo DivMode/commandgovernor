@@ -383,8 +383,10 @@ donor idea above, with the actual product path exercised through stock
 Prime clients ([`../research/2026-09-04-zero-custom-code-proof.md`](../research/2026-09-04-zero-custom-code-proof.md)).
 Result: no `PLUGIN` and no `TEMP WORKAROUND` survived; every merged custom
 subsystem was `DELETE`; the package selection is `USE EXISTING` for task
-evidence, delegation and GitHub review; independent acceptance is GitHub
-review by the reviewer of record; and the two concerns with no owner (tool
-gating, ChatGPT transport) are upstream gaps that no Command Governor
-extension could close. Command Governor ships zero custom production code.
+evidence, delegation, GitHub review and the ChatGPT foreman transport
+(`pi-gpt`, adopted on the user's explicit risk decision, ADR 0008 §8
+amendment); independent acceptance is the foreman's correlated reply in its
+ChatGPT thread, with GitHub merge after it; and the one concern with no
+owner (tool gating) is an upstream gap that no Command Governor extension
+could close. Command Governor ships zero custom production code.
 This ADR remains the controlling rule for any future proposal to add some.

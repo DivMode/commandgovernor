@@ -15,12 +15,16 @@ has to own, not by how much it builds.
   documents moved to `docs/history/`.
 - Substrate re-pinned to Prime `v0.9.1` with verified assets.
 - Packages selected and pinned by observed load on Prime: `pi-tasks`,
-  `@gotgenes/pi-subagents`, `pi-pr-review`. Rejected with measured reasons:
-  `pi-squad`, `pi-subagents`, `pi-governance-pipeline`, `pi-oracle` (until
-  patched upstream), `pi-gpt`, `@gotgenes/pi-permission-system`.
-- Independent acceptance defined as the GitHub review/merge by the reviewer
-  of record, bound to the head SHA (`pi-pr-review`), gated locally by
-  Prime's `--autonomous-gate`.
+  `@gotgenes/pi-subagents`, `pi-pr-review`, `pi-gpt` (the foreman transport,
+  adopted on the user's explicit risk decision). Rejected with measured
+  reasons: `pi-squad`, `pi-subagents`, `pi-governance-pipeline`, `pi-oracle`
+  (until patched upstream), `@gotgenes/pi-permission-system`.
+- ChatGPT foreman loop proven live on the exact user-created thread:
+  send, correlated readback, verdict acted on once (proof §6; TRN suite).
+- Independent acceptance defined as the foreman's correlated ChatGPT reply
+  bound to the head SHA, with GitHub merge after it and Prime's
+  `--autonomous-gate` locally; GitHub review is not the record on this
+  single-identity repository.
 - Conformance rewritten as a black-box suite through stock clients.
 - Upstream records drafted: Prime extension-surface and daemon gaps, the
   pi-oracle compatibility patch, the `hasUI`/theme worker crash.
@@ -30,12 +34,11 @@ has to own, not by how much it builds.
 1. **File upstream** (outward-facing, user-approved): the Prime gaps in
    `upstream/2026-09-04-prime-extension-and-daemon-gaps.md` through Prime's
    Discussions gate; the pi-oracle issue with the attached patch.
-2. **ChatGPT foreman authenticated proof**, once a transport loads on Prime:
-   provide an exact `https://chatgpt.com/c/<id>`; add `zstd` and
-   `agent-browser` to the Nix configuration; run `/oracle-auth` once in an
-   interactive TUI. The correlation rules (envelope, reply echo,
-   stale-revision rejection, never resend on ambiguity) become a skill in
-   `harness/skills/`, not code.
+2. **Browser-backed transport alternative** (`pi-oracle`), only if wanted:
+   the compatibility patch upstream, `zstd` and `agent-browser` in the Nix
+   configuration, one `/oracle-auth`. The `pi-gpt` defects (returned
+   conversation id unasserted; swallowed leaf read) are upstream reports the
+   user files; the `cg-foreman` skill guards both meanwhile.
 3. **Tool gating**: no control exists on the substrate. Decide whether to
    run the trusted-local product without it (documented in the threat
    model) or to apply OS containment to the kernel process; ask Prime for a

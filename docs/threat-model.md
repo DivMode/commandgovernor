@@ -111,12 +111,19 @@ its own; the user's shell environment is Prime's environment.
 
 ### ChatGPT foreman transport
 
-Any ChatGPT Web integration is unofficial. Command Governor adopts only a
-transport whose source, license and durability were reviewed and that loads
-on the pinned Prime; it never drives undocumented backend endpoints with a
-borrowed OAuth token or emulates provider security-control headers. At the
-proof date no admissible transport loads on Prime unmodified; the
-upstream-ready compatibility patch for `pi-oracle` is recorded under
+Any ChatGPT Web integration is unofficial. The pinned transport, `pi-gpt`,
+drives ChatGPT's undocumented backend with the user's Codex login token from
+`~/.codex/auth.json` and solves the provider's security-control checks on
+its send path. That is a terms and account-suspension risk on the user's
+own ChatGPT account, accepted explicitly by the user (ADR 0008 §8
+amendment), and a compatibility risk: pinned client build strings and the
+solvers can stop working without notice, and the package has no public
+repository to track. The transport never receives any credential other than
+that token; Command Governor runs no browser and stores no session material.
+The `cg-foreman` skill binds every send to the thread's current leaf and
+resolves an ambiguous send by reading, never by resending, so a transport
+failure cannot duplicate a message to the foreman. The browser-backed
+alternative, `pi-oracle`, waits on its compatibility patch under
 `docs/upstream/`.
 
 ## Residual risks, stated
@@ -126,5 +133,5 @@ upstream-ready compatibility patch for `pi-oracle` is recorded under
 | Destructive shell/Python inside the kernel cannot be gated by any extension | open; upstream hook or OS sandbox |
 | Silent extension load failure in headless modes | mitigated by the package-load conformance probe |
 | `ctx.hasUI` true in headless modes misleads approval logic | open upstream; no approval package admitted |
-| Undocumented ChatGPT transports | rejected; browser-backed transport pending upstream fix and user login |
+| Undocumented ChatGPT transport (`pi-gpt`) | accepted by the user; account and compatibility risk recorded; sends bound to the leaf and reconciled by readback (TRN-004) |
 | Package churn (daily releases, version floors, no Prime compatibility statements) | every re-pin re-runs the load probe and the black-box suite |

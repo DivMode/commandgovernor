@@ -152,6 +152,8 @@ The architecture does not permanently bless either adapter. The preferred transp
 
 A direct/private interface must be treated as undocumented, capability-gated, replaceable, and subject to compatibility/terms risk. Command Governor does not define bypassing provider security controls as a product requirement.
 
+**Amendment 2026-09-04.** The user, as the account owner, explicitly accepted the terms and account-suspension risk of the direct transport and asked for the best-working solution regardless of it. Under that decision the sentence above no longer excludes `pi-gpt`; transports are judged on capability alone (exact pre-existing thread, message identity, readback, durability, loads on the pinned Prime). `pi-gpt` was measured on the real account the same day: the Codex login token reads browser-created threads and project conversation lists, and a send into the exact foreman thread with a correlated readback succeeded (`docs/research/2026-09-04-zero-custom-code-proof.md` §6). It is pinned as the `foreman-transport` owner in `pins/pins.json`. The risk is recorded, not removed: it is the user's own ChatGPT account, the transport drives undocumented endpoints that can change without notice, and `pi-oracle` remains the browser-backed alternative once its Prime compatibility patch lands upstream.
+
 ### 9. Existing Pi memory and continual-harness work is the default starting point
 
 ADR 0007's memory and compaction principles are retained, but its “independently implement the mechanisms in Rust” strategy is superseded.

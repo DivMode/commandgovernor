@@ -121,6 +121,7 @@ export interface PinnedPackage {
 	readonly source?: unknown;
 	readonly exactVersion?: unknown;
 	readonly resolvedSha?: unknown;
+	readonly integrity?: unknown;
 	readonly license?: unknown;
 	readonly reviewedAt?: unknown;
 	readonly authority?: unknown;

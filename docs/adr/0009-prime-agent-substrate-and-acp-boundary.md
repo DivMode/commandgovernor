@@ -396,7 +396,12 @@ Refinements recorded at acceptance:
   sharpening from the proof: Prime has no permission system and its kernel
   executes shell commands below every extension hook, so OS containment of
   the kernel process is the only available control for destructive work.
-- Gates S2–S6 are not prerequisites for the trusted-local product; S5
-  (independent review) is satisfied by GitHub review as the acceptance
-  record plus `pi-pr-review` and `--autonomous-gate`; S6 (ChatGPT foreman)
-  waits on an upstream compatibility fix and user-side steps.
+- Gates S2–S4 are not prerequisites for the trusted-local product. S5
+  (independent review) is satisfied by the foreman's correlated ChatGPT
+  reply as the acceptance record, with GitHub merge after it bound to the
+  same head, plus `pi-pr-review` for GitHub-side reviews and
+  `--autonomous-gate`; GitHub review alone is not the record, because this
+  repository's ruleset requires no approvals and the foreman shares the
+  author's GitHub identity (measured 2026-09-05). S6 (ChatGPT foreman) is
+  met on the pinned `pi-gpt`: an exact user-created thread, a correlated
+  round trip, and ambiguity resolved by readback (proof §6; TRN-000…005).

@@ -141,6 +141,18 @@
       "authority": "github-pr-review",
       "registers": "/pr-review command and review tools; host-owned structured findings",
       "note": "Reviewed-head binding (40/64-hex SHA, frozen), staleness re-check at publish, stale APPROVE refused by default, publicationAttemptId for idempotent retries. Loads on the pinned Prime (measured 2026-09-04). Live GitHub publishing is exercised only with real credentials."
+    },
+    {
+      "source": "npm:pi-gpt@0.4.3",
+      "exactVersion": "0.4.3",
+      "integrity": "sha512-tYeYG9kZMIzRouw+YxNphvtdOE0qw5CbtXiPTRltSevCW0hgVQbTJps3AU1G4J7KYR0P9RUEJyKmoLbJBBPtPw==",
+      "repository": "https://github.com/davidroman0O/pi-gpt (declared; returns 404 — the npm tarball is the only obtainable source)",
+      "gitHead": "d0be5dc743d1edf223f5ebb63f85a4744e76e92f",
+      "license": "MIT",
+      "reviewedAt": "2026-09-04",
+      "authority": "foreman-transport",
+      "registers": "gpt_account_status, gpt_list_models, gpt_chat, gpt_list_chats, gpt_get_conversation, gpt_get_message tools; /gpt-observer command (observer extension, off by default); chatgpt skill",
+      "note": "Direct ChatGPT Web transport over chatgpt.com/backend-api with the user's Codex login token (~/.codex/auth.json); its send path solves the provider's sentinel/proof-of-work/turnstile checks. Adopted 2026-09-04 on the user's explicit decision to accept that account risk (ADR 0008 §8, amended). Measured on Prime 0.9.1: loads unmodified; the token reads browser-created threads and the project conversation list; a send into an exact pre-existing browser thread and a correlated readback both succeeded (docs/research/2026-09-04-zero-custom-code-proof.md §6). Not durable across a send: the delivery id goes in the message body and an ambiguous send is resolved by readback, never by resend (harness/skills/cg-foreman). Known defects carried as upstream reports: no assertion that the returned conversation_id equals the requested one; a swallowed leafMessageId failure sends with a fabricated parent."
     }
   ],
   "concerns": [
@@ -205,14 +217,14 @@
       "status": "assigned",
       "disposition": "USE EXISTING",
       "owner": "npm:pi-pr-review@1.17.10",
-      "note": "Reviewer lane for GitHub-backed work; reviewed-head binding and stale-approval refusal."
+      "note": "Reviewer lane for GitHub-backed work; reviewed-head binding and stale-approval refusal for reviews written on GitHub. Not the acceptance authority (see independent-acceptance)."
     },
     {
       "concern": "independent-acceptance",
       "status": "assigned",
       "disposition": "USE EXISTING",
-      "owner": "npm:pi-pr-review@1.17.10",
-      "note": "worker finished != work accepted. The acceptance record is the GitHub pull-request review/merge by the reviewer of record (the foreman), bound to the head SHA; pi-pr-review refuses stale approvals; Prime's --autonomous-gate is a host-owned gate the model cannot pass by claiming success and can require that record before a run may finish. An implementer cannot write that record because GitHub refuses self-approval and merge is the foreman's. On a single-user machine no local file, env var or extension tool is an identity boundary (measured: Prime workers inherit the supervisor's environment), so no local plugin can provide this property; the proposed cg_accept plugin was not built for that reason."
+      "owner": "npm:pi-gpt@0.4.3",
+      "note": "worker finished != work accepted. The acceptance record is the foreman's correlated reply in its ChatGPT thread (cg-foreman skill: echoes the delivery id, names the head SHA), written by a model the implementer does not run; GitHub merge follows that verdict and is bound to the same head. GitHub review is NOT the boundary on this repository: protect-main requires zero approving reviews and the foreman's GitHub connector is the same user as the PR author (measured by the foreman 2026-09-05), so pi-pr-review's reviewed-head binding guards GitHub-side reviews but does not constitute acceptance. Prime's --autonomous-gate can require the verdict before a run may finish. On a single-user machine no local file, env var or extension tool is an identity boundary, so no local plugin can provide this property; the proposed cg_accept plugin was not built."
     },
     {
       "concern": "conformance-suite",
@@ -230,10 +242,10 @@
     },
     {
       "concern": "foreman-transport",
-      "status": "unassigned",
-      "phase": "upstream",
-      "plannedOwner": "npm:pi-oracle@0.7.20 once its Prime compatibility patch lands upstream (docs/upstream/2026-09-04-pi-oracle-prime-compat.patch); correlation rules as a skill",
-      "note": "No admissible transport loads on the pinned Prime unmodified: pi-oracle needs the patch; pi-gpt is rejected (no repository, drives undocumented backend endpoints with a borrowed OAuth token behind security-control emulation); @cobuild/review-gpt is UNLICENSED. Command Governor owns no browser runtime."
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "npm:pi-gpt@0.4.3",
+      "note": "Exact pre-existing ChatGPT thread, message ids, active-branch readback; send and correlated readback measured live 2026-09-05 (UTC) on the user's real foreman thread. The correlation rules (CG-D envelope, reply echo, stale-revision rejection, never resend on ambiguity) are the cg-foreman skill, not code. pi-oracle stays the browser-backed alternative once its Prime patch lands upstream (docs/upstream/); @cobuild/review-gpt is UNLICENSED and a standalone CLI. Command Governor owns no browser runtime."
     },
     {
       "concern": "tool-gating-and-veto",
