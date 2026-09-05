@@ -82,10 +82,10 @@ const EXPECTED: Record<string, { tools: string[]; commands: string[]; note?: str
 		commands: ["pr-review", "pr-review-publish"],
 		note: "Its review tools are host-gated: registered, but advertised to the model only once a /pr-review invocation binds, so the wire tool list at idle is the wrong channel for it.",
 	},
-	"npm:pi-gpt@0.4.3": {
+	"./pins/packages/pi-gpt-0.4.3": {
 		tools: ["gpt_account_status", "gpt_list_models", "gpt_chat", "gpt_list_chats", "gpt_get_conversation", "gpt_get_message"],
 		commands: ["gpt-observer"],
-		note: "The foreman transport. Its ChatGPT client is constructed lazily on first tool use, so registration needs no Codex login; the fixture has none. The observer extension registers only its command and is off by default.",
+		note: "The foreman transport, vendored and patched by scripts/bootstrap.sh and installed by path. Its ChatGPT client is constructed lazily on first tool use, so registration needs no Codex login; the fixture has none. The observer extension registers only its command and is off by default.",
 	},
 };
 
@@ -142,6 +142,23 @@ const roleDescriptions = new Map<string, string>();
 
 const pins = readPins();
 const specs = pins.packages.map((entry) => String(entry.source));
+/**
+ * A vendored package (`./pins/packages/<name>`) is installed from a COPY under
+ * the fixture, like the Command Governor package itself: `package install`
+ * runs npm, and npm must not write into the checkout. The copy is what
+ * `scripts/bootstrap.sh` extracted and patched, so a missing directory means
+ * bootstrap did not run, not that the package is absent.
+ */
+const vendoredDirs = new Map<string, string>();
+function installSpecFor(spec: string): string {
+	if (!spec.startsWith("./")) return spec;
+	const source = join(REPO_ROOT, spec.slice(2));
+	assert.ok(existsSync(join(source, "package.json")), `${spec} is not extracted; run scripts/bootstrap.sh first`);
+	const target = join(fixture.root, `cg-vendor-${spec.split("/").pop()}`);
+	cpSync(source, target, { recursive: true });
+	vendoredDirs.set(spec, target);
+	return target;
+}
 
 /**
  * The `description:` line from a role file's YAML frontmatter.
@@ -212,7 +229,7 @@ describe("LOAD: every pinned package registers on the pinned Prime", () => {
 		}
 		fixture.note("installed role files:", JSON.stringify(installedRoleFiles));
 
-		for (const spec of [...specs, localPackageDir]) {
+		for (const spec of [...specs.map(installSpecFor), localPackageDir]) {
 			const args = ["package", "install", "--local", spec];
 			const result = fixture.cli(args, { timeout: 900_000, cwd: project, withoutSocket: true });
 			installs.push({
@@ -317,7 +334,10 @@ describe("LOAD: every pinned package registers on the pinned Prime", () => {
 			assert.match(entry.command, /package install --local /, "installs must be project-scoped");
 		}
 		assert.match(packageList, /Project packages:/, packageList.slice(0, 400));
-		for (const spec of specs) assert.ok(packageList.includes(spec), `${spec} is not in \`prime-agent package list\`: ${packageList.slice(0, 600)}`);
+		for (const spec of specs) {
+			const listed = vendoredDirs.get(spec) ?? spec;
+			assert.ok(packageList.includes(listed), `${spec} is not in \`prime-agent package list\`: ${packageList.slice(0, 600)}`);
+		}
 		assert.ok(
 			existsSync(join(project, ".prime", "agent", "settings.json")),
 			"a project-scoped install must write the project's own settings.json",
@@ -336,7 +356,8 @@ describe("LOAD: every pinned package registers on the pinned Prime", () => {
 			for (const tool of expected.tools) {
 				assert.ok(wireTools.includes(tool), `${spec}: tool ${tool} is not on the wire: ${JSON.stringify(wireTools)}`);
 			}
-			const mine = commandsFrom(spec);
+			const vendored = vendoredDirs.get(spec);
+			const mine = vendored ? commandsUnder(vendored) : commandsFrom(spec);
 			assert.ok(mine.length > 0, `${spec}: nothing in \`get_commands\` is attributed to it`);
 			const names = mine.map((entry) => entry.name);
 			for (const command of expected.commands) {

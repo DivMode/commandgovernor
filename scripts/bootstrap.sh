@@ -149,6 +149,40 @@ done || exit 1
 printf 'bootstrap: npm ci --ignore-scripts in %s\n' "$install_root_rel"
 ( cd "$install_root" && npm ci --ignore-scripts ) || fail 'npm ci failed'
 
+# --- step 3a: vendored third-party packages --------------------------------
+# A package whose only source is an npm tarball from an author with no public
+# repository is vendored: the tarball is committed under pins/packages/, its
+# sha512 must equal the manifest's integrity, and the committed patch under
+# pins/patches/ is applied on top. Prime installs the result by path. Nothing
+# here waits on a registry or an upstream.
+
+vendored_count=$(node -p 'JSON.stringify((require(process.argv[1]).packages||[]).filter(p=>p.tarball))' "$pins_json" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).length') ||
+	fail 'cannot read vendored packages from pins.json'
+i=0
+while [ "$i" -lt "$vendored_count" ]; do
+	entry=$(node -p 'JSON.stringify((require(process.argv[1]).packages||[]).filter(p=>p.tarball)[+process.argv[2]])' "$pins_json" "$i") || fail 'cannot read vendored entry'
+	tarball_rel=$(printf '%s' "$entry" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).tarball')
+	dir_rel=$(printf '%s' "$entry" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).source.replace(/^\.\//,"")')
+	expected_integrity=$(printf '%s' "$entry" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).integrity')
+	patches=$(printf '%s' "$entry" | node -p '(JSON.parse(require("fs").readFileSync(0,"utf8")).patches||[]).join(" ")')
+	tarball="$repo_root/$tarball_rel"
+	[ -f "$tarball" ] || fail "vendored tarball $tarball_rel is missing"
+	actual_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 | tr -d '\n')"
+	[ "$actual_integrity" = "$expected_integrity" ] ||
+		fail "vendored tarball $tarball_rel does not hash to pins.json integrity
+  expected $expected_integrity
+  actual   $actual_integrity"
+	dir="$repo_root/$dir_rel"
+	rm -rf "$dir"
+	mkdir -p "$dir"
+	tar -xzf "$tarball" -C "$dir" --strip-components=1 || fail "cannot extract $tarball_rel"
+	for patch_rel in $patches; do
+		( cd "$dir" && patch -p1 --silent < "$repo_root/$patch_rel" ) || fail "patch $patch_rel does not apply to $tarball_rel"
+	done
+	printf 'bootstrap: vendored %s -> %s (%s patch(es))\n' "$tarball_rel" "$dir_rel" "$(printf '%s' "$patches" | wc -w | tr -d ' ')"
+	i=$((i + 1))
+done
+
 # --- step 3b: the repository's own tooling ---------------------------------
 
 printf 'bootstrap: npm ci --ignore-scripts at the repository root\n'

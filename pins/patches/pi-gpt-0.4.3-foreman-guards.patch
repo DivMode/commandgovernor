@@ -1,0 +1,33 @@
+diff -ru package/extensions/chatgpt.ts patched/extensions/chatgpt.ts
+--- a/extensions/chatgpt.ts	1985-10-25 22:15:00
++++ b/extensions/chatgpt.ts	2026-09-04 22:31:35
+@@ -496,11 +496,11 @@
+       // continuation: find leaf message id of the existing conversation
+       let parentId: string | undefined;
+       if (p.conversation_id) {
+-        try {
+-          parentId = (await conv.leafMessageId(p.conversation_id)) || undefined;
+-        } catch {
+-          /* fall through with a fresh parent */
+-        }
++        // Command Governor guard: a failed leaf read must not fall through to a
++        // fabricated parent_message_id, which would send into the thread on a
++        // branch nobody bound to. Fail the call; the caller re-reads and retries.
++        parentId = (await conv.leafMessageId(p.conversation_id)) || undefined;
++        if (!parentId) throw new Error(`gpt_chat: could not read the current leaf of conversation ${p.conversation_id}; not sending`);
+       }
+ 
+       const result = await conv.complete(model, messages, {
+@@ -513,6 +513,12 @@
+         signal,
+       });
+ 
++      // Command Governor guard: the reply must come from the conversation that
++      // was asked for. A different id means the message landed elsewhere; report
++      // it as a failure rather than as a result of the requested thread.
++      if (p.conversation_id && result.conversationId && result.conversationId !== p.conversation_id) {
++        throw new Error(`gpt_chat: requested conversation ${p.conversation_id} but the backend answered from ${result.conversationId}; treat the send as not delivered to the requested thread`);
++      }
+       return done(result.text, result.conversationId || p.conversation_id || null, {
+         model,
+         intelligence: isAgent || p.model ? null : intelligence,

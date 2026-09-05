@@ -49,8 +49,10 @@ Credential-free, seconds, run in parallel:
   (`prime-agent --version`, sibling versions). No upstream Pi co-install.
 - **PKG-001** every entry in `packages[]` is an exact npm version or a
   40-character commit, with a `sha512-` integrity, license, review date and
-  exactly one owned concern; no two entries own the same concern. The rules run over
-  fabricated violating records first so they are shown able to fail.
+  exactly one owned concern; no two entries own the same concern. A vendored
+  entry (committed tarball plus patches under `pins/`) is pinned by the
+  tarball's sha512. The rules run over fabricated violating records first
+  so they are shown able to fail.
 - **OWN-001** one owner per concern in the manifest; unassigned concerns
   are named, not implied.
 - **JSON-001** every committed JSON document parses.
@@ -109,8 +111,11 @@ workers on purpose, and every file ends by sweeping its own process tree
   package's redaction destroying an all-digit delivery id (why ids carry
   letters); an ambiguous send producing exactly one request and being
   resolved by reading (accepted-then-cut lands, rejected does not); thread
-  drift visible in the returned id. Credential-free: the live round trip is
-  evidence in the proof document, not a test.
+  drift visible in the returned id; and TRN-006, the repository's own
+  patch on the vendored package holding on the shipped `gpt_chat` tool (a
+  drifted reply fails; an unreadable leaf fails before sending; the same
+  call passes when the backend behaves). Credential-free; the package under
+  test is the vendored tree bootstrap extracted and patched.
 - **GATE-001** Prime's `--autonomous --autonomous-gate "<cmd>"` is a
   host-owned gate: with an identical scripted model, a run does not finish
   while the gate command fails, and finishes once the test (not the model)
@@ -118,14 +123,21 @@ workers on purpose, and every file ends by sweeping its own process tree
 - **CLEAN-001** every file ends with zero processes referencing its
   fixture root.
 
-### Not in the merge gate
+### Opt-in live lane — not in the merge gate
 
-Scenarios that need a real model provider, the user's ChatGPT login, or a
-package that does not yet load on the pinned Prime are recorded in the
-proof document with the exact user steps or upstream change they wait on.
-They are not stubbed into the suite. The merge gate on `main` is the
-`protect-main` ruleset, whose required checks are exactly the two `harness`
-jobs this workflow emits.
+- **LIVE-001…003** (`conformance/runtime/live-chatgpt.test.ts`) runs only
+  with `CG_LIVE=1` and a Codex login: inside a real Prime worker, the
+  pinned `pi-gpt` reads the account, sends into a temporary chat (nothing
+  is kept), and, with `CG_FOREMAN_THREAD` set, reads the exact foreman
+  thread with message ids. It exists because every other test is blind to
+  the provider: TRN measures the package against a mock and cannot fail
+  when chatgpt.com changes its endpoints, build strings or security-control
+  checks. This lane can. Run it before relying on the foreman loop and after
+  any sign of transport drift. It is skipped, with its reason, in CI.
+
+Scenarios that need a real model provider are not stubbed into the suite.
+The merge gate on `main` is the `protect-main` ruleset, whose required
+checks are exactly the two `harness` jobs this workflow emits.
 
 ## Falsifying controls
 

@@ -88,6 +88,24 @@ try {
 			emit({ ok: true, redacted: redact(args[0]) });
 			break;
 		}
+		case "tool": {
+			// Run one of the extension's registered tools exactly as Prime would
+			// call it, through the extension's own entry point. `pi` is a stand-in
+			// that records registrations and ignores everything else.
+			const [toolName, argsJson] = args;
+			const registered = new Map();
+			const pi = new Proxy(
+				{ registerTool: (tool) => registered.set(tool.name, tool) },
+				{ get: (target, key) => (key in target ? target[key] : () => undefined) },
+			);
+			const extension = await import(`${packageDir}/extensions/chatgpt.ts`);
+			extension.default(pi);
+			const tool = registered.get(toolName);
+			if (!tool) throw new Error(`extension did not register ${toolName}; it registered ${[...registered.keys()].join(",")}`);
+			const result = await tool.execute("call-1", JSON.parse(argsJson), undefined, undefined, { cwd: process.cwd() });
+			emit({ ok: true, registered: [...registered.keys()], result });
+			break;
+		}
 		default:
 			emit({ ok: false, error: `unknown command ${command}` });
 			process.exitCode = 2;

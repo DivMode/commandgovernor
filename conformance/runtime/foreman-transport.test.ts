@@ -30,18 +30,25 @@
  *           not find it (not landed). Reconciliation is by reading.
  *   TRN-005 thread drift is observable: a backend that answers from another
  *           conversation returns a different id, and the requested thread
- *           shows no delivery — which is why the skill asserts the id itself,
- *           since the package does not.
+ *           shows no delivery.
+ *   TRN-006 the repository's own patch holds on the shipped tool: `gpt_chat`,
+ *           run through the extension's entry point, fails instead of
+ *           reporting a drifted reply as the requested thread's, and fails
+ *           instead of sending when the leaf cannot be read (control: the
+ *           same call succeeds when the backend behaves).
  *
  * The rule checker in this file (`classifyReply`) is the executable statement
  * of the skill's rules. It is test code, not a product component: the product
  * applies the rule through the model reading the skill.
  *
- * This test needs the network once: `npm pack` fetches the pinned tarball.
+ * The package under test is the vendored, patched tree `scripts/bootstrap.sh`
+ * extracts to `pins/packages/`; TRN-000 checks the committed tarball against
+ * the manifest so the tree and the pin cannot drift apart. No network.
  */
 
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -52,7 +59,9 @@ import { after, before, describe, it } from "node:test";
 import { readPins, REPO_ROOT } from "../lib/repo.ts";
 
 const DRIVER = join(REPO_ROOT, "conformance", "lib", "foreman-transport-driver.mjs");
-const PACKAGE_SPEC = "npm:pi-gpt@0.4.3";
+const HOOKS = join(REPO_ROOT, "conformance", "lib", "foreman-transport-hooks.mjs");
+const PACKAGE_SPEC = "./pins/packages/pi-gpt-0.4.3";
+const PRIME_NODE_MODULES = join(REPO_ROOT, "pins", "prime-0.9.1", "node_modules");
 
 /** A delivery id in the skill's form: base32, so it always contains letters. */
 const DELIVERY_ID = "CG-D-47B3FJU5QW2EG43V";
@@ -233,6 +242,8 @@ interface DriverResult {
 	/** Messages present in the thread but not on the active branch (other branches after a browser edit). */
 	readonly elsewhere?: readonly { readonly id: string; readonly role: string | null }[];
 	readonly redacted?: string;
+	readonly registered?: readonly string[];
+	readonly result?: { readonly content?: readonly { readonly text?: string }[]; readonly details?: { readonly conversation_id?: string | null } };
 }
 
 let fixture = "";
@@ -247,8 +258,8 @@ let baseUrl = "";
  */
 function drive(...args: string[]): Promise<DriverResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", DRIVER, ...args], {
-			env: { ...process.env, CG_MOCK_BASE: baseUrl, CG_PIGPT_DIR: packageDir, CODEX_HOME: join(fixture, "codex") },
+		const child = spawn(process.execPath, ["--experimental-transform-types", "--no-warnings", "--import", HOOKS, DRIVER, ...args], {
+			env: { ...process.env, CG_MOCK_BASE: baseUrl, CG_PIGPT_DIR: packageDir, CG_PRIME_NODE_MODULES: PRIME_NODE_MODULES, CODEX_HOME: join(fixture, "codex") },
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let stdout = "";
@@ -322,18 +333,19 @@ describe("TRN: ChatGPT foreman transport on the pinned pi-gpt", () => {
 
 		const pinned = readPins().packages.find((entry) => entry.source === PACKAGE_SPEC);
 		assert.ok(pinned, `${PACKAGE_SPEC} must be pinned in pins/pins.json`);
-		const packed = JSON.parse(
-			execFileSync("npm", ["pack", PACKAGE_SPEC.replace(/^npm:/, ""), "--pack-destination", fixture, "--json", "--ignore-scripts"], {
-				encoding: "utf8",
-				cwd: fixture,
-				env: { ...process.env, HOME: fixture, npm_config_cache: join(fixture, "npm-cache") },
-			}),
-		) as { filename: string; integrity: string }[];
-		assert.equal(packed.length, 1);
-		assert.equal(packed[0].integrity, String(pinned.integrity), "TRN-000: the served tarball must hash to the pinned integrity");
-		packageDir = join(fixture, "package");
-		execFileSync("tar", ["-xzf", join(fixture, packed[0].filename), "-C", fixture]);
-		assert.ok(existsSync(join(packageDir, "src", "conversation.ts")));
+		const tarball = join(REPO_ROOT, String(pinned.tarball));
+		assert.ok(existsSync(tarball), `the committed tarball ${String(pinned.tarball)} is missing`);
+		const integrity = `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`;
+		assert.equal(integrity, String(pinned.integrity), "TRN-000: the committed tarball must hash to the pinned integrity");
+		packageDir = join(REPO_ROOT, PACKAGE_SPEC.slice(2));
+		assert.ok(existsSync(join(packageDir, "src", "conversation.ts")), `${PACKAGE_SPEC} is not extracted; run scripts/bootstrap.sh first`);
+		for (const patch of Array.isArray(pinned.patches) ? (pinned.patches as string[]) : []) {
+			assert.ok(existsSync(join(REPO_ROOT, patch)), `pinned patch ${patch} is missing`);
+		}
+		assert.ok(
+			readFileSync(join(packageDir, "extensions", "chatgpt.ts"), "utf8").includes("Command Governor guard"),
+			"the extracted tree does not carry the repository's patch; bootstrap did not apply it",
+		);
 
 		server = createServer((request, response) => {
 			handle(request, response).catch((error: unknown) => json(response, 500, { detail: String(error) }));
@@ -460,5 +472,34 @@ describe("TRN: ChatGPT foreman transport on the pinned pi-gpt", () => {
 		assert.notEqual(sent.conversationId, requested.conversation_id, "the package reports the backend's id, so the skill's equality check has something to catch");
 		const read = await drive("read", requested.conversation_id);
 		assert.equal(classifyReply(read, { userMessageId: driftId, deliveryId: "CG-D-DRIFTCHECKABCD", sha: SENT_SHA }).status, "not_landed");
+	});
+
+	it("TRN-006: the repository's patch makes gpt_chat fail on drift and on an unreadable leaf, and pass otherwise", async () => {
+		// Control: the shipped tool, through the extension's own entry point,
+		// succeeds when the backend answers from the requested thread.
+		const thread = newThread("thread-tool-ok");
+		scenario = { kind: "reply", echo: true, sha: SENT_SHA };
+		const ok = await drive("tool", "gpt_chat", JSON.stringify({ prompt: envelope("CG-D-TOOLCONTROLXYZ", SENT_SHA), conversation_id: thread.conversation_id }));
+		assert.equal(ok.ok, true, ok.error);
+		assert.ok(ok.registered?.includes("gpt_chat"), `the extension registered ${JSON.stringify(ok.registered)}`);
+		assert.equal(ok.result?.details?.conversation_id, thread.conversation_id);
+		assert.match(ok.result?.content?.[0]?.text ?? "", /^CG-D: CG-D-TOOLCONTROLXYZ/);
+
+		// Drift: the unpatched tool reports the other conversation's reply as a
+		// result; the patched tool fails and names both ids.
+		const requested = newThread("thread-tool-drift");
+		const elsewhere = newThread("thread-tool-elsewhere");
+		scenario = { kind: "drift", into: elsewhere.conversation_id };
+		const drift = await drive("tool", "gpt_chat", JSON.stringify({ prompt: envelope("CG-D-TOOLDRIFTXYZAB", SENT_SHA), conversation_id: requested.conversation_id }));
+		assert.equal(drift.ok, false, "a drifted reply must fail the tool call");
+		assert.match(drift.error ?? "", /requested conversation thread-tool-drift.*answered from thread-tool-elsewhere/);
+
+		// Unreadable leaf: the unpatched tool swallows the read failure and sends
+		// with a fabricated parent; the patched tool fails before sending.
+		const before = sends.length;
+		const missing = await drive("tool", "gpt_chat", JSON.stringify({ prompt: envelope("CG-D-TOOLNOLEAFXYZ", SENT_SHA), conversation_id: "thread-does-not-exist" }));
+		assert.equal(missing.ok, false, "an unreadable leaf must fail the call");
+		assert.match(missing.error ?? "", /404|not sending|could not read/);
+		assert.equal(sends.length, before, "nothing was sent after the leaf read failed");
 	});
 });

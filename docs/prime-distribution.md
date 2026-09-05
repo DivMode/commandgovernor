@@ -37,6 +37,25 @@ its own version line. Two consequences the manifest encodes:
   `@earendil-works/pi-coding-agent` in the install root and any
   `@earendil-works` tree at the repository root.
 
+## Vendored packages
+
+A package the product needs but whose only source is an npm tarball from an
+author with no public repository (`pi-gpt`) is kept **in this repository**:
+the tarball is committed under `pins/packages/`, its sha512 is the
+manifest's `integrity`, and any change this repository needs is a committed
+patch under `pins/patches/`. `scripts/bootstrap.sh` verifies the tarball,
+extracts it to `pins/packages/<name>-<version>/` (ignored) and applies the
+patches; Prime then installs it by path (`harness/settings.project.json`, or
+`prime-agent package install --local <repo>/pins/packages/<name>-<version>`
+from another project). Nothing about it waits on a registry, an author, or an
+upstream. The manifest entry carries `origin` (where the tarball came from),
+`tarball` and `patches`; `conformance/runtime/foreman-transport.test.ts`
+(TRN-000, TRN-006) checks the committed bytes against the pin and that the
+patch holds on the shipped tool.
+
+To re-vendor: fetch the new tarball, record its sha512 as `integrity`, re-base
+the patches, run bootstrap, and re-run LOAD-001 and TRN.
+
 ## Bootstrap
 
 ```sh
@@ -108,9 +127,11 @@ A new Prime release is a new substrate until proven otherwise.
    `pins/pins.json` (version, tag, commit, assets, protocol version and
    schema revision as reported by `daemon_hello`) and replace
    `pins/SHA256SUMS`.
-4. Re-read the upstream defect records under `docs/upstream/`. Each names
-   the Prime behaviour it depends on; a release that changes one of them
-   closes or reopens that record deliberately rather than by inertia.
+4. Re-read the defect records under `docs/upstream/`. They are this
+   repository's own records of substrate and package behaviour it works
+   around, kept here whether or not anyone files them elsewhere; a release
+   that changes one of them closes or reopens that record deliberately
+   rather than by inertia. Re-base the patches under `pins/patches/`.
 5. Re-screen every entry in `packages[]` against the new Prime: a package
    that loads on Pi is not thereby proven on Prime (extension load failures
    are silent in headless modes). The package-load conformance test is the

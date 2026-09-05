@@ -15,8 +15,10 @@
     "                   SYSTEM.md/MEMORY.md and its shell half hardcodes `pi`",
     "  pi-oracle        does not load on Prime until its compatibility patch",
     "                   lands upstream (docs/upstream/)",
-    "  (pi-gpt is installed below: adopted 2026-09-04 as the foreman transport",
-    "                   on the user's explicit acceptance of the account risk)",
+    "  pi-gpt           vendored: installed by path from pins/packages/ (relative",
+    "                   to this file's directory, <project>/.prime/agent/), which is",
+    "                   this repository as the project; another project installs it",
+    "                   with `prime-agent package install --local <repo>/pins/packages/pi-gpt-0.4.3`",
     "  @gotgenes/pi-permission-system  does not load on Prime and cannot see",
     "                   kernel-side bash() even when patched",
     "  pi-observational-memory / pi-continual-harness  not baked; Prime's",
@@ -26,6 +28,6 @@
     "npm:pi-tasks@0.2.5",
     "npm:@gotgenes/pi-subagents@21.4.0",
     "npm:pi-pr-review@1.17.10",
-    "npm:pi-gpt@0.4.3"
+    "../../pins/packages/pi-gpt-0.4.3"
   ]
 }

@@ -236,6 +236,24 @@ to submit a review on GitHub and was refused because it is the same GitHub
 user as the author, which is why the thread verdict, not the GitHub review,
 is the acceptance record (§5).
 
+Two follow-ups the same day, both kept in this repository rather than waited
+on. First, the package is **vendored**: the npm tarball is committed under
+`pins/packages/` (sha512 = the pin's `integrity`), `scripts/bootstrap.sh`
+extracts it and applies the committed patch `pins/patches/pi-gpt-0.4.3-foreman-guards.patch`,
+and Prime installs it by path. The patch closes the two shipped defects in
+`gpt_chat` (a drifted reply now fails instead of being reported as the
+requested thread's; an unreadable leaf now fails before sending instead of
+sending under a fabricated parent); TRN-006 runs the patched tool through
+the extension's own entry point against the mock and shows both failures
+plus the passing control. Second, the transport was verified **inside a
+Prime worker**, not only from a script: with the scripted model issuing the
+tool calls and the real Codex login, Prime 0.9.1 executed
+`gpt_get_conversation` on the foreman thread (the APPROVE reply came back
+with message ids) and `gpt_chat` into a temporary chat (ChatGPT echoed the
+probe token, conversation id returned). That is the opt-in live lane
+`conformance/runtime/live-chatgpt.test.ts` (LIVE-001…003), the only test in
+the repository that can fail when the provider changes.
+
 The correlation rules are the `cg-foreman` skill (`harness/skills/cg-foreman`),
 not code: the `CG-D` / `CG-TASK` / `CG-REV` / `CG-REPLY-CONTRACT` envelope,
 the reply must echo the delivery id, a reply naming another head is recorded
@@ -355,7 +373,7 @@ The PR was retargeted onto `main` and finished on its branch.
 | Rust source + tests (`crates/`) | 49,142 (110 files) | 0 |
 | shell (`scripts/bootstrap.sh`, `scripts/conformance.sh`) | 251 | 276 |
 | harness configuration and prose (roles, skill, prompt, manifest, settings) | 495 | 398 |
-| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,126 in 9 test files (+9 lib); 88 tests, 14 suites, ~3 min |
+| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,514 in 10 test files (+10 lib); 90 tests, 15 suites, ~3 min; plus the opt-in live lane (3) |
 | tracked files | 238 | 91 |
 | Prime pin | 0.8.1 | 0.9.1 |
 | pinned packages | 0 | 3 |

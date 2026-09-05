@@ -26,26 +26,30 @@ has to own, not by how much it builds.
   `--autonomous-gate` locally; GitHub review is not the record on this
   single-identity repository.
 - Conformance rewritten as a black-box suite through stock clients.
-- Upstream records drafted: Prime extension-surface and daemon gaps, the
-  pi-oracle compatibility patch, the `hasUI`/theme worker crash.
+- `pi-gpt` vendored in-repo (committed tarball, committed two-guard patch,
+  applied by bootstrap, installed by path) so nothing about the foreman
+  transport waits on a registry or an author; TRN-006 proves the patch on
+  the shipped tool; the opt-in live lane (LIVE-001…003) proves the transport
+  inside a real Prime worker against the real account.
+- Substrate and package defect records kept under `docs/upstream/` as this
+  repository's own records: Prime extension-surface and daemon gaps, the
+  pi-oracle compatibility patch, the `hasUI`/theme worker crash. Nothing
+  waits on them being filed elsewhere.
 
-## Next — items that need the user or upstream
+## Next — items that need the user
 
-1. **File upstream** (outward-facing, user-approved): the Prime gaps in
-   `upstream/2026-09-04-prime-extension-and-daemon-gaps.md` through Prime's
-   Discussions gate; the pi-oracle issue with the attached patch.
-2. **Browser-backed transport alternative** (`pi-oracle`), only if wanted:
-   the compatibility patch upstream, `zstd` and `agent-browser` in the Nix
-   configuration, one `/oracle-auth`. The `pi-gpt` defects (returned
-   conversation id unasserted; swallowed leaf read) are upstream reports the
-   user files; the `cg-foreman` skill guards both meanwhile.
-3. **Tool gating**: no control exists on the substrate. Decide whether to
+1. **Browser-backed transport alternative** (`pi-oracle`), only if wanted:
+   vendor it the same way (`pins/packages/` + the compatibility patch under
+   `pins/patches/`), then `zstd` and `agent-browser` in the Nix
+   configuration and one `/oracle-auth`.
+2. **Tool gating**: no control exists on the substrate. Decide whether to
    run the trusted-local product without it (documented in the threat
    model) or to apply OS containment to the kernel process; ask Prime for a
    kernel-boundary hook.
-4. **Real-model conformance lane** (optional, credentials required): the
+3. **Real-model conformance lane** (optional, credentials required): the
    same scenarios with a real provider, to measure model behaviour rather
-   than package mechanics.
+   than package mechanics. The ChatGPT half already exists as the opt-in
+   live lane.
 
 ## Later — only with a measured gap
 
