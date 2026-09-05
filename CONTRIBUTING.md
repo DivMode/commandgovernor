@@ -4,7 +4,9 @@ Thank you for helping build Command Governor. The project is design-first: archi
 
 ## Before proposing or retaining production code
 
-Read ADRs 0008–0010, the current composition/de-duplication research, and `docs/testing.md`.
+Read ADRs 0008–0010, `docs/research/2026-09-04-zero-custom-code-proof.md`, and `docs/testing.md`.
+
+As of that proof Command Governor ships **no custom production code**. A pull request that adds some must first show, through the surfaces a user actually runs, that neither Prime nor an existing package can satisfy the requirement and that a local extension could enforce it at all.
 
 Global Claude Code and Codex instructions are managed declaratively outside this repository by the user's Nix configuration. Do not add repo-local `CLAUDE.md` or `AGENTS.md` copies of global policy here.
 

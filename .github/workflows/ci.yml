@@ -1,9 +1,11 @@
 name: CI
 
-# Command Governor is a Prime/Pi package distribution. CI gates the assembled
+# Command Governor is a Prime Agent distribution. CI gates the assembled
 # harness and the real pinned-Prime conformance surface; the superseded Rust
-# control-plane oracle was retired when ADR 0010 made composition-first ownership
-# the active repository architecture.
+# control-plane oracle was retired when ADR 0010 made composition-first
+# ownership the active repository architecture, and the custom runtime it
+# tested was deleted when the stock-client proof showed Prime's own clients
+# already satisfy D1/D2/D8.
 
 on:
   push:
@@ -34,10 +36,32 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+      # The D1/D2 runtime tests drive a REAL tool call, which means Prime
+      # bootstraps its Python kernel (uv + CPython + prime-agent-runtime) into
+      # the venv the fixtures share. The fixtures set PRIME_AGENT_INSTALL_UV=0
+      # so that no test ever curl-pipes an installer of its own; uv has to be
+      # here already, pinned like every other action.
+      #
+      # The venv itself is deliberately NOT cached across runs. Every fixture in
+      # a job shares one version-keyed venv, so the bootstrap is paid once per
+      # job either way, and a restored venv is a second place the pinned
+      # toolchain could silently diverge from what bootstrap.sh installed.
+      #
+      # conformance/runtime/package-load additionally runs `prime-agent package
+      # install --local` for every pinned package, so this job needs npm and
+      # network egress to the registry. Installs are project-scoped into a
+      # disposable fixture project; nothing is installed globally.
+      - name: uv (for Prime's Python kernel)
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - name: Verify component manifest and install pinned substrate
         run: scripts/bootstrap.sh
       - name: Typecheck and conformance
         run: scripts/conformance.sh
+      # Prime sets process.title = "prime-agent", which replaces the argv `ps`
+      # reports — so this pattern is what a leaked supervisor or worker actually
+      # looks like. conformance/sweep.ts additionally probes each fixture's own
+      # daemon socket, which is the only check that can see a leak the title
+      # rewrite hides from a root-path match.
       - name: No Prime processes survive the job
         if: always()
         run: |

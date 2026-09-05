@@ -95,3 +95,14 @@ The next cleanup must:
 4. delete the remaining workaround-only tests in the same change.
 
 This avoids two opposite mistakes: retaining obsolete control-plane machinery because it has tests, or deleting a proven safety shim before the higher-level product path has reproduced the required behavior.
+
+## Outcome (2026-09-04)
+
+The package-path reproducers this review deferred to were run through stock
+Prime clients on 2026-09-04
+([`../research/2026-09-04-zero-custom-code-proof.md`](../research/2026-09-04-zero-custom-code-proof.md)).
+None of the retained D1/D2/D8 machinery was needed; `governor/*`, its
+remaining tests, the transport stub, the role schema and `authorities.json`
+were deleted in the same pull request, and the conformance suite was
+rewritten as black-box tests through stock clients. Custom production code:
+0 lines.

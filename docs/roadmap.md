@@ -1,147 +1,73 @@
 # Command Governor roadmap
 
-This roadmap follows ADRs 0008–0010. It replaces the pre-pivot standalone Rust control-plane roadmap.
+This roadmap follows ADRs 0008–0010 and the 2026-09-04 proof
+([`research/2026-09-04-zero-custom-code-proof.md`](research/2026-09-04-zero-custom-code-proof.md)).
+The success metric is unchanged: **a small, usable Prime distribution with
+strong product-level conformance**, measured by how little Command Governor
+has to own, not by how much it builds.
 
-The success metric is **a smaller, usable Prime/Pi distribution with strong product-level conformance**, not the amount of custom infrastructure built.
+## Done — 2026-09-04
 
-## Stage 0 — repository and test shrink
+- Custom production code removed entirely (`governor/*`, transport stub,
+  role schema, authorities file; 4,723 lines) after D1/D2/D8 were proven on
+  the stock Prime client path with zero custom code.
+- Standalone Rust workspace and its tests retired (PR #24); Rust-era design
+  documents moved to `docs/history/`.
+- Substrate re-pinned to Prime `v0.9.1` with verified assets.
+- Packages selected and pinned by observed load on Prime: `pi-tasks`,
+  `@gotgenes/pi-subagents`, `pi-pr-review`. Rejected with measured reasons:
+  `pi-squad`, `pi-subagents`, `pi-governance-pipeline`, `pi-oracle` (until
+  patched upstream), `pi-gpt`, `@gotgenes/pi-permission-system`.
+- Independent acceptance defined as the GitHub review/merge by the reviewer
+  of record, bound to the head SHA (`pi-pr-review`), gated locally by
+  Prime's `--autonomous-gate`.
+- Conformance rewritten as a black-box suite through stock clients.
+- Upstream records drafted: Prime extension-surface and daemon gaps, the
+  pi-oracle compatibility patch, the `hasUI`/theme worker crash.
 
-Status: in progress.
+## Next — items that need the user or upstream
 
-- retire the frozen standalone Rust workspace/oracle from the active tree and CI;
-- preserve useful historical invariants in research/Git history rather than merge-gating an obsolete runtime;
-- reduce TypeScript conformance to product/pin/policy checks, real pinned-Prime reproducers, and the minimum tests for named temporary workarounds;
-- classify every assigned authority as `USE EXISTING`, `PLUGIN`, or `TEMP WORKAROUND`;
-- give every temporary workaround an explicit deletion condition;
-- update current testing/security/roadmap documents so old topology cannot become accidental instructions.
+1. **File upstream** (outward-facing, user-approved): the Prime gaps in
+   `upstream/2026-09-04-prime-extension-and-daemon-gaps.md` through Prime's
+   Discussions gate; the pi-oracle issue with the attached patch.
+2. **ChatGPT foreman authenticated proof**, once a transport loads on Prime:
+   provide an exact `https://chatgpt.com/c/<id>`; add `zstd` and
+   `agent-browser` to the Nix configuration; run `/oracle-auth` once in an
+   interactive TUI. The correlation rules (envelope, reply echo,
+   stale-revision rejection, never resend on ambiguity) become a skill in
+   `harness/skills/`, not code.
+3. **Tool gating**: no control exists on the substrate. Decide whether to
+   run the trusted-local product without it (documented in the threat
+   model) or to apply OS containment to the kernel process; ask Prime for a
+   kernel-boundary hook.
+4. **Real-model conformance lane** (optional, credentials required): the
+   same scenarios with a real provider, to measure model behaviour rather
+   than package mechanics.
 
-Acceptance: one active product architecture and one active merge-gating conformance strategy.
+## Later — only with a measured gap
 
-## Stage 1 — smallest installable Command Governor package
+- Memory: Prime's continual harness is the default owner; evaluate exactly
+  one memory package only if downstream-action tests show a gap.
+- ACP: use Prime's stable ACP v1 server when a client path needs it; an ACP
+  client for driving other agents is an upstream contribution.
+- Sandbox profile for intentionally untrusted workloads.
+- Cost/cache accounting as a conformance measurement, not a feature.
 
-Build the minimum real `@commandgovernor/harness` package using Prime's documented package/extension mechanism.
+## Re-pin cadence
 
-Keep it intentionally boring:
-
-- package manifest/config;
-- roles/skills/prompts that are genuinely product-specific;
-- pin/authority policy;
-- no parallel daemon/control plane;
-- no new generic task/review/subagent/memory/transport subsystem.
-
-Acceptance: install/load the package on the selected Prime pin and run a harmless session through the package path.
-
-## Stage 2 — package bake-offs, one authority at a time
-
-Evaluate credible existing packages separately under Prime before custom implementation.
-
-Priority lanes:
-
-1. independent candidate acceptance (`pi-squad` or current equivalent);
-2. durable task/evidence contract (`pi-tasks` or current equivalent);
-3. GitHub PR review (`pi-pr-review` or current equivalent);
-4. generic delegation/reviewer roles (`pi-subagents`/Prime-native alternatives);
-5. exact existing ChatGPT thread transport (`pi-oracle` or current equivalent);
-6. direct/private ChatGPT alternative (`pi-gpt` or current equivalent, capability-gated);
-7. optional observational memory only if downstream-action testing shows a real gap.
-
-Do not install overlapping authorities in the same first bake-off. A package that loses is removed; its experimental tests do not become permanent merge gates.
-
-## Stage 3 — re-run D1/D2/D8 through the actual package path
-
-This stage determines whether merged PR #18 adaptation code survives.
-
-### D1
-
-Kill/recover a resident root through the package product path.
-
-If Prime/package APIs preserve the same logical session, reject stale attachment state, and avoid duplicate roots without `governor/session/registry.ts` + custom reopen authority, delete those custom owners and their tests.
-
-### D2
-
-Run the exact worker-loss external-effect reproducer through the package product path.
-
-Key question:
-
-> Does the intended package/plugin path duplicate an external effect after worker loss without the external Governor mutation/replacement authority?
-
-- **No:** delete the custom mutation ledger/classifier/durable-FS/process-identity machinery and their tests.
-- **Yes:** retain only the minimum compatibility shim proven necessary by the reproducer, with the upstream defect/removal gate recorded.
-
-### D8
-
-Prove every Governor-created session on the package path has the required explicit persistent identity/path. Reduce/delete standalone path machinery if the higher-level API already satisfies it.
-
-Acceptance: every PR #18 production family ends as `USE EXISTING`, `PLUGIN`, `TEMP WORKAROUND`, or `DELETE`, with custom production LOC reduced from the post-#18 baseline.
-
-## Stage 4 — independent review workflow
-
-Using the selected existing task/review packages where possible, prove:
-
-```text
-implementer result
-  -> independent review state
-  -> reviewer inspects actual evidence/source
-  -> PASS / REVISE
-  -> implementer cannot self-satisfy acceptance
-```
-
-Only missing Command-Governor-specific policy becomes a plugin.
-
-Acceptance: restart-safe review state and no implementer self-approval.
-
-## Stage 5 — exact ChatGPT foreman closed loop
-
-Use an existing Pi-native exact-thread transport first.
-
-Prove:
-
-```text
-current candidate/review revision
-  -> correlated foreman request
-  -> exact user-selected ChatGPT conversation
-  -> durable response retrieval
-  -> stale/wrong correlation rejected
-  -> current work affected exactly once
-```
-
-Inject failure before/during/after send and response retrieval. Ambiguous submission is reconciled, not blindly repeated.
-
-Only then decide whether a tiny Command Governor foreman policy/adapter remains necessary.
-
-## Stage 6 — optional capabilities
-
-Only after the core closed loop works:
-
-- ACP interoperability if a real client path needs it;
-- memory/continual refinement selected by downstream-action quality;
-- tooling/UX donors such as OMP/DeepSeek-derived ideas when they win measured bake-offs;
-- sandbox profiles for workloads intentionally treated as untrusted;
-- cost/cache/latency accounting for the assembled package set.
-
-No optional capability may introduce a second generic owner for an existing concern.
-
-## Release criteria
-
-A usable initial release requires:
-
-- reproducible Prime/package installation and pin verification;
-- one owner per concern;
-- package-shaped Command Governor distribution;
-- independent review semantics;
-- exact foreman correlation on the selected transport;
-- fail-closed handling of ambiguous external effects on the actual product path;
-- no obsolete parallel runtime/control-plane implementation in the active tree;
-- focused CI that proves the assembled product rather than historical machinery.
+Prime and the pinned packages release daily to weekly. A re-pin follows
+`prime-distribution.md`: verify assets, regenerate the lockfile, re-read the
+upstream records (a fix closes one; a regression reopens one), re-run the
+package-load probe and the black-box suite.
 
 ## Explicitly not on the roadmap
 
 Unless new evidence changes ADR 0010, do not build:
 
-- another general-purpose daemon/runtime around Prime;
-- another generic session/transcript authority;
-- another generic scheduler/goals/subagent/workflow engine;
-- another generic memory engine;
-- another browser automation stack before existing Pi-native transports fail the required conformance;
-- a permanent custom mutation/session control plane merely because the old implementation was heavily reviewed;
-- large speculative test catalogs for features not yet selected.
+- another daemon, runtime, session store, scheduler, subagent engine,
+  workflow engine, memory engine or mailbox beside Prime;
+- a local acceptance record, mutation ledger or session registry — the
+  proof showed each is either already Prime's or unenforceable locally;
+- a browser/CDP ChatGPT automation stack;
+- a permission extension — it cannot see kernel-side shell on Prime;
+- tests of Command Governor subsystems, because there are none.

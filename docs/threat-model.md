@@ -1,22 +1,30 @@
 # Command Governor threat model
 
-Status: current for the composition-first Prime/Pi architecture in ADRs 0008–0010.
+Status: current for the composition-first Prime distribution in ADRs
+0008–0010, as proven on 2026-09-04
+([`research/2026-09-04-zero-custom-code-proof.md`](research/2026-09-04-zero-custom-code-proof.md)).
 
-Older standalone Rust daemon/SQLite/browser/MCP threat assumptions remain in Git history and historical documents; they are not the current product topology.
+Older standalone Rust daemon / SQLite / browser / MCP threat assumptions are
+in [`history/`](history/) and Git history; they are not the current product
+topology.
 
 ## System shape
 
 ```text
-Prime Agent
-  + selected reviewed Prime/Pi packages
+Prime Agent (pinned release, verified assets)
+  + selected reviewed Prime/Pi packages (exact versions, one owner per concern)
   + @commandgovernor/harness
-      - small product-specific extensions/policy
-      - roles / skills / prompts / configuration
-      - focused conformance
-      - temporary compatibility shims only for proven upstream defects
+      - skills / prompts / configuration
+      - pin and package manifest
+      - black-box conformance
 ```
 
-Command Governor does not assume it owns a second general runtime, session store, scheduler, subagent engine, memory engine, or browser automation stack.
+Command Governor owns no runtime, daemon, session store, scheduler, subagent
+engine, memory engine, mutation ledger, permission engine or browser
+automation. Everything that executes is Prime or a package Prime loads.
+The security consequences follow directly: Command Governor cannot weaken a
+Prime guarantee by wrapping it, and it cannot add a guarantee Prime and its
+packages do not provide.
 
 ## Assets
 
@@ -24,128 +32,99 @@ Protect:
 
 - repository/worktree contents;
 - user credentials and environment secrets;
-- provider/API keys;
+- provider/API keys and Prime's `auth.json`;
 - GitHub authentication;
-- authenticated browser/session material;
-- exact task/revision/session/correlation identities;
-- evidence required for independent review or safe reconciliation;
-- component pins, hashes, authority assignments, and policy configuration;
-- user-owned decisions and permission boundaries.
+- authenticated browser/session material used by a ChatGPT transport;
+- exact task/revision/session identities and the evidence needed for
+  independent review;
+- the component manifest: pins, hashes, package versions, owned concerns;
+- user-owned decisions.
 
 ## Trust assumptions
 
 ### Trusted-local profile
 
-The local OS user is the administrative trust root. Prime, selected packages, Command Governor code, workers, and tools may have the same-user authority available to their process unless explicitly isolated.
+The local OS user is the administrative trust root. Prime, every package and
+every tool run with that user's authority. Owner-only files are privacy
+against other principals, not a same-user sandbox. Sandboxing is optional
+hardening for intentionally untrusted repositories, skills or packages
+(ADR 0010 §19).
 
-This profile protects against accidental disclosure and other OS principals where file permissions apply. It does not protect against a deliberately malicious same-user process.
+### The substrate is not a policy engine
 
-### External systems
+Prime 0.9.1 ships no permission or approval system. Its only host-side
+interception point is the `tool_call` extension event, and its only default
+tool is the Python REPL, inside which `bash()`, `subprocess`, `shutil` and
+file writes run with no host round trip
+([`upstream/2026-09-04-prime-extension-and-daemon-gaps.md`](upstream/2026-09-04-prime-extension-and-daemon-gaps.md) §D).
+Measured: the highest-adoption Pi permission package does not load on
+Prime, and when patched to load it cannot see kernel-side shell commands.
 
-GitHub, model providers, ChatGPT Web, package registries, and network services are outside the local durability boundary. Their responses may be delayed, duplicated, stale, unavailable, or ambiguous.
+Consequence: **ADR 0008 invariant 7 (high-risk decisions stay user-owned)
+has no enforcement point on the pinned substrate.** No Command Governor
+extension could supply one either, because the interception granularity is
+Prime's. The load-bearing control for a destructive workload is OS
+containment of the kernel process, chosen by the user; the upstream ask is a
+kernel-boundary host hook for `rlm.bash`. Until one exists this is an open,
+documented limitation, not a mitigated risk.
 
-### Model output and repository content
+## Boundaries that hold
 
-Model output, worker output, repository text, webpages, issues, PR comments, tool output, and retrieved documents are untrusted data. They cannot redefine architecture/policy merely by containing instructions.
+### Component and supply-chain integrity
 
-## Primary threats and controls
+- Prime release assets are verified against the release's own `SHA256SUMS`
+  and the committed manifest before npm runs; sibling tarballs are enforced
+  by sha512 lockfile integrity.
+- Every package is pinned to an exact version or commit with license and
+  review date, and admitted only after it is observed to register on the
+  pinned Prime, because a package that fails to load is silent in headless
+  modes and would otherwise be believed present.
+- One component owns each concern. Two packages that both gate the same
+  `tool_call`, both mark work done, or both persist memory are rejected at
+  the manifest rather than resolved by load order.
+- Install scripts are ignored throughout bootstrap.
 
-### T1 — duplicate external effect after ambiguous failure
+### External-effect ambiguity
 
-**Threat:** a worker/process/transport dies after an external effect but before a trustworthy result reaches the caller; a replacement operation repeats the effect.
+A worker that dies after an external effect is recovered by Prime with a
+transcript marker stating the work was not replayed, and no stock client
+re-issues a model tool call, agent message, scheduled prompt or RPC bash
+command after worker loss. Measured on every stock surface; asserted by the
+D2 conformance tests. The remaining upstream defect is a reporting one: the
+RPC client is told an untyped `Daemon worker socket closed`. It duplicates
+nothing.
 
-**Control:** unknown effect state is `UNCERTAIN`/reconciliation, not proven failure. Stable operation identity and package/runtime idempotency are used where available. The current D2 custom guard is a `TEMP WORKAROUND` and must disappear if the package path no longer needs it.
+### Session identity and recovery
 
-**Conformance:** D2 worker-loss and post-effect import reproducers plus completed-command idempotence.
+Prime keys every persisted session by canonical JSONL path with a
+process-safe lease, converges concurrent opens on one worker, reopens a dead
+resident root on the same `sessionId` through `prime-agent -r`, and replaces
+a dead supervisor from a live worker. Asserted by the D1 and D8 tests.
 
-### T2 — stale identity mutates newer work
+### Environment and credentials
 
-**Threat:** an old incarnation, cursor, task revision, delivery, claim, or foreman response is accepted after a newer generation/revision exists.
+Prime resolves provider credentials per model call from `auth.json`
+(owner-only) or a named environment variable, never copies them into
+session state, and its status surfaces return fingerprints only. Command
+Governor forwards no environment of its own because it runs no process of
+its own; the user's shell environment is Prime's environment.
 
-**Control:** exact current identities are checked at the owning boundary; stale identities fail closed. Generic Prime session identity should be reused rather than shadowed when sufficient.
+### ChatGPT foreman transport
 
-**Conformance:** D1 stale-incarnation/cursor behavior and future foreman-revision tests when that transport is selected.
+Any ChatGPT Web integration is unofficial. Command Governor adopts only a
+transport whose source, license and durability were reviewed and that loads
+on the pinned Prime; it never drives undocumented backend endpoints with a
+borrowed OAuth token or emulates provider security-control headers. At the
+proof date no admissible transport loads on Prime unmodified; the
+upstream-ready compatibility patch for `pi-oracle` is recorded under
+`docs/upstream/`.
 
-### T3 — overlapping package authorities
+## Residual risks, stated
 
-**Threat:** two extensions/packages both believe they own task completion, compaction, memory, transport, tool gating, or lifecycle state; load order silently decides behavior.
-
-**Control:** `harness/authorities.json` records exactly one owner per concern and the reason that owner is allowed to exist (`USE EXISTING`, `PLUGIN`, `TEMP WORKAROUND`). Unassigned concerns remain explicit until a bake-off selects an owner.
-
-### T4 — temporary workaround becomes permanent control plane
-
-**Threat:** a custom subsystem accumulates tests and review history until sunk cost is treated as architecture justification.
-
-**Control:** every `TEMP WORKAROUND` names a removal condition. Review necessity before correctness. Delete implementation-specific tests with the workaround. ADR 0010 forbids a parallel general control plane.
-
-### T5 — secret/environment leakage
-
-**Threat:** the host environment or credentials are copied wholesale into Prime/worker/package processes, logs, evidence, or repository files.
-
-**Control:** positive allowlists and explicit grants; no routine raw environment snapshots; no credentials in public evidence; private transport/browser credentials are not general control data.
-
-**Conformance:** environment boundary negative/positive sentinels.
-
-### T6 — supply-chain or re-pin drift
-
-**Threat:** a mutable tag, release asset change, dependency collision, or unreviewed package silently changes the runtime authority.
-
-**Control:** exact pin/revision, integrity hashes where practical, license/provenance records, explicit re-pin review, and conformance against the selected version.
-
-### T7 — wrong ChatGPT target or ambiguous submission
-
-**Threat:** a foreman request reaches the wrong conversation or a send may have happened but is blindly repeated.
-
-**Control:** existing exact-thread transports are evaluated before custom browser code; exact conversation/revision/correlation is required; ambiguous send is reconciled rather than replayed.
-
-No current merge gate claims this feature is shipped until a transport is selected and the closed loop is proven.
-
-### T8 — implementer self-approval
-
-**Threat:** the worker that produced a result can satisfy the requirement for independent acceptance simply by claiming success.
-
-**Control:** choose an existing task/review package or the smallest policy plugin that enforces independent acceptance. Do not add a custom review runtime before package bake-off.
-
-### T9 — prompt injection becomes policy authority
-
-**Threat:** repository content or external text tells the agent to ignore review, widen tools, expose credentials, or change architecture.
-
-**Control:** deterministic repository/ADR/authority policy outranks untrusted content. Capability/permission changes require the actual owning mechanism/user decision, not text embedded in work data.
-
-### T10 — lingering background processes/state
-
-**Threat:** a test or failed run leaves resident Prime processes that mutate later sessions or create misleading conformance results.
-
-**Control:** isolated fixture roots and mandatory process sweep. Runtime conformance is sequential where tests kill supervisors/workers.
-
-## Persistence policy
-
-Use the selected substrate/package's normal session state when it owns the concern. Command Governor should not duplicate raw transcripts/provider streams into a second authority.
-
-Product-specific state should be minimal, typed/structured where practical, and limited to the exact policy/correlation/evidence that Prime/packages do not already own safely.
-
-Credentials, raw browser auth material, provider keys, GitHub auth, and arbitrary environment snapshots are not routine persistent control state.
-
-## Sandboxing
-
-Sandboxing is optional hardening for workloads intentionally treated as untrusted. It is not a requirement for the trusted-local profile and should be supplied by an existing isolation mechanism rather than by inventing another Governor runtime.
-
-When an untrusted-workload profile is selected, document the actual isolation boundary, filesystem/network grants, credential broker, and escape assumptions separately.
-
-## Test strategy
-
-See `docs/testing.md`.
-
-The strongest useful boundary wins. Historical implementation-specific tests are not permanent security controls. If a current invariant matters, prove it against the current Prime/package product path.
-
-## Review trigger
-
-Update this threat model when a change introduces or changes:
-
-- an authority owner;
-- a new persistent state boundary;
-- a new consequential external-write transport;
-- a credential/environment grant;
-- a package with meaningful process/filesystem/network authority;
-- an isolation/sandbox profile;
-- or the trust status of a workload.
+| Risk | Status |
+| --- | --- |
+| Destructive shell/Python inside the kernel cannot be gated by any extension | open; upstream hook or OS sandbox |
+| Silent extension load failure in headless modes | mitigated by the package-load conformance probe |
+| `ctx.hasUI` true in headless modes misleads approval logic | open upstream; no approval package admitted |
+| Undocumented ChatGPT transports | rejected; browser-backed transport pending upstream fix and user login |
+| Package churn (daily releases, version floors, no Prime compatibility statements) | every re-pin re-runs the load probe and the black-box suite |

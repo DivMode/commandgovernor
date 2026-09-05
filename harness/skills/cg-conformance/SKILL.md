@@ -1,9 +1,13 @@
 ---
 name: cg-conformance
-description: How to bootstrap the pinned Prime Agent substrate and run the Command Governor conformance suite, and how to read a failure. Use when asked to verify the distribution, re-pin Prime, or diagnose a bootstrap, pin, or runtime-fixture failure.
+description: How to bootstrap the pinned Prime Agent substrate, run the Command Governor conformance suite, and read a failure. Use when asked to verify the distribution, re-pin Prime, admit or upgrade a package, or diagnose a bootstrap, pin, package-load or runtime-fixture failure.
 ---
 
 # Running the Command Governor conformance suite
+
+Command Governor ships no runtime code. The suite verifies the pinned Prime
+Agent, the pinned packages and the manifest that binds them, through the
+same clients a user runs.
 
 ## Bootstrap first
 
@@ -11,16 +15,15 @@ description: How to bootstrap the pinned Prime Agent substrate and run the Comma
 scripts/bootstrap.sh
 ```
 
-This fetches the pinned Prime Agent release assets from the immutable GitHub
-release, verifies each against both `pins/pins.json` and the release's own
+Fetches the pinned Prime release assets from the immutable GitHub release,
+verifies each against both `pins/pins.json` and the release's own
 `pins/SHA256SUMS`, installs the wrapper and its three sibling packages with
 `npm ci --ignore-scripts` from the committed lockfile (sha512 integrity), and
-asserts the resulting `prime-agent --version` is the pinned one. It does not
-use, and must not need, a `prime-agent` on `PATH`, and it never installs
-globally.
+asserts `prime-agent --version` is the pinned one. It never installs
+globally and needs no `prime-agent` on `PATH`.
 
-The install lands in `pins/prime-0.8.1/node_modules/` (gitignored); the
-verified tarballs in `pins/prime-0.8.1/vendor/` (gitignored).
+The install lands in `pins/prime-<version>/node_modules/` (gitignored); the
+verified tarballs in `pins/prime-<version>/vendor/` (gitignored).
 
 ## Run the suite
 
@@ -28,19 +31,19 @@ verified tarballs in `pins/prime-0.8.1/vendor/` (gitignored).
 scripts/conformance.sh
 ```
 
-Typecheck, then Tier 1 pure (`conformance/tier1`), then Tier 1 runtime
-(`conformance/runtime`), then a process sweep. Every runtime file starts its
-own isolated Prime supervisor under `/tmp/cg-XXXXXX` with a mock model; no
-credential is needed and no tool call is ever made, so the Python kernel is
-never bootstrapped. The runtime tier runs sequentially because it kills
-supervisors and workers on purpose.
+Typecheck, then Tier 1 (`conformance/tier1`: pin, package policy, one owner
+per concern, JSON), then the runtime tier (`conformance/runtime`), then a
+process sweep. Every runtime file starts its own isolated Prime supervisor
+under `/tmp/cg-XXXXXX` with a scripted mock model and drives it only
+through stock clients (TUI on a pty, `prime-agent -r`, `list --json`,
+`--mode rpc`, `-p`, `--mode json`). The D2 effect is a real `ipython` tool
+call, so the first run bootstraps Prime's Python kernel (uv + CPython)
+into the fixture's own agent directory; `uv` must be reachable and network
+is required for that one step.
 
 Set `CG_KEEP_FIXTURE=1` to keep a failed fixture's root for inspection
-(ledger under `governor/<name>/mutations`, registry and recovery leases
-under `governor/<name>/sessions`, the journal identity at
-`governor/<name>/client-identity.json`, Prime's journal under
-`agent/daemon-workers/*/command-journal.jsonl`, the wire log at
-`wire.jsonl` with env values redacted).
+(supervisor log, mock request log, transcripts under `sessions/`, worker
+descriptors under `agent/daemon-workers/`).
 
 ## Reading a failure
 
@@ -54,27 +57,39 @@ Same rule: never regenerate the hash to match the bytes.
 
 **`pinned prime-agent reports X, pins.json requires Y`** — the install and
 the pin record disagree. Both are drift; neither is fixed by relaxing the
-assertion. Note that `prime-agent --version` prints on stderr.
+assertion. `prime-agent --version` prints on stderr.
 
-**`daemon reports appVersion X; pin requires Y`** (`SubstrateMismatch`) — a
-Governor refused to speak to a daemon that is not the pinned one. Nothing
-was sent to it.
+**HELLO-001 fails** — the live daemon reports a protocol name, version or
+schema revision other than the manifest's. A re-pin crossed a protocol or
+schema boundary; go back through ADR 0009's acceptance conditions.
 
-**`TMPDIR ... is too long for Prime's worker sockets`** — macOS caps Unix
-socket paths at 104 bytes and Prime's worker sockets sit 50 bytes below
-`TMPDIR`. Use a short directory; the fixture already does.
+**LOAD-001 fails for a package** — the package did not register on the
+pinned Prime. Prime discards extension load errors silently in headless
+modes, which is exactly why this probe exists. Do not admit the package;
+find the load error with Prime's own loader in an interactive session or
+by importing the extension entry, and record the Prime gap under
+`docs/upstream/` (the known ones: missing config exports, `ctx.mode`,
+`ctx.isProjectTrusted`, the `@earendil-works/pi-ai/*` subpath alias, no
+`agent_settled`).
+
+**A D1/D2/D8 assertion fails** — this is the product invariant, and there
+is no Command Governor code to fix. Either the pinned Prime regressed
+(re-pin backwards and report upstream with the fixture's evidence) or the
+stock client behaviour changed (`prime-agent -r <sessionFile>` is the
+measured way back into a dead resident root; `attach` is not). Read the
+kept fixture's `supervisor.log` and the transcript's
+`prime-agent.worker_recovery` entry first.
 
 **`processes referencing a conformance fixture survived the run`** — a
-supervisor or worker outlived `shutdown`. The sweep kills them and fails,
-on purpose. Read the kept fixture's `supervisor.log`.
+supervisor, worker or kernel outlived the fixture's shutdown. The sweep
+kills them and fails on purpose. Note that `ps` cannot see `prime-agent`
+processes by command line (Prime sets its process title), so the fixture
+sweeps from the pids it recorded and Prime's worker descriptors.
 
-**A D2 assertion fails with `verdict: failed`** — the classifier produced a
-definite failure without a typed pre-effect code. That is the invariant
-the whole layer exists for; do not weaken `DEFAULT_POLICY`. Read
-`docs/prime-native/adaptation-layer.md` first.
+## Re-pinning Prime or upgrading a package
 
-## Re-pinning Prime
-
-The conformance suite is the gate on a re-pin, not a formality after one.
-The procedure, including the mandatory re-read of the D2 code path, is in
-`docs/prime-distribution.md`.
+The suite is the gate on a re-pin, not a formality after one. The
+procedure is in `docs/prime-distribution.md`; for a package, update
+`pins/pins.json` `packages[]` and `harness/settings.project.json` together
+(the suite compares them), re-run LOAD-001, and re-read the package's
+authority note so it still owns exactly one concern.

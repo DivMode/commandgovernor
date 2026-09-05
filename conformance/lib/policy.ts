@@ -6,12 +6,18 @@
  * that owner allowed to exist here?" Assigned concerns are classified as
  * USE EXISTING, PLUGIN, or TEMP WORKAROUND; temporary workarounds must name the
  * condition that removes them.
+ *
+ * Both records live in `pins/pins.json` — `packages[]` and `concerns[]` — so
+ * that "who owns this?" and "at what exact version?" cannot drift apart. These
+ * functions never read a file: they are handed records, including deliberately
+ * invalid ones, which is what lets the tests prove the checks can fail.
  */
 
 export interface PinnedPackageRecord {
 	readonly source?: unknown;
 	readonly exactVersion?: unknown;
 	readonly resolvedSha?: unknown;
+	readonly integrity?: unknown;
 	readonly license?: unknown;
 	readonly reviewedAt?: unknown;
 	readonly authority?: unknown;
@@ -52,6 +58,13 @@ export function checkPackagePin(pkg: PinnedPackageRecord): string[] {
 			`${label}: needs an exact npm version or a 40-character commit sha; a bare name, branch or tag is not a pin`,
 		);
 	}
+	// A version resolves to whatever the registry serves today. The integrity
+	// hash is what makes it the same bytes tomorrow, so it is not optional: npm
+	// enforces it on install, and without it a re-published version installs
+	// silently.
+	if (typeof pkg.integrity !== "string" || !/^sha512-[A-Za-z0-9+/]+=*$/.test(pkg.integrity)) {
+		errors.push(`${label}: needs an npm integrity hash in sha512- form; a version alone does not pin the bytes`);
+	}
 	if (!isNonEmptyString(pkg.authority)) {
 		errors.push(`${label}: must name the authority it owns, so a second owner is visible`);
 	}
@@ -72,7 +85,7 @@ export function checkPackageSet(
 		if (isNonEmptyString(pkg.authority)) {
 			if (!knownConcerns.has(pkg.authority)) {
 				errors.push(
-					`${String(pkg.source)}: claims authority '${pkg.authority}', which is not a concern in harness/authorities.json`,
+					`${String(pkg.source)}: claims authority '${pkg.authority}', which is not a concern in pins/pins.json`,
 				);
 			}
 			const list = owners.get(pkg.authority) ?? [];
@@ -89,6 +102,12 @@ export function checkPackageSet(
 	return errors;
 }
 
+/**
+ * `ownerExists` decides what a real owner is, and is supplied by the caller
+ * rather than assumed here: an owner may be the pinned substrate, a package
+ * pinned in `packages[]`, or a path in this repository, and only the caller
+ * holds the manifest that settles the first two.
+ */
 export function checkAuthorities(
 	doc: AuthoritiesRecord,
 	ownerExists: (path: string) => boolean,
@@ -116,7 +135,9 @@ export function checkAuthorities(
 			if (!isNonEmptyString(entry.owner)) {
 				errors.push(`${entry.concern}: assigned with no owner`);
 			} else if (!ownerExists(entry.owner)) {
-				errors.push(`${entry.concern}: owner ${entry.owner} does not exist in the repository`);
+				errors.push(
+					`${entry.concern}: owner ${entry.owner} does not exist — it is neither the pinned substrate, nor a package pinned in packages[], nor a path in this repository`,
+				);
 			}
 
 			if (

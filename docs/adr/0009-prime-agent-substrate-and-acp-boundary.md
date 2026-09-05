@@ -1,6 +1,6 @@
 # ADR 0009: Select Prime Agent as the initial substrate and ACP v1 as the public agent-client boundary
 
-- **Status:** Proposed — source-level bake-off complete; Gate S0/S1 required before final acceptance
+- **Status:** Accepted — 2026-09-04, on the evidence in [`../research/2026-09-04-zero-custom-code-proof.md`](../research/2026-09-04-zero-custom-code-proof.md); see "Acceptance record" at the end
 - **Date:** 2026-09-01
 - **Supersedes/refines:** ADR 0008's initial upstream-Pi substrate direction
 - **Research:** [`../research/2026-09-01-agent-harness-landscape-and-substrate-bakeoff.md`](../research/2026-09-01-agent-harness-landscape-and-substrate-bakeoff.md)
@@ -365,3 +365,38 @@ Move this ADR from **Proposed** to **Accepted** only after:
 4. the implementation foundation PR records the exact pin and a reproducible component manifest.
 
 After acceptance, the next implementation PR should establish the pinned Prime Agent Command Governor distribution and ACP conformance harness. It should **not** start by porting OMP features, memory systems, or ChatGPT transport all at once.
+## Acceptance record (2026-09-04)
+
+Accepted on the real supported Mac with the conditions of the transition
+section met as follows:
+
+1. **Gate S0** passed for Prime `v0.9.1` (`81ae3cb34d27d38ee37f9e205a1e73694993b344`),
+   the current release; the pin moved from 0.8.1 to 0.9.1 with verified
+   assets and a regenerated lockfile (`pins/`).
+2. **Gate S1 (critical portions)** passed through stock Prime clients:
+   worker loss never duplicates an external effect on any stock surface,
+   session authority converges on one worker per path, a dead resident root
+   is reopened on the same `sessionId`, and a dead supervisor is replaced by
+   a live worker. No Command Governor code was needed for any of it; the
+   §3 rule ("do not recreate a competing worker/session control plane") is
+   satisfied literally.
+3. **License:** MIT; no distribution restriction.
+4. **Foundation:** `pins/pins.json` is the reproducible component manifest
+   (substrate, packages, concerns).
+
+Refinements recorded at acceptance:
+
+- §4–§7 (ACP): interoperability only; no shipped path needs it yet, and
+  Prime has no ACP client, so driving another ACP agent is an upstream
+  contribution, not a Command Governor layer.
+- §11 (P0 admission): a package is admitted only after it is observed to
+  register on the pinned Prime; extension load failures are silent in
+  headless modes.
+- §12 (sandboxing): refined by ADR 0010 §19 to optional hardening, with one
+  sharpening from the proof: Prime has no permission system and its kernel
+  executes shell commands below every extension hook, so OS containment of
+  the kernel process is the only available control for destructive work.
+- Gates S2–S6 are not prerequisites for the trusted-local product; S5
+  (independent review) is satisfied by GitHub review as the acceptance
+  record plus `pi-pr-review` and `--autonomous-gate`; S6 (ChatGPT foreman)
+  waits on an upstream compatibility fix and user-side steps.

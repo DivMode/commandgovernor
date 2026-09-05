@@ -1,0 +1,368 @@
+From: Command Governor <divmode@gmail.com>
+Subject: [PATCH] extensions/oracle: feature-detect optional host capabilities
+
+pi-oracle 0.7.20 does not load on hosts that implement the pi extension
+contract but export a smaller surface than the reference build (observed on
+Prime Agent 0.9.1). Three independent breaks, all fixed here without changing
+any behaviour on the reference build:
+
+  1. lib/config.ts and lib/runtime.ts import CONFIG_DIR_NAME,
+     ProjectTrustStore and hasTrustRequiringProjectResources as runtime
+     values. A host that does not export them yields undefined, and
+     WORKSPACE_ROOT_MARKERS reaches join(undefined, ...) during module
+     evaluation, so the whole extension fails to load.
+
+  2. index.ts branches on ctx.mode, which some hosts do not put on
+     ExtensionContext at all. Undefined took the wrong branch twice: the
+     poller started in non-interactive runs, and resources_discover never
+     contributed the prompt templates, leaving /oracle unusable.
+
+  3. index.ts and lib/poller.ts reach ctx.ui.theme behind a ctx.hasUI guard.
+     A host can report hasUI === true in a non-interactive run while its
+     theme is uninitialised, so the property access throws. Because the
+     status refresh runs from an async lifecycle callback, that surfaces as
+     an unhandled rejection and can take the host session process down.
+
+All optional host capabilities now live behind extensions/oracle/lib/
+host-compat.ts, which always prefers the host's own value and only falls
+back when the host omits one. On the reference build every branch resolves
+to the previously imported symbol, so behaviour is unchanged.
+
+Verified against @earendil-works/pi-coding-agent 0.80.9:
+  npx tsc --noEmit -p tsconfig.json          -> exit 0
+  npm run typecheck:worker-helpers           -> exit 0
+  npm run check:oracle-extension             -> exit 0 (esbuild bundle ok)
+  npm run sanity:oracle                      -> fails identically before and
+    after this patch on a machine without zstd/agent-browser; no behavioural
+    difference is attributable to the patch.
+
+---
+
+ extensions/oracle/index.ts           |   7 +-
+ extensions/oracle/lib/commands.ts    |   3 +-
+ extensions/oracle/lib/config.ts      |  12 ++-
+ extensions/oracle/lib/host-compat.ts | 190 +++++++++++++++++++++++++++++++++++
+ extensions/oracle/lib/poller.ts      |   5 +-
+ extensions/oracle/lib/runtime.ts     |   2 +-
+ 6 files changed, 211 insertions(+), 8 deletions(-)
+
+diff --git a/extensions/oracle/index.ts b/extensions/oracle/index.ts
+index dddd6b3..98c8cb7 100644
+--- a/extensions/oracle/index.ts
++++ b/extensions/oracle/index.ts
+@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
+ import { dirname, join } from "node:path";
+ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+ import { loadOracleConfig } from "./lib/config.js";
++import { canRenderThemedUi, isNonInteractiveHost, needsPromptTemplateFallback } from "./lib/host-compat.js";
+ import { registerOracleCommands } from "./lib/commands.js";
+ import { getSessionFile, pruneTerminalOracleJobs, reconcileStaleOracleJobs } from "./lib/jobs.js";
+ import { isLockTimeoutError, withGlobalReconcileLock } from "./lib/locks.js";
+@@ -81,13 +82,13 @@ export default function oracleExtension(pi: ExtensionAPI) {
+   function startPollerForContext(ctx: ExtensionContext) {
+     try {
+       const sessionFile = getSessionFile(ctx);
+-      if (ctx.mode === "print" || ctx.mode === "json") {
++      if (isNonInteractiveHost(ctx)) {
+         stopPoller(ctx);
+         return;
+       }
+       if (!hasPersistedSessionFile(sessionFile)) {
+         stopPoller(ctx);
+-        if (ctx.hasUI) ctx.ui.setStatus("oracle", ctx.ui.theme.fg("accent", "oracle: unavailable"));
++        if (canRenderThemedUi(ctx)) ctx.ui.setStatus("oracle", ctx.ui.theme.fg("accent", "oracle: unavailable"));
+         return;
+       }
+ 
+@@ -114,7 +115,7 @@ export default function oracleExtension(pi: ExtensionAPI) {
+   }
+ 
+   pi.on("resources_discover", async (_event, ctx) => {
+-    return ["print", "json", "rpc"].includes(ctx.mode) ? { promptPaths: [promptDir] } : undefined;
++    return needsPromptTemplateFallback(ctx) ? { promptPaths: [promptDir] } : undefined;
+   });
+ 
+   pi.on("before_agent_start", async (event) => {
+diff --git a/extensions/oracle/lib/commands.ts b/extensions/oracle/lib/commands.ts
+index ccc73b1..a4dda70 100644
+--- a/extensions/oracle/lib/commands.ts
++++ b/extensions/oracle/lib/commands.ts
+@@ -6,6 +6,7 @@
+ import { existsSync } from "node:fs";
+ import { readFile } from "node:fs/promises";
+ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
++import { canRenderThemedUi } from "./host-compat.js";
+ import { formatOracleCancelOutcome, formatOracleJobSummary } from "../shared/job-observability-helpers.mjs";
+ import { runOracleAuthBootstrap } from "./auth.js";
+ import { normalizeOracleProviderAlias, type OracleProvider } from "./config.js";
+@@ -80,7 +81,7 @@ function emitCommandOutput(pi: ExtensionAPI, ctx: ExtensionCommandContext, messa
+     process.stdout.write(`${message}\n`);
+     return;
+   }
+-  if (ctx.hasUI) {
++  if (canRenderThemedUi(ctx)) {
+     ctx.ui.notify(message, level);
+     return;
+   }
+diff --git a/extensions/oracle/lib/config.ts b/extensions/oracle/lib/config.ts
+index 1c212b5..ce26f04 100644
+--- a/extensions/oracle/lib/config.ts
++++ b/extensions/oracle/lib/config.ts
+@@ -6,7 +6,12 @@
+ import { execFileSync } from "node:child_process";
+ import { existsSync, readFileSync } from "node:fs";
+ import { homedir } from "node:os";
+-import { CONFIG_DIR_NAME, getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore } from "@earendil-works/pi-coding-agent";
++import {
++  CONFIG_DIR_NAME,
++  createProjectTrustStore,
++  getAgentDir,
++  hasTrustRequiringProjectResources,
++} from "./host-compat.js";
+ import { isAbsolute, join, normalize } from "node:path";
+ import {
+   assertNotKnownBrowserUserDataPath,
+@@ -386,7 +391,10 @@ function isProjectConfigTrusted(cwd: string, agentDir: string, projectConfigExis
+   if (cliOverride !== undefined) return cliOverride;
+   if (!projectConfigExists && !hasTrustRequiringProjectResources(trustCwd)) return true;
+   try {
+-    const trustStore = new ProjectTrustStore(agentDir);
++    const trustStore = createProjectTrustStore(agentDir);
++    // A host with no project-trust model has no opinion to honour, so keep the
++    // historical "project config loads" behaviour instead of failing closed.
++    if (!trustStore) return true;
+     const trustDecision = trustStore.get(trustCwd);
+     const rootDecision = trustCwd !== cwd ? trustStore.get(cwd) : null;
+     if (trustDecision !== null) return trustDecision;
+diff --git a/extensions/oracle/lib/host-compat.ts b/extensions/oracle/lib/host-compat.ts
+new file mode 100644
+index 0000000..b4770d8
+--- /dev/null
++++ b/extensions/oracle/lib/host-compat.ts
+@@ -0,0 +1,190 @@
++// Purpose: Isolate every optional host capability behind one feature-detecting module.
++// Responsibilities: Resolve the project config dir name, project-trust primitives, host mode, and theme usability without assuming a specific host build exports them.
++// Scope: Host capability probing only; oracle policy and filesystem behaviour stay in the modules that call these helpers.
++// Usage: Imported by lib/config.ts, lib/runtime.ts, lib/poller.ts, and index.ts instead of importing optional symbols directly.
++// Invariants/Assumptions: When the host exports a capability its value always wins, so behaviour on the reference pi build is byte-for-byte unchanged; fallbacks only run on hosts that omit the export.
++//
++// Why this module exists
++// ----------------------
++// `@earendil-works/pi-coding-agent` is a peer whose concrete implementation is
++// supplied by whichever host loads the extension. Hosts in the wild do not all
++// export the same surface: some export `CONFIG_DIR_NAME`, `ProjectTrustStore`
++// and `hasTrustRequiringProjectResources`, and some do not. Importing those
++// names directly makes the extension fail during module evaluation on a host
++// that omits them — as a bare `undefined` reaching `join()`, which is reported
++// far from its cause and, on hosts that swallow extension load errors, is not
++// reported at all.
++//
++// Every helper below therefore prefers the host's own value and only falls back
++// when the host does not provide one.
++
++import { homedir } from "node:os";
++import { isAbsolute, relative, sep } from "node:path";
++import * as host from "@earendil-works/pi-coding-agent";
++
++/**
++ * Last-resort project config dir name: the reference pi build's value.
++ * Only reachable on a host that exports neither `CONFIG_DIR_NAME` nor a usable
++ * `getAgentDir()`, which no known host does.
++ */
++const FALLBACK_CONFIG_DIR_NAME = ".pi";
++
++type OptionalHostSurface = {
++  CONFIG_DIR_NAME?: unknown;
++  getAgentDir?: unknown;
++  ProjectTrustStore?: unknown;
++  hasTrustRequiringProjectResources?: unknown;
++};
++
++const optionalHost = host as OptionalHostSurface;
++
++/**
++ * Read the host's default agent dir with any `*_CODING_AGENT_DIR` override
++ * neutralised.
++ *
++ * Hosts derive the default agent dir as `join(homedir(), CONFIG_DIR_NAME)` but
++ * let an environment variable relocate it. Only the *un*relocated value tells us
++ * the project-relative config dir name, so the override is removed for the
++ * duration of the call and restored in `finally`. This runs once, at module
++ * load, and only on hosts that do not export `CONFIG_DIR_NAME`.
++ */
++function defaultAgentDirIgnoringEnvOverride(): string | undefined {
++  const getAgentDir = optionalHost.getAgentDir;
++  if (typeof getAgentDir !== "function") return undefined;
++  const saved = new Map<string, string>();
++  for (const key of Object.keys(process.env)) {
++    if (/_CODING_AGENT_DIR$/.test(key)) {
++      const value = process.env[key];
++      if (value !== undefined) saved.set(key, value);
++      delete process.env[key];
++    }
++  }
++  try {
++    const resolved = (getAgentDir as () => string)();
++    return typeof resolved === "string" && resolved ? resolved : undefined;
++  } catch {
++    return undefined;
++  } finally {
++    for (const [key, value] of saved) process.env[key] = value;
++  }
++}
++
++function resolveConfigDirName(): string {
++  const declared = optionalHost.CONFIG_DIR_NAME;
++  if (typeof declared === "string" && declared.trim()) return declared;
++
++  const agentDir = defaultAgentDirIgnoringEnvOverride();
++  if (agentDir) {
++    const relativeToHome = relative(homedir(), agentDir);
++    if (
++      relativeToHome &&
++      !isAbsolute(relativeToHome) &&
++      !relativeToHome.split(sep).includes("..")
++    ) {
++      return relativeToHome.split(sep).join("/");
++    }
++  }
++  return FALLBACK_CONFIG_DIR_NAME;
++}
++
++/**
++ * The project-relative agent config dir name, e.g. `.pi` on the reference build.
++ *
++ * Resolved once at module load: the host's exported value when it has one,
++ * otherwise derived from the host's own default agent dir.
++ */
++export const CONFIG_DIR_NAME: string = resolveConfigDirName();
++
++/** The host's agent dir, honouring any environment override. */
++export function getAgentDir(): string {
++  const fn = optionalHost.getAgentDir;
++  if (typeof fn !== "function") {
++    throw new Error(
++      "Oracle requires the host to export getAgentDir() from @earendil-works/pi-coding-agent.",
++    );
++  }
++  return (fn as () => string)();
++}
++
++/**
++ * Whether the project contains resources whose use requires an explicit trust
++ * decision. Hosts without a project-trust model report `false`, which keeps the
++ * caller on its historical "load project config" path.
++ */
++export function hasTrustRequiringProjectResources(cwd: string): boolean {
++  const fn = optionalHost.hasTrustRequiringProjectResources;
++  if (typeof fn !== "function") return false;
++  return Boolean((fn as (cwd: string) => boolean)(cwd));
++}
++
++export interface OracleProjectTrustStore {
++  get(cwd: string): boolean | null;
++}
++
++/**
++ * The host's saved project-trust decisions, or `undefined` on a host with no
++ * project-trust model. Callers treat `undefined` as "the host has no opinion".
++ */
++export function createProjectTrustStore(agentDir: string): OracleProjectTrustStore | undefined {
++  const Ctor = optionalHost.ProjectTrustStore;
++  if (typeof Ctor !== "function") return undefined;
++  return new (Ctor as new (agentDir: string) => OracleProjectTrustStore)(agentDir);
++}
++
++// ---------------------------------------------------------------------------
++// Host run mode and UI capability
++// ---------------------------------------------------------------------------
++
++/** The host's declared run mode, or `undefined` on a host that does not expose one. */
++export function hostMode(ctx: { mode?: unknown }): string | undefined {
++  return typeof ctx.mode === "string" ? ctx.mode : undefined;
++}
++
++/**
++ * Whether this context can actually render themed status text.
++ *
++ * `ctx.hasUI` alone is not sufficient: a host may report `hasUI === true` in a
++ * non-interactive run while its theme is uninitialised, so that touching
++ * `ctx.ui.theme` throws. Because the oracle status refresh runs from an async
++ * lifecycle callback, that throw surfaces as an unhandled rejection and can take
++ * the host's session process down. Probing is the only reliable signal.
++ */
++export function canRenderThemedUi(ctx: { hasUI?: unknown; ui?: unknown }): boolean {
++  if (ctx.hasUI !== true) return false;
++  try {
++    const theme = (ctx.ui as { theme?: { fg?: unknown } } | undefined)?.theme;
++    if (!theme || typeof theme.fg !== "function") return false;
++    (theme.fg as (color: string, text: string) => string)("accent", "");
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++/**
++ * Whether the poller should stay stopped for this context.
++ *
++ * On a host that declares its mode the historical rule is preserved exactly:
++ * only `print` and `json` suppress the poller. On a host that declares no mode,
++ * a context that cannot render themed UI is treated as non-interactive.
++ */
++export function isNonInteractiveHost(ctx: { mode?: unknown; hasUI?: unknown; ui?: unknown }): boolean {
++  const mode = hostMode(ctx);
++  if (mode !== undefined) return mode === "print" || mode === "json";
++  return !canRenderThemedUi(ctx);
++}
++
++/**
++ * Whether this context should receive the oracle prompt templates through
++ * `resources_discover`.
++ *
++ * The TUI path intercepts `/oracle` in the `input` handler and injects hidden
++ * dispatch instructions, so prompt templates are contributed only where that
++ * interception does not run. A host that declares no mode never takes the TUI
++ * interception branch, so it must receive the templates.
++ */
++export function needsPromptTemplateFallback(ctx: { mode?: unknown }): boolean {
++  const mode = hostMode(ctx);
++  if (mode === undefined) return true;
++  return ["print", "json", "rpc"].includes(mode);
++}
+diff --git a/extensions/oracle/lib/poller.ts b/extensions/oracle/lib/poller.ts
+index 158c0f6..5db96f6 100644
+--- a/extensions/oracle/lib/poller.ts
++++ b/extensions/oracle/lib/poller.ts
+@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
+ import { buildOracleStatusText, buildOracleWakeupNotificationContent, type OracleReadinessStatus } from "../shared/job-observability-helpers.mjs";
+ import { isProcessAlive, readProcessStartedAt } from "../shared/process-helpers.mjs";
+ import { parseTimestamp } from "../shared/time-helpers.mjs";
++import { canRenderThemedUi } from "./host-compat.js";
+ import { isLockTimeoutError, listLeaseMetadata, releaseLease, withGlobalReconcileLock, writeLeaseMetadata } from "./locks.js";
+ import {
+   getJobDir,
+@@ -139,7 +140,9 @@ function snapshotPollerContext(ctx: ExtensionContext): OraclePollerContextSnapsh
+   return {
+     cwd: ctx.cwd,
+     sessionFile: getSessionFile(ctx),
+-    hasUI: ctx.hasUI,
++    // Not ctx.hasUI: a host can report hasUI === true while its theme is
++    // uninitialised, and this snapshot is consumed by themed status writes.
++    hasUI: canRenderThemedUi(ctx),
+     ui: ctx.ui,
+   };
+ }
+diff --git a/extensions/oracle/lib/runtime.ts b/extensions/oracle/lib/runtime.ts
+index 00d7145..a7d5f20 100644
+--- a/extensions/oracle/lib/runtime.ts
++++ b/extensions/oracle/lib/runtime.ts
+@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
+ import { constants as fsConstants, existsSync, realpathSync, readFileSync } from "node:fs";
+ import { access, cp as copyDirectory, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+ import { delimiter, dirname, join } from "node:path";
+-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
++import { CONFIG_DIR_NAME } from "./host-compat.js";
+ import { assertNotKnownBrowserUserDataPath, sweetCookieSafeStoragePasswordScrubbedEnv } from "../shared/browser-profile-helpers.mjs";
+ import { jobBlocksAdmission } from "../shared/job-coordination-helpers.mjs";
+ import { isTrackedProcessAlive } from "../shared/process-helpers.mjs";

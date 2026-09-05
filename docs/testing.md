@@ -1,155 +1,132 @@
 # Command Governor conformance strategy
 
-This document defines the **current** test contract for the composition-first Prime/Pi product described by ADRs 0008–0010.
+This document defines the **current** test contract for the composition-first
+Prime product described by ADRs 0008–0010 and proven by
+[`research/2026-09-04-zero-custom-code-proof.md`](research/2026-09-04-zero-custom-code-proof.md).
 
-It replaces the pre-pivot standalone-Rust V1 acceptance catalog. Historical Rust behavior remains available in Git history and in `docs/research/2026-09-01-rust-invariant-catalog.md`; it is not an instruction to rebuild or keep a second control plane.
+Command Governor ships no custom production runtime code. Every test
+therefore asserts behaviour of something Command Governor does not implement:
+the pinned Prime Agent, the packages it selects, and the manifest that binds
+them. A test that can only be made to pass by writing Command Governor code
+is a finding against the architecture, not a reason to write the code.
 
-## What tests are for
+## What a test is for
 
 A Command Governor test must protect one of two things:
 
-1. a product invariant that must remain true regardless of implementation owner; or
-2. a narrowly identified `TEMP WORKAROUND` that still exists because a reproduced upstream defect affects the actual product path.
-
-A test does **not** justify retaining the component it tests.
+1. a product invariant (ADR 0008 §4) as observed through a surface a user
+   actually runs: the stock `prime-agent` clients, the pinned daemon, the
+   installed packages, the committed manifest; or
+2. a distribution fact: the pin is exactly what the release published, the
+   manifest is internally consistent, one component owns each concern, and
+   every admitted package registers on the pinned Prime.
 
 Before adding or keeping a test, answer:
 
-- Which product invariant or temporary workaround does it protect?
-- Is the assertion observable at the smallest useful product/package boundary?
-- Is another test already proving the same property at a stronger boundary?
-- If it protects a temporary workaround, what condition deletes both the workaround and this test?
+- Which product invariant or distribution fact does it protect?
+- Is the assertion observable at the smallest useful product boundary
+  (stock client, daemon socket, transcript on disk, effect on disk)?
+- Can the measurement come back negative? A suite proves this with a
+  negative control next to each safety assertion (the D2 counter must see
+  a deliberate duplicate).
+- Does it encode an upstream defect as a permanent expectation? It must not.
+  Upstream defects are recorded under `docs/upstream/`; a test asserts the
+  product invariant that holds despite the defect, so an upstream fix
+  changes nothing.
 
-Do not preserve an implementation-specific race matrix merely because it is thorough when the implementation itself is being retired.
+Do not add a test whose purpose is to prove a Command Governor subsystem
+works. There are none.
 
-## Test levels
+## Tiers
 
-### 1. Distribution and policy checks
+### Tier 1 — distribution and policy (`conformance/tier1`)
 
-Credential-free checks for facts Command Governor owns directly:
+Credential-free, seconds, run in parallel:
 
-- exact Prime release/component pin and integrity metadata;
-- dependency/package authority metadata;
-- one owner per concern;
-- `USE EXISTING` / `PLUGIN` / `TEMP WORKAROUND` classification for assigned concerns;
-- required removal condition for every `TEMP WORKAROUND`;
-- role/schema and repository-policy validity;
-- TypeScript typechecking.
+- **PIN-001** `pins/pins.json` agrees with `pins/SHA256SUMS` (sha256 per
+  asset), with the install-root lockfile (sha512 integrity per sibling, the
+  wrapper resolved from `vendor/`), and with the installed binary
+  (`prime-agent --version`, sibling versions). No upstream Pi co-install.
+- **PKG-001** every entry in `packages[]` is an exact npm version or a
+  40-character commit, with a `sha512-` integrity, license, review date and
+  exactly one owned concern; no two entries own the same concern. The rules run over
+  fabricated violating records first so they are shown able to fail.
+- **OWN-001** one owner per concern in the manifest; unassigned concerns
+  are named, not implied.
+- **JSON-001** every committed JSON document parses.
+- Typecheck of the conformance sources themselves.
 
-These checks should be small and deterministic.
+### Tier 1 runtime — black-box pinned Prime (`conformance/runtime`)
 
-### 2. Temporary-workaround unit checks
+Each file starts its own isolated Prime supervisor under `/tmp/cg-XXXXXX`
+(own HOME, agent directory, session directory, socket, scripted mock model)
+and drives it only through stock clients: the interactive TUI on a pty,
+`prime-agent -r`, `prime-agent list --json`, `--mode rpc`, `-p`,
+`--mode json`. The files run sequentially because they kill supervisors and
+workers on purpose, and every file ends by sweeping its own process tree
+(from recorded pids and Prime's worker descriptors; `ps` cannot see
+`prime-agent` by command line) and failing on survivors.
 
-Unit tests are allowed for a compatibility shim only while that shim is necessary.
+- **HELLO-001** the live `daemon_hello` reports the protocol name, version
+  and schema revision recorded in the manifest.
+- **D1-001** after SIGKILL of a resident worker (the supervisor's own
+  relaunch behaviour is recorded, not asserted), `prime-agent -r <sessionFile>` reopens it
+  with the same `sessionId` and `sessionFile`, a new `activeSessionId`, and
+  exactly one live row; the transcript only grew and carries exactly one
+  `prime-agent.worker_recovery` entry.
+- **D1-002** two simultaneous `prime-agent -r <same file>` clients converge
+  on one worker and one record.
+- **D1-003** SIGKILL of the supervisor under a live worker yields a
+  replacement supervisor on the same socket serving the same
+  `activeSessionId` and worker pid.
+- **D2-001** a model tool call appends one line and sleeps; the worker is
+  SIGKILLed after the line is on disk; after reopen the file holds exactly
+  one line, the model was asked exactly once, exactly one tool call was
+  issued, and the recovery marker names `tool_execution_start` and says the
+  work was not replayed.
+- **D2-002** negative control: the same prompt sent twice produces two
+  lines.
+- **D2-003** a stock `--mode rpc` `{"type":"bash"}` whose worker dies after
+  the effect yields exactly one failure response and the effect exactly
+  once; Prime never re-issues it.
+- **D8-001** TUI, `-p`, `--mode json` and `--mode rpc` each leave exactly one
+  `<sessionDir>/*.jsonl` containing the turn; `--no-session` leaves none;
+  `list --json` names a `sessionFile` that exists; after SIGKILL of worker
+  and supervisor `-r` reopens with unchanged `sessionId` and `sessionFile`.
+- **LOAD-001** the Command Governor package and every `packages[]` entry
+  register their tools, commands or skills on the pinned Prime, observed
+  positively (the mock model's `tools` array, the skill roster or a
+  registered command), with a deliberately broken extension as the negative
+  control, because extension load failures are silent in headless modes.
+  The role files under `harness/agents/` are installed into the fixture
+  project's `.pi/agents/` and observed through the delegation package
+  itself, which is what reads them.
+- **GATE-001** Prime's `--autonomous --autonomous-gate "<cmd>"` is a
+  host-owned gate: with an identical scripted model, a run does not finish
+  while the gate command fails, and finishes once the test (not the model)
+  makes it pass. This is the mechanism the acceptance rule relies on.
+- **CLEAN-001** every file ends with zero processes referencing its
+  fixture root.
 
-The current D1/D2 adaptation code is transitional under ADR 0010. Its unit coverage should prove the minimum fail-closed contract, not every internal storage interleaving:
+### Not in the merge gate
 
-- mutation classification is structural and defaults to `UNCERTAIN` when proof is absent;
-- reviewed pre-effect rejection can be classified as effect-absent;
-- the stable client/journal identity cannot silently change;
-- identity/command mismatch refuses before daemon I/O;
-- a lost Governor process cannot turn an unproven mutation into safe replay.
-
-The black-box runtime tests below are the stronger authority. When the package-path D1/D2 reproducer passes without the custom adaptation, delete the workaround and its unit tests together.
-
-### 3. Black-box pinned-Prime conformance
-
-These are the highest-value current tests. They exercise the public pinned Prime runtime in isolated state roots rather than re-proving our implementation details.
-
-Current merge-gating cases:
-
-#### PIN-001 — exact substrate pin
-
-Bootstrap verifies the selected Prime release/assets against committed immutable integrity metadata and refuses a mismatched runtime before commands are sent.
-
-#### OWN-001 — one owner per concern
-
-`harness/authorities.json` has exactly one owner for every assigned concern. Existing substrate/package ownership is preferred over custom Governor ownership. Every temporary workaround names its removal condition.
-
-#### ENV-001 — positive environment boundary
-
-A variable crosses the Governor-to-Prime boundary only when explicitly allowed. Secret-shaped and ordinary-name negative sentinels remain absent; granted controls cross.
-
-#### D1-001 — resident-root recovery
-
-Kill a resident root and recover the same logical Prime session exactly once. The stable logical `sessionId` survives while the active incarnation changes.
-
-#### D1-002 — stale incarnation/cursor rejection
-
-A cursor/incarnation captured before recovery cannot mutate or resume the replacement incarnation as though it were current.
-
-#### D2-001 — worker-loss ambiguity does not duplicate an effect
-
-Cause a worker to die after an observable mutation but before a trustworthy result reaches the client. Command Governor must surface uncertainty/reconciliation and must not automatically repeat the external effect.
-
-#### D2-002 — post-effect typed failure stays fail-closed
-
-Exercise the pinned `import_jsonl` ordering where a filesystem effect occurs before `missing_session_cwd`. The outcome cannot be called effect-absent merely because the error is typed. A reviewed pre-effect rejection remains the positive control.
-
-#### D8-001 — explicit persistent session path
-
-Every Governor-created session uses an explicit canonical persistent session path; omission is refused. Reopen/resume remains on the same transcript identity.
-
-#### S1-001 — supervisor-loss uncertainty
-
-Loss of the supervisor/transport cannot turn an unproven mutation into a safe replay.
-
-#### S1-002 — completed-command idempotence
-
-Repeating an already completed command identity returns the stored result rather than performing the effect again.
-
-#### S1-003 — process-safe session lease
-
-Concurrent ownership of the same persistent Prime session converges to one authoritative writer/owner.
-
-#### CLEAN-001 — no fixture process leakage
-
-Every conformance run ends with zero Prime processes referencing its disposable fixture roots.
+Scenarios that need a real model provider, a logged-in ChatGPT browser
+profile, or a package that does not yet load on the pinned Prime are
+recorded as pending in the proof document with the exact user steps or
+upstream change they wait on. They are not stubbed into the suite.
 
 ## Falsifying controls
 
-A negative/falsifying control is useful when it proves that an important safety assertion would fail under a plausible broken policy. It is **not** mandatory for every helper or every discovered review bug.
-
-Prefer one strong negative control at the product boundary over many tests that encode the history of how an internal implementation was repaired.
+A negative control is required next to every assertion whose passing could
+be explained by a blind measurement: the effect counter, the load probe, the
+pin comparison. Prefer one strong control at the product boundary over many
+tests that re-encode the history of a repaired internal.
 
 ## No duplicate test universes
 
-Do not maintain parallel permanent suites solely because an old architecture once existed.
-
-The Phase-1 Rust daemon/SQLite/testkit workspace has been retired from the active tree and CI. Its historical invariant catalog remains research/provenance. If a future Prime/package implementation needs one of those semantics, prove the semantic requirement against the current product path; do not restore the old runtime merely to reuse its tests.
-
-Likewise, deterministic and multi-process versions of the same internal race are not both permanent by default. Keep both only when the component is a demonstrated permanent Command Governor owner and the two tests protect materially different failure modes that cannot be covered at the stronger boundary.
-
-## Adding future features
-
-Do not pre-build test catalogs for speculative components.
-
-When a package or Command-Governor-specific plugin is actually selected, add the smallest acceptance matrix that proves its product contract. Examples include:
-
-- independent candidate acceptance / implementer cannot self-approve;
-- durable task/evidence gates;
-- exact ChatGPT conversation correlation and stale-revision rejection;
-- user-owned decision routing;
-- optional memory downstream-action quality;
-- ACP interoperability when ACP becomes part of a shipped path.
-
-Package bake-offs may have temporary experimental tests that do not become permanent merge gates unless the package is adopted.
-
-## CI
-
-`./scripts/bootstrap.sh` installs and verifies the pinned Prime substrate in isolated repository state.
-
-`./scripts/conformance.sh` then runs:
-
-1. strict TypeScript typecheck;
-2. small credential-free Tier-1 policy/workaround tests;
-3. isolated real-Prime runtime conformance sequentially;
-4. a final process sweep.
-
-GitHub Actions runs the same harness on macOS and Linux. A local pass is evidence; the merge gate is CI.
-
-## Review rule
-
-A reviewer must ask **"should this test and the component it protects still exist?"** before asking whether the assertion is correct.
-
-Deleting obsolete tests is required when their owning subsystem is deleted or replaced by stronger package-level evidence.
+The standalone Rust workspace and the external raw-daemon-client adaptation
+layer are gone from the tree; their tests went with them. Historical
+invariants remain in `docs/research/2026-09-01-rust-invariant-catalog.md`
+and Git history. If a future change needs one of those semantics, prove the
+requirement against the current product path with a black-box test; do not
+restore the old implementation to reuse its tests.

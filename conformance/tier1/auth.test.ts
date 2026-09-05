@@ -2,9 +2,25 @@
  * AUTH — one authority per concern, and an explicit architecture disposition
  * for every assigned concern.
  *
- * This test deliberately does NOT freeze temporary workaround ownership to a
- * specific governor/* path. A package/upstream implementation replacing a
- * workaround is success, not a regression.
+ * The record lives in `pins/pins.json` `concerns[]`, next to the packages and
+ * the substrate it assigns ownership to, so "who owns this?" and "what exact
+ * version is that?" cannot drift apart.
+ *
+ * This test deliberately does NOT name individual concerns or freeze who owns
+ * them. Ownership is exactly what the composition-first architecture keeps
+ * moving: a concern that Prime, a package or upstream takes over is success,
+ * not a regression, and a test that hardcodes today's owner turns that success
+ * into a red build. What must not move is the shape of the record — every
+ * assigned concern has one owner that really exists, one disposition, and a
+ * stated removal condition if it is temporary — so that is what is asserted,
+ * over whatever the manifest currently says.
+ *
+ * An owner is "real" in exactly three forms, and each is checked against
+ * something outside the concern record itself:
+ *   - `prime-agent`, the pinned substrate (`substrate.name`);
+ *   - a `packages[]` source string, so an owner cannot name a package the
+ *     distribution does not pin;
+ *   - a path in this repository.
  */
 
 import assert from "node:assert/strict";
@@ -12,112 +28,87 @@ import { describe, it } from "node:test";
 import { join } from "node:path";
 
 import { checkAuthorities, checkPackageSet } from "../lib/policy.ts";
-import { AUTHORITIES_JSON, exists, readJson, readPins, REPO_ROOT } from "../lib/repo.ts";
+import { exists, readPins, REPO_ROOT } from "../lib/repo.ts";
 
-interface Concern {
-	concern: string;
-	status: "assigned" | "unassigned";
-	disposition?: "USE EXISTING" | "PLUGIN" | "TEMP WORKAROUND";
-	owner?: string;
-	removalCondition?: string;
-	plannedOwner?: string;
-	phase?: string;
-	note?: string;
+const pins = readPins();
+const concerns = pins.concerns;
+const packageSources = new Set(pins.packages.map((entry) => String(entry.source)));
+
+/** Is this owner string something that actually exists outside the record? */
+function ownerExists(owner: string): boolean {
+	if (owner === pins.substrate.name) return true;
+	if (packageSources.has(owner)) return true;
+	return exists(join(REPO_ROOT, owner));
 }
 
-interface Authorities {
-	schemaVersion: number;
-	concerns: Concern[];
-}
-
-const authorities = readJson(AUTHORITIES_JSON) as Authorities;
-const ownerExists = (owner: string) => exists(join(REPO_ROOT, owner));
-
-describe("AUTH: harness/authorities.json", () => {
+describe("AUTH: pins.json concerns[]", () => {
 	it("the checker fails on fabricated ownership and disposition violations", () => {
-		assert.ok(checkAuthorities({ concerns: { a: 1 } }, ownerExists).length > 0);
-		assert.ok(checkAuthorities({ concerns: [] }, ownerExists).length > 0);
+		assert.ok(checkAuthorities({ concerns: { a: 1 } }, ownerExists).length > 0, "a non-array concerns must be rejected");
+		assert.ok(checkAuthorities({ concerns: [] }, ownerExists).length > 0, "an empty concerns list must be rejected");
 
-		const duplicate = { concerns: [
-			{ concern: "x", status: "assigned", disposition: "PLUGIN", owner: "governor", note: "n" },
-			{ concern: "x", status: "assigned", disposition: "PLUGIN", owner: "governor", note: "n" },
-		] };
-		assert.ok(checkAuthorities(duplicate, ownerExists).some((e) => /2 owners/.test(e)));
+		const duplicate = {
+			concerns: [
+				{ concern: "x", status: "assigned", disposition: "PLUGIN", owner: "conformance", note: "n" },
+				{ concern: "x", status: "assigned", disposition: "PLUGIN", owner: "conformance", note: "n" },
+			],
+		};
+		assert.ok(checkAuthorities(duplicate, ownerExists).some((error) => /2 owners/.test(error)));
 
 		const ghost = { concerns: [{ concern: "x", status: "assigned", disposition: "PLUGIN", owner: "does/not/exist", note: "n" }] };
-		assert.ok(checkAuthorities(ghost, ownerExists).some((e) => /does not exist/.test(e)));
+		assert.ok(checkAuthorities(ghost, ownerExists).some((error) => /does not exist/.test(error)));
 
-		const noDisposition = { concerns: [{ concern: "x", status: "assigned", owner: "governor", note: "n" }] };
-		assert.ok(checkAuthorities(noDisposition, ownerExists).some((e) => /needs disposition/.test(e)));
+		const unpinnedPackage = { concerns: [{ concern: "x", status: "assigned", disposition: "USE EXISTING", owner: "npm:not-pinned@1.0.0", note: "n" }] };
+		assert.ok(
+			checkAuthorities(unpinnedPackage, ownerExists).some((error) => /does not exist/.test(error)),
+			"an owner may not name a package the distribution does not pin",
+		);
 
-		const immortalWorkaround = { concerns: [{ concern: "x", status: "assigned", disposition: "TEMP WORKAROUND", owner: "governor", note: "n" }] };
-		assert.ok(checkAuthorities(immortalWorkaround, ownerExists).some((e) => /removalCondition/.test(e)));
+		const noDisposition = { concerns: [{ concern: "x", status: "assigned", owner: "conformance", note: "n" }] };
+		assert.ok(checkAuthorities(noDisposition, ownerExists).some((error) => /needs disposition/.test(error)));
+
+		const immortalWorkaround = { concerns: [{ concern: "x", status: "assigned", disposition: "TEMP WORKAROUND", owner: "conformance", note: "n" }] };
+		assert.ok(checkAuthorities(immortalWorkaround, ownerExists).some((error) => /removalCondition/.test(error)));
 
 		const adoptable = { concerns: [{ concern: "x", status: "unassigned", note: "n" }] };
-		assert.ok(checkAuthorities(adoptable, ownerExists).some((e) => /planned owner/.test(e)));
+		assert.ok(checkAuthorities(adoptable, ownerExists).some((error) => /planned owner/.test(error)));
+
+		assert.deepEqual(
+			checkAuthorities({ concerns: [{ concern: "x", status: "assigned", disposition: "USE EXISTING", owner: "prime-agent", note: "n" }] }, ownerExists),
+			[],
+			"a well-formed record must pass, or the checker only ever says no",
+		);
 	});
 
-	it("the real file passes the ownership/disposition policy", () => {
-		assert.deepEqual(checkAuthorities(authorities, ownerExists), []);
-		assert.equal(authorities.schemaVersion, 3);
+	it("the real record passes the ownership/disposition policy", () => {
+		assert.deepEqual(checkAuthorities({ concerns }, ownerExists), []);
+		assert.ok(concerns.length > 0, "pins.json declares no concerns");
 	});
 
-	it("Prime owns generic runtime/session concerns; custom D1/D2 owners are explicitly temporary", () => {
-		const byName = new Map(authorities.concerns.map((c) => [c.concern, c]));
-
-		for (const concern of ["runtime-substrate", "session-persistence"]) {
-			const entry = byName.get(concern);
-			assert.equal(entry?.status, "assigned", concern);
-			assert.equal(entry?.disposition, "USE EXISTING", concern);
-			assert.equal(entry?.owner, "pins/prime-0.8.1", concern);
-		}
-
-		for (const concern of [
-			"session-path-policy",
-			"session-identity-and-incarnations",
-			"resident-root-recovery",
-			"mutation-outcome-classification",
-			"mutation-ledger",
-		]) {
-			const entry = byName.get(concern);
-			assert.equal(entry?.status, "assigned", concern);
-			assert.equal(entry?.disposition, "TEMP WORKAROUND", concern);
-			assert.ok(entry?.removalCondition && entry.removalCondition.length > 20, `${concern} needs a real deletion gate`);
-		}
-
-		for (const concern of ["substrate-version-gate", "environment-boundary", "agent-role-definitions", "conformance-suite"]) {
-			assert.equal(byName.get(concern)?.disposition, "PLUGIN", concern);
+	it("every assigned owner is the pinned substrate, a pinned package, or a path in this repository", () => {
+		for (const entry of concerns) {
+			if (entry.status !== "assigned") continue;
+			const owner = String(entry.owner);
+			assert.ok(ownerExists(owner), `${String(entry.concern)}: owner ${owner} is neither the substrate, a pinned package, nor a repository path`);
+			if (entry.disposition === "TEMP WORKAROUND") {
+				assert.ok(
+					typeof entry.removalCondition === "string" && entry.removalCondition.length > 20,
+					`${String(entry.concern)}: a TEMP WORKAROUND needs a real deletion gate, not a placeholder`,
+				);
+			}
 		}
 	});
 
-	it("future generic capabilities remain unassigned until their bake-off proves an owner", () => {
-		const byName = new Map(authorities.concerns.map((c) => [c.concern, c]));
-		for (const concern of [
-			"role-loadout-enforcement",
-			"foreman-transport",
-			"foreman-event-ledger",
-			"compaction-summary",
-			"observational-memory",
-			"tool-gating-and-veto",
-			"acp-boundary",
-			"sandbox-profile",
-		]) {
-			assert.equal(byName.get(concern)?.status, "unassigned", concern);
+	it("an unassigned concern cannot be adopted by accident", () => {
+		for (const entry of concerns) {
+			if (entry.status !== "unassigned") continue;
+			assert.ok(typeof entry.plannedOwner === "string" && entry.plannedOwner.length > 0, `${String(entry.concern)}: needs a planned owner`);
+			assert.ok(typeof entry.phase === "string" && entry.phase.length > 0, `${String(entry.concern)}: needs the phase that decides it`);
+			assert.equal(entry.owner, undefined, `${String(entry.concern)}: unassigned but already names an owner`);
 		}
 	});
 
-	it("third-party package policy fails closed on mutable/unowned package entries", () => {
-		const known = new Set(authorities.concerns.map((c) => c.concern));
-		assert.deepEqual(checkPackageSet(readPins().packages as never, known), []);
-		const errors = checkPackageSet([{ source: "some-pkg", exactVersion: "main", authority: "nope" }] as never, known);
-		assert.ok(errors.some((e) => /not a pin/.test(e)));
-		assert.ok(errors.some((e) => /not a concern/.test(e)));
-		assert.ok(errors.some((e) => /license/.test(e)));
-
-		const twice = checkPackageSet([
-			{ source: "a", exactVersion: "1.0.0", authority: "conformance-suite", license: "MIT", reviewedAt: "2026-09-01" },
-			{ source: "b", exactVersion: "1.0.0", authority: "conformance-suite", license: "MIT", reviewedAt: "2026-09-01" },
-		] as never, known);
-		assert.ok(twice.some((e) => /claimed by a and b/.test(e)));
+	it("every pinned package claims a concern this record declares, and no two claim the same one", () => {
+		const known = new Set(concerns.map((entry) => String(entry.concern)));
+		assert.deepEqual(checkPackageSet(pins.packages, known), []);
 	});
 });
