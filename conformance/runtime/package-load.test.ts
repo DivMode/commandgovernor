@@ -68,7 +68,7 @@ import { assertCleanTeardown } from "../lib/teardown.ts";
  * Every entry in `pins.json` `packages[]` must appear here, so admitting a
  * package without measuring what it registers fails this file.
  */
-const EXPECTED: Record<string, { tools: string[]; commands: string[]; note?: string }> = {
+const EXPECTED: Record<string, { tools: string[]; commands: string[]; providers?: string[]; note?: string }> = {
 	"npm:pi-tasks@0.2.5": {
 		tools: ["task_plan", "task_evidence", "task_complete"],
 		commands: ["tasks"],
@@ -86,6 +86,12 @@ const EXPECTED: Record<string, { tools: string[]; commands: string[]; note?: str
 		tools: ["gpt_account_status", "gpt_list_models", "gpt_chat", "gpt_list_chats", "gpt_get_conversation", "gpt_get_message"],
 		commands: ["gpt-observer"],
 		note: "The foreman transport, vendored and patched by scripts/bootstrap.sh and installed by path. Its ChatGPT client is constructed lazily on first tool use, so registration needs no Codex login; the fixture has none. The observer extension registers only its command and is off by default.",
+	},
+	"./pins/packages/pi-claude-agent-sdk-0.8.6": {
+		tools: [],
+		commands: [],
+		providers: ["claude-bridge"],
+		note: "The Claude model provider (Claude Code as a Prime provider), vendored and patched by scripts/bootstrap.sh. It registers no tools and no commands; the only channel that can see it is the model catalogue, which is why get_available_models is asked below. Unpatched it does not load on Prime at all (measured), so an absent provider here means the patch stopped applying.",
 	},
 };
 
@@ -135,6 +141,8 @@ let packageList = "";
 let probeStatus: number | null = null;
 let wireTools: string[] = [];
 let commands: CommandEntry[] = [];
+/** provider -> model ids, from `get_available_models` over the stock RPC client. */
+const availableModels = new Map<string, string[]>();
 let subagentTool: ToolDefinition | undefined;
 let installedRoleFiles: string[] = [];
 /** Each installed role file's own `description:` frontmatter line, by name. */
@@ -143,10 +151,10 @@ const roleDescriptions = new Map<string, string>();
 const pins = readPins();
 const specs = pins.packages.map((entry) => String(entry.source));
 /**
- * A vendored package (`./pins/packages/<name>`) is installed from a COPY under
- * the fixture, like the Command Governor package itself: `package install`
- * runs npm, and npm must not write into the checkout. The copy is what
- * `scripts/bootstrap.sh` extracted and patched, so a missing directory means
+ * A vendored package (`./pins/packages/<name>`) is installed by path, straight
+ * from the checkout: Prime adds a path package to settings without copying and
+ * runs no npm for it (its dependencies come from the committed lockfile at
+ * bootstrap), so nothing writes into the repository. A missing directory means
  * bootstrap did not run, not that the package is absent.
  */
 const vendoredDirs = new Map<string, string>();
@@ -154,10 +162,8 @@ function installSpecFor(spec: string): string {
 	if (!spec.startsWith("./")) return spec;
 	const source = join(REPO_ROOT, spec.slice(2));
 	assert.ok(existsSync(join(source, "package.json")), `${spec} is not extracted; run scripts/bootstrap.sh first`);
-	const target = join(fixture.root, `cg-vendor-${spec.split("/").pop()}`);
-	cpSync(source, target, { recursive: true });
-	vendoredDirs.set(spec, target);
-	return target;
+	vendoredDirs.set(spec, source);
+	return source;
 }
 
 /**
@@ -280,7 +286,22 @@ describe("LOAD: every pinned package registers on the pinned Prime", () => {
 			try {
 				await sleep(4000);
 				rpc.stdin?.write(`${JSON.stringify({ id: "cmds", type: "get_commands" })}\n`);
-				await waitUntil(() => (out.includes('"id":"cmds"') ? true : undefined), 180_000, 300, "the get_commands response");
+				rpc.stdin?.write(`${JSON.stringify({ id: "models", type: "get_available_models" })}\n`);
+				await waitUntil(() => (out.includes('"id":"cmds"') && out.includes('"id":"models"') ? true : undefined), 180_000, 300, "the get_commands and get_available_models responses");
+				for (const line of out.split("\n")) {
+					try {
+						const parsed = JSON.parse(line) as { id?: string; data?: { models?: { provider?: string; id?: string }[] } };
+						if (parsed.id !== "models") continue;
+						for (const model of parsed.data?.models ?? []) {
+							const list = availableModels.get(String(model.provider)) ?? [];
+							list.push(String(model.id));
+							availableModels.set(String(model.provider), list);
+						}
+					} catch {
+						/* not JSON */
+					}
+				}
+				fixture.note("available models by provider:", JSON.stringify([...availableModels.entries()].map(([provider, ids]) => `${provider}:${ids.length}`)));
 				const response = out
 					.split("\n")
 					.filter(Boolean)
@@ -356,6 +377,11 @@ describe("LOAD: every pinned package registers on the pinned Prime", () => {
 			for (const tool of expected.tools) {
 				assert.ok(wireTools.includes(tool), `${spec}: tool ${tool} is not on the wire: ${JSON.stringify(wireTools)}`);
 			}
+			for (const provider of expected.providers ?? []) {
+				const models = availableModels.get(provider) ?? [];
+				assert.ok(models.length > 0, `${spec}: provider ${provider} is not in \`get_available_models\`; providers seen: ${JSON.stringify([...availableModels.keys()])}`);
+			}
+			if (expected.commands.length === 0 && (expected.providers ?? []).length > 0) return;
 			const vendored = vendoredDirs.get(spec);
 			const mine = vendored ? commandsUnder(vendored) : commandsFrom(spec);
 			assert.ok(mine.length > 0, `${spec}: nothing in \`get_commands\` is attributed to it`);

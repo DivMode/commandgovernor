@@ -179,7 +179,17 @@ while [ "$i" -lt "$vendored_count" ]; do
 	for patch_rel in $patches; do
 		( cd "$dir" && patch -p1 --silent < "$repo_root/$patch_rel" ) || fail "patch $patch_rel does not apply to $tarball_rel"
 	done
-	printf 'bootstrap: vendored %s -> %s (%s patch(es))\n' "$tarball_rel" "$dir_rel" "$(printf '%s' "$patches" | wc -w | tr -d ' ')"
+	# Prime installs a package's npm dependencies only for registry and git
+	# specs; a path package is used in place. A vendored package with runtime
+	# dependencies therefore carries a committed lockfile, installed here with
+	# the same integrity discipline as the substrate.
+	lockfile_rel=$(printf '%s' "$entry" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).lockfile || ""')
+	if [ -n "$lockfile_rel" ]; then
+		[ -f "$repo_root/$lockfile_rel" ] || fail "vendored lockfile $lockfile_rel is missing"
+		cp "$repo_root/$lockfile_rel" "$dir/package-lock.json"
+		( cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 ) || fail "npm ci failed in $dir_rel (lockfile $lockfile_rel)"
+	fi
+	printf 'bootstrap: vendored %s -> %s (%s patch(es)%s)\n' "$tarball_rel" "$dir_rel" "$(printf '%s' "$patches" | wc -w | tr -d ' ')" "${lockfile_rel:+, dependencies from $lockfile_rel}"
 	i=$((i + 1))
 done
 

@@ -1,6 +1,7 @@
 /**
- * LIVE — ChatGPT Web through the pinned pi-gpt, inside a real Prime worker,
- * against the real account. OPT-IN; never a merge gate.
+ * LIVE — the user's subscriptions inside a real Prime worker: ChatGPT Web
+ * through the vendored pi-gpt, and Claude through the vendored pi-claude-agent-sdk
+ * (the real Claude Code binary on its own login). OPT-IN; never a merge gate.
  *
  * Everything else in this suite is credential-free and blind, by design, to
  * the one thing that will actually break this transport: the provider. pi-gpt
@@ -20,14 +21,21 @@
  * exact thread through `gpt_get_conversation`, which is the read the
  * cg-foreman skill relies on. No message is ever sent into that thread here.
  *
- * Both calls run inside the Prime worker, so what is measured is the product
- * path: package loaded by Prime, tool executed by Prime, token read from the
- * Codex login, result recorded in the session transcript.
+ * LIVE-004 asks Prime for a Claude model through `claude-bridge`: the bridge
+ * starts the real Claude Code binary with every inherited Anthropic variable
+ * stripped and no credential from Prime, so Claude Code uses its own login
+ * (the Max plan, plan-billed). That is the only Claude path this product uses;
+ * an API key is never configured. The fixture therefore keeps the user's real
+ * HOME for this file only, so the child can see that login.
+ *
+ * Everything runs inside the Prime worker, so what is measured is the product
+ * path: package loaded by Prime, tool or provider executed by Prime, result
+ * recorded in the session transcript or printed by the stock client.
  */
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
@@ -105,12 +113,22 @@ describe("LIVE: ChatGPT Web inside a Prime worker through the pinned pi-gpt", { 
 		// The fixture owns HOME; the Codex login is handed to every Prime process
 		// explicitly, which is also how a user would point pi-gpt at a login that
 		// is not under their HOME.
-		fixture = await startRoot({ label: "live-chatgpt", extraEnv: { CODEX_HOME: codexHome } });
+		// Real HOME and USER on purpose (see the header): Prime's own state still
+		// lives under the fixture (agent dir, sessions, socket). Claude Code finds
+		// its macOS Keychain login by HOME and USER, measured: with USER missing
+		// it reports "Not logged in" even when HOME is right.
+		fixture = await startRoot({ label: "live-subscriptions", extraEnv: { CODEX_HOME: codexHome, HOME: homedir(), USER: userInfo().username } });
 		project = join(fixture.root, "project");
 		mkdirSync(project, { recursive: true });
 		writeFileSync(join(project, "README.md"), "# live probe project\n");
 		const install = fixture.cli(["package", "install", "--local", source], { timeout: 600_000, cwd: project, withoutSocket: true });
 		assert.equal(install.status, 0, `${install.stdout}${install.stderr}`);
+		const bridge = readPins().packages.find((entry) => String(entry.source).includes("pi-claude-agent-sdk"));
+		assert.ok(bridge, "pi-claude-agent-sdk must be pinned");
+		const bridgeSource = join(REPO_ROOT, String(bridge.source).replace(/^\.\//, ""));
+		assert.ok(existsSync(join(bridgeSource, "node_modules")), `${String(bridge.source)} has no dependencies; run scripts/bootstrap.sh first`);
+		const bridgeInstall = fixture.cli(["package", "install", "--local", bridgeSource], { timeout: 600_000, cwd: project, withoutSocket: true });
+		assert.equal(bridgeInstall.status, 0, `${bridgeInstall.stdout}${bridgeInstall.stderr}`);
 	});
 
 	after(async () => {
@@ -141,5 +159,18 @@ describe("LIVE: ChatGPT Web inside a Prime worker through the pinned pi-gpt", { 
 		const details = entry.message?.details as { messages?: { id?: string; role?: string }[] } | undefined;
 		assert.ok((details?.messages?.length ?? 0) > 0, "the thread came back with no messages");
 		assert.ok(details?.messages?.every((message) => typeof message.id === "string" && message.id.length > 0), "messages must carry ids; correlation depends on them");
+	});
+
+	it("LIVE-004: a Claude model answers through claude-bridge on Claude Code's own login, with no credential in Prime", () => {
+		const authPath = join(fixture.agentDir, "auth.json");
+		const auth = existsSync(authPath) ? (JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>) : {};
+		assert.equal(auth.anthropic, undefined, "Prime must hold no Anthropic credential: the point is that Claude Code brings its own");
+		const token = `ZEBRA-${Date.now().toString(36).toUpperCase()}`;
+		const result = fixture.cli(
+			["-p", ...FLAGS, "--no-session", "--provider", "claude-bridge", "--model", "claude-haiku-4-5", `Reply with exactly the text ${token} and nothing else`],
+			{ timeout: 180_000, cwd: project },
+		);
+		assert.equal(result.status, 0, `prime-agent exited ${result.status}: ${result.stderr.slice(0, 500)}`);
+		assert.ok(result.stdout.includes(token), `Claude did not answer through the bridge: ${result.stdout.slice(0, 300)} ${result.stderr.slice(0, 300)}`);
 	});
 });

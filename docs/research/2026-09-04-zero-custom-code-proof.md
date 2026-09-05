@@ -373,7 +373,7 @@ The PR was retargeted onto `main` and finished on its branch.
 | Rust source + tests (`crates/`) | 49,142 (110 files) | 0 |
 | shell (`scripts/bootstrap.sh`, `scripts/conformance.sh`) | 251 | 276 |
 | harness configuration and prose (roles, skill, prompt, manifest, settings) | 495 | 398 |
-| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,433 in 10 test files (+10 lib); 87 tests, 15 suites, ~3 min; plus the opt-in live lane (3) |
+| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,490 in 10 test files (+10 lib); 91 tests, 15 suites, ~3 min; plus the opt-in live lane (4) |
 | tracked files | 238 | 91 |
 | Prime pin | 0.8.1 | 0.9.1 |
 | pinned packages | 0 | 3 |
@@ -393,16 +393,49 @@ Which external capability replaced each deleted subsystem:
 | authorities inventory | `pins/pins.json` `concerns[]`, checked by OWN-001 |
 | Rust oracle | `docs/research/2026-09-01-rust-invariant-catalog.md`, Git history, and the black-box suite for the semantics that survived |
 
+## 12b. Model providers on subscriptions only (2026-09-05)
+
+The user's rule: subscriptions only, never an API key, never more than the
+current plans. Prime's built-in Claude Pro/Max login fails that rule by
+Prime's own account ("Third-party harness usage draws from extra usage and is
+billed per token"); Anthropic enforced that on April 4 2026 and its Claude
+Code terms do not permit third-party OAuth. The plan-billed route is the one
+T3 Code uses: run the unmodified Claude Code binary and let it use its own
+login. In Pi that is `pi-claude-agent-sdk` (`claude-bridge`), which drives
+Claude Code through the Agent SDK with the harness's tools bridged in.
+
+Measured with Prime's own extension loader (`loadExtensions`, which the
+headless clients otherwise swallow): the package does not load on Prime.
+Three seams, all Pi-vs-Prime API differences: `@earendil-works/pi-ai/compat`
+(no such export on Prime; `getModels` is on pi-ai's main entry),
+`CONFIG_DIR_NAME` (Prime defines `.prime/agent` but does not export it), and
+`ModelRegistry.getProviderAuth` (Prime's resolver is `getApiKeyAndHeaders`).
+The committed patch `pins/patches/pi-claude-agent-sdk-0.8.6-prime-compat.patch`
+fixes the three and adds one behaviour: with no Anthropic credential in Prime
+the Claude Code child is started with every inherited Anthropic variable
+stripped and uses its own login. After the patch, Prime's loader loads it;
+`get_available_models` lists `claude-bridge` with nine models (it was absent
+before); and `prime-agent -p --provider claude-bridge --model claude-haiku-4-5`
+with no credential anywhere in Prime answered the exact probe token through
+the user's Claude Code login in two seconds. Prime never held a token.
+
+Two negative observations worth keeping: the "No API key found" message is
+not a load signal (Prime prints it for a nonexistent provider too, so the
+first probe that looked like success was not); and a Claude Code child given
+an invalid API key hangs rather than failing, which is one more reason the
+product never configures one. LOAD-001 now observes providers through the
+model catalogue; LIVE-004 repeats the round trip on demand.
+
 ## 13. Open items that only the user or upstream can close
 
 1. **Browser-backed transport alternative:** `pi-oracle` waits on its
    compatibility patch upstream, plus `zstd` and `agent-browser` in the Nix
    configuration and one `/oracle-auth`. Not needed for the product: the
    authenticated round trip ran on `pi-gpt` (§6).
-2. **Filing upstream:** the Prime gaps in
-   `docs/upstream/2026-09-04-prime-extension-and-daemon-gaps.md` and the
-   pi-oracle issue/patch, through Prime's Discussions gate and pi-oracle's
-   issue tracker (outward-facing; not done autonomously).
+2. **Nothing waits on upstream** (user's rule, 2026-09-05): the records
+   under `docs/upstream/` and the patches under `pins/patches/` are this
+   repository's own; the two package patches (pi-gpt guards, bridge Prime
+   compatibility) live here permanently.
 3. **Tool gating:** no control exists on the substrate; OS containment of
    the kernel process is the user's choice until Prime exposes a kernel
    hook.

@@ -48,13 +48,49 @@ extracts it to `pins/packages/<name>-<version>/` (ignored) and applies the
 patches; Prime then installs it by path (`harness/settings.project.json`, or
 `prime-agent package install --local <repo>/pins/packages/<name>-<version>`
 from another project). Nothing about it waits on a registry, an author, or an
-upstream. The manifest entry carries `origin` (where the tarball came from),
-`tarball` and `patches`; `conformance/runtime/foreman-transport.test.ts`
+upstream. Prime runs no `npm install` for a path package, so a vendored package
+with runtime dependencies also commits a lockfile (`lockfile` in the manifest)
+that bootstrap installs with `npm ci --ignore-scripts`. The manifest entry
+carries `origin` (where the tarball came from), `tarball`, `patches` and
+`lockfile`; `conformance/runtime/foreman-transport.test.ts`
 (TRN-000, TRN-003) checks the committed bytes against the pin and that the
 patch holds on the shipped tool.
 
 To re-vendor: fetch the new tarball, record its sha512 as `integrity`, re-base
 the patches, run bootstrap, and re-run LOAD-001 and TRN.
+
+## Claude models on your subscription
+
+The product never configures an Anthropic API key and never uses Prime's
+built-in Claude Pro/Max login. Both bill per token: the key by design, the
+login because Anthropic classifies a third-party harness speaking Claude
+Code's wire shape as third-party usage ("Third-party harness usage draws from
+extra usage", Prime's own login screen) and its terms do not permit it.
+
+Claude runs instead through the vendored `pi-claude-agent-sdk` (`claude-bridge`
+provider): Prime hands the turn to the real Claude Code binary through the
+Agent SDK, Prime's tools are bridged into it, and the child authenticates with
+Claude Code's **own** login (the macOS Keychain entry `claude auth login`
+wrote). Prime holds no Anthropic token. This is how T3 Code and other wrappers
+use a Claude subscription, and it bills to the plan. Requirements: Claude Code
+2.1.251 or newer on `PATH` or `pathToClaudeCodeExecutable`, a completed
+`claude auth login`, and `HOME` and `USER` in Prime's environment (Claude Code
+locates its Keychain login by both; with `USER` unset it reports "Not logged
+in", measured). Then:
+
+```sh
+prime-agent --provider claude-bridge --model claude-sonnet-5
+```
+
+The vendored package carries a three-hunk Prime compatibility patch (its
+`@earendil-works/pi-ai/compat` import, `CONFIG_DIR_NAME`, and Prime's
+`getApiKeyAndHeaders` in place of Pi's `getProviderAuth`) plus one behaviour
+change: with no Anthropic credential in Prime it starts the child with every
+inherited Anthropic variable stripped instead of failing. Measured live on
+2026-09-05; LIVE-004 repeats it on demand. Two facts to keep in view: this
+bills to plan limits because Anthropic paused its Agent SDK credit split on
+June 15 2026, not because the policy settled; and a Claude Code child given an
+*invalid* API key hangs, which is one more reason no key is ever configured.
 
 ## Bootstrap
 

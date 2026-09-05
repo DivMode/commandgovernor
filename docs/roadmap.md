@@ -31,6 +31,12 @@ has to own, not by how much it builds.
   transport waits on a registry or an author; TRN-003 proves the patch on
   the shipped tool; the opt-in live lane (LIVE-001…003) proves the transport
   inside a real Prime worker against the real account.
+- Claude on the user's Max plan inside Prime: `pi-claude-agent-sdk`
+  vendored with a three-hunk Prime compatibility patch (it did not load
+  unpatched), Claude Code's own login used by the child, no Anthropic
+  credential in Prime; a Haiku round trip inside a Prime worker measured
+  2026-09-05; LIVE-004 in the opt-in lane. API keys and Prime's Claude
+  login are excluded by the user's rule (subscriptions only).
 - Substrate and package defect records kept under `docs/upstream/` as this
   repository's own records: Prime extension-surface and daemon gaps, the
   pi-oracle compatibility patch, the `hasUI`/theme worker crash. Nothing
@@ -46,10 +52,12 @@ has to own, not by how much it builds.
    run the trusted-local product without it (documented in the threat
    model) or to apply OS containment to the kernel process; ask Prime for a
    kernel-boundary hook.
-3. **Real-model conformance lane** (optional, credentials required): the
-   same scenarios with a real provider, to measure model behaviour rather
-   than package mechanics. The ChatGPT half already exists as the opt-in
-   live lane.
+3. **First real-model run of the product**: open Prime in this repository
+   with `--provider claude-bridge` (Max plan through Claude Code) or the
+   Codex login, give it a genuine task, delegate the review, send the
+   envelope to the foreman, act on the verdict. Both subscriptions are wired
+   and proven inside a Prime worker; the model's judgement over the skills is
+   the one thing still unmeasured.
 
 ## Later — only with a measured gap
 

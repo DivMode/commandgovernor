@@ -1,0 +1,90 @@
+diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/child-env.ts patched/src/child-env.ts
+--- a/src/child-env.ts	1985-10-25 22:15:00
++++ b/src/child-env.ts	2026-09-05 00:14:43
+@@ -46,7 +46,13 @@
+ 	const headerApiKey = headers.find(([name]) => name.toLowerCase() === "x-api-key")?.[1];
+ 	const credential = resolved?.auth.apiKey ?? headerApiKey;
+ 	if (!credential && !bearerToken) {
+-		throw new Error("No Anthropic credential is configured in Pi. Configure Anthropic authentication in Pi before using claude-bridge.");
++		// Command Governor patch for Prime Agent: with no Anthropic credential
++		// configured in the harness, do not fail. Every inherited variable is
++		// already stripped above, so the Claude Code child falls back to its own
++		// login (macOS Keychain / ~/.claude credentials), which is how a wrapper
++		// like T3 Code uses a Claude subscription: the harness never holds the
++		// token. Upstream throws here because Pi always resolves its own auth.
++		return env;
+ 	}
+ 
+ 	if (resolved?.auth.baseUrl) env.ANTHROPIC_BASE_URL = resolved.auth.baseUrl;
+@@ -57,7 +63,10 @@
+ 
+ 	if (bearerToken) {
+ 		env.ANTHROPIC_AUTH_TOKEN = bearerToken;
+-	} else if (resolved?.source?.toLowerCase().includes("oauth")) {
++	} else if (resolved?.source?.toLowerCase().includes("oauth") || credential?.startsWith("sk-ant-oat")) {
++		// Command Governor patch for Prime Agent: Prime labels stored credentials
++		// by storage ("stored"), not by kind, so an OAuth token is recognised by
++		// its prefix as well as by Pi's source label.
+ 		env.CLAUDE_CODE_OAUTH_TOKEN = credential;
+ 	} else {
+ 		env.ANTHROPIC_API_KEY = credential;
+@@ -69,6 +78,31 @@
+ 	registry: AnthropicAuthRegistry | null | undefined,
+ 	base: NodeJS.ProcessEnv = process.env,
+ ): Promise<NodeJS.ProcessEnv> {
+-	const resolved = registry ? await registry.getProviderAuth("anthropic") : undefined;
++	const resolved = registry ? await resolveAnthropicAuth(registry) : undefined;
+ 	return buildClaudeChildEnv(base, resolved);
++}
++
++/**
++ * Command Governor patch for Prime Agent: Prime's ModelRegistry has no
++ * getProviderAuth(); its credential resolver is getApiKeyAndHeaders(model).
++ * Resolve the `anthropic` provider's credential through whichever the
++ * registry offers, in the AuthResult shape the env builder expects.
++ */
++async function resolveAnthropicAuth(registry: AnthropicAuthRegistry): Promise<AuthResult | undefined> {
++	const anyRegistry = registry as unknown as {
++		getProviderAuth?: (provider: string) => Promise<AuthResult | undefined>;
++		getAll?: () => { provider: string }[];
++		getApiKeyAndHeaders?: (model: { provider: string }) => Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> }>;
++	};
++	if (typeof anyRegistry.getProviderAuth === "function") return anyRegistry.getProviderAuth("anthropic");
++	if (typeof anyRegistry.getAll !== "function" || typeof anyRegistry.getApiKeyAndHeaders !== "function") return undefined;
++	const model = anyRegistry.getAll().find((entry) => entry.provider === "anthropic");
++	if (!model) return undefined;
++	const result = await anyRegistry.getApiKeyAndHeaders(model);
++	if (!result?.ok || !result.apiKey) return undefined;
++	return {
++		auth: { apiKey: result.apiKey, headers: result.headers },
++		env: result.env,
++		source: result.apiKey.startsWith("sk-ant-oat") ? "prime:oauth" : "prime:stored",
++	} as unknown as AuthResult;
+ }
+diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/config.ts patched/src/config.ts
+--- a/src/config.ts	1985-10-25 22:15:00
++++ b/src/config.ts	2026-09-05 00:12:27
+@@ -4,7 +4,11 @@
+ // unparseable files are ignored (error to console.error, empty object
+ // returned) so the extension always starts.
+ 
+-import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
++import { getAgentDir } from "@earendil-works/pi-coding-agent";
++// Command Governor patch for Prime Agent: upstream Pi exports CONFIG_DIR_NAME
++// (".pi"); Prime defines it (".prime/agent") but does not export it, so the
++// project-level claude-bridge.json lives under Prime's project config dir.
++const CONFIG_DIR_NAME = ".prime/agent";
+ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+ import { dirname, join } from "path";
+ 
+diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.ts patched/src/index.ts
+--- a/src/index.ts	1985-10-25 22:15:00
++++ b/src/index.ts	2026-09-05 00:07:39
+@@ -1,6 +1,6 @@
+ import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
+ import * as piAi from "@earendil-works/pi-ai";
+-import { getModels } from "@earendil-works/pi-ai/compat";
++import { getModels } from "@earendil-works/pi-ai";
+ import { type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+ import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+ import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
