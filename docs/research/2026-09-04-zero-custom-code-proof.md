@@ -373,7 +373,7 @@ The PR was retargeted onto `main` and finished on its branch.
 | Rust source + tests (`crates/`) | 49,142 (110 files) | 0 |
 | shell (`scripts/bootstrap.sh`, `scripts/conformance.sh`) | 251 | 276 |
 | harness configuration and prose (roles, skill, prompt, manifest, settings) | 495 | 398 |
-| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,490 in 10 test files (+10 lib); 91 tests, 15 suites, ~3 min; plus the opt-in live lane (4) |
+| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,661 in 11 test files (+11 lib); 95 tests, 16 suites, ~3 min; plus the opt-in live lane (4) |
 | tracked files | 238 | 91 |
 | Prime pin | 0.8.1 | 0.9.1 |
 | pinned packages | 0 | 3 |
@@ -411,9 +411,14 @@ Three seams, all Pi-vs-Prime API differences: `@earendil-works/pi-ai/compat`
 `CONFIG_DIR_NAME` (Prime defines `.prime/agent` but does not export it), and
 `ModelRegistry.getProviderAuth` (Prime's resolver is `getApiKeyAndHeaders`).
 The committed patch `pins/patches/pi-claude-agent-sdk-0.8.6-prime-compat.patch`
-fixes the three and adds one behaviour: with no Anthropic credential in Prime
-the Claude Code child is started with every inherited Anthropic variable
-stripped and uses its own login. After the patch, Prime's loader loads it;
+fixes the three and replaces upstream's credential injection with an
+enforced boundary: every inherited Anthropic variable is stripped from the
+child, and any credential the harness resolves (API key, OAuth token, bearer)
+is refused before a child is spawned, so the child can only use Claude Code's
+own login. The foreman asked for that to be code, not convention, and for it
+to be proven on the shipped module: `conformance/runtime/claude-bridge-boundary.test.ts`
+(BRIDGE-001…004) does so, and at the product surface a Prime-configured key
+is refused before any Claude Code child exists. After the patch, Prime's loader loads it;
 `get_available_models` lists `claude-bridge` with nine models (it was absent
 before); and `prime-agent -p --provider claude-bridge --model claude-haiku-4-5`
 with no credential anywhere in Prime answered the exact probe token through
@@ -421,9 +426,9 @@ the user's Claude Code login in two seconds. Prime never held a token.
 
 Two negative observations worth keeping: the "No API key found" message is
 not a load signal (Prime prints it for a nonexistent provider too, so the
-first probe that looked like success was not); and a Claude Code child given
-an invalid API key hangs rather than failing, which is one more reason the
-product never configures one. LOAD-001 now observes providers through the
+first probe that looked like success was not); and, before the boundary
+existed, a Claude Code child handed an invalid API key hung rather than
+failing, which is why the refusal happens before any child. LOAD-001 now observes providers through the
 model catalogue; LIVE-004 repeats the round trip on demand.
 
 ## 13. Open items that only the user or upstream can close

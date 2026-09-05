@@ -56,10 +56,11 @@ actions (Prime has no permission system and its Python kernel runs shell
 commands below every extension hook; see
 [`docs/threat-model.md`](docs/threat-model.md)).
 
-Models run on the user's subscriptions only, never on API keys: Claude
-through the vendored `pi-claude-agent-sdk`, which starts the real Claude Code
-binary on its own Max-plan login (Prime holds no Anthropic token), and GPT
-through Prime's Codex login, which OpenAI endorses for third-party harnesses.
+Models run on the user's subscriptions only, never on API keys, and that is
+enforced: Claude runs through the vendored `pi-claude-agent-sdk`, which starts
+the real Claude Code binary on its own Max-plan login and refuses any
+Anthropic credential the harness holds (BRIDGE-001…004); GPT runs through
+Prime's Codex login, which OpenAI endorses for third-party harnesses.
 
 The ChatGPT Web foreman transport is the pinned `pi-gpt` package, driving
 ChatGPT's undocumented backend with the user's Codex login. It was adopted

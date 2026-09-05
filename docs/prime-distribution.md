@@ -82,15 +82,17 @@ in", measured). Then:
 prime-agent --provider claude-bridge --model claude-sonnet-5
 ```
 
-The vendored package carries a three-hunk Prime compatibility patch (its
+The vendored package carries a Prime compatibility patch (its
 `@earendil-works/pi-ai/compat` import, `CONFIG_DIR_NAME`, and Prime's
-`getApiKeyAndHeaders` in place of Pi's `getProviderAuth`) plus one behaviour
-change: with no Anthropic credential in Prime it starts the child with every
-inherited Anthropic variable stripped instead of failing. Measured live on
-2026-09-05; LIVE-004 repeats it on demand. Two facts to keep in view: this
-bills to plan limits because Anthropic paused its Agent SDK credit split on
-June 15 2026, not because the policy settled; and a Claude Code child given an
-*invalid* API key hangs, which is one more reason no key is ever configured.
+`getApiKeyAndHeaders` in place of Pi's `getProviderAuth`) and one enforced
+behaviour change: the child is started with every inherited Anthropic
+variable stripped, and any Anthropic credential the harness resolves (API
+key, OAuth, bearer) is **refused** before a child is spawned. There is no
+credential injection left in the module. Measured live on 2026-09-05;
+LIVE-004 repeats the round trip and BRIDGE-001…004 prove the refusal on the
+shipped module. One fact to keep in view: this bills to plan limits because
+Anthropic paused its Agent SDK credit split on June 15 2026, not because the
+policy settled.
 
 ## Bootstrap
 

@@ -33,10 +33,11 @@ has to own, not by how much it builds.
   inside a real Prime worker against the real account.
 - Claude on the user's Max plan inside Prime: `pi-claude-agent-sdk`
   vendored with a three-hunk Prime compatibility patch (it did not load
-  unpatched), Claude Code's own login used by the child, no Anthropic
-  credential in Prime; a Haiku round trip inside a Prime worker measured
-  2026-09-05; LIVE-004 in the opt-in lane. API keys and Prime's Claude
-  login are excluded by the user's rule (subscriptions only).
+  unpatched), Claude Code's own login used by the child; any harness-held
+  Anthropic credential refused before a child is spawned (BRIDGE-001…004
+  on the shipped module); a Haiku round trip inside a Prime worker measured
+  2026-09-05; LIVE-004 in the opt-in lane. Subscriptions only is enforced,
+  not assumed.
 - Substrate and package defect records kept under `docs/upstream/` as this
   repository's own records: Prime extension-surface and daemon gaps, the
   pi-oracle compatibility patch, the `hasUI`/theme worker crash. Nothing

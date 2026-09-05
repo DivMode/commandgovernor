@@ -135,17 +135,25 @@ patch recorded under `docs/upstream/`.
 
 ### Claude model access
 
-No Anthropic API key is ever configured and Prime's built-in Claude Pro/Max
-login is never used for inference: Prime's login is its own OAuth client
-against claude.ai speaking Claude Code's wire shape, which Anthropic bills as
-third-party extra usage and its Claude Code terms do not permit. Claude runs
-through the vendored `pi-claude-agent-sdk` instead: the real Claude Code
-binary, started by Prime with every inherited Anthropic variable stripped and
-no credential from Prime, authenticating with its own login. Prime holds no
-Anthropic token, so there is nothing for a package or a transcript to leak;
-the credential boundary is Claude Code's own. The patch that makes the bridge
-load on Prime is committed under `pins/patches/` and proven by the
-package-load probe (provider present in the catalogue) and LIVE-004.
+Subscription-only is an **enforced invariant**, not a configuration
+convention. Claude runs through the vendored `pi-claude-agent-sdk`: the real
+Claude Code binary, started by Prime with every inherited Anthropic variable
+stripped, authenticating with its own login. The vendored patch removes
+upstream's credential injection entirely and **refuses** any Anthropic
+credential the harness resolves — API key, OAuth token or bearer — before a
+child is spawned. Prime never holds or forwards an Anthropic token, so an
+accidentally configured key or a Prime Claude login cannot bill outside the
+plan: the request fails with a message naming the rule. This is proven on
+the shipped module by `conformance/runtime/claude-bridge-boundary.test.ts`
+(BRIDGE-001…004: poisoned inherited environment stripped; API key, OAuth and
+bearer each refused; no-credential control passes) and at the product surface
+(a Prime-configured key is refused before any Claude Code child exists). Prime's built-in
+Claude Pro/Max login is excluded by the same refusal and by policy: it is
+Prime's own OAuth client speaking Claude Code's wire shape, which Anthropic
+bills as third-party extra usage and its Claude Code terms do not permit. The
+patch that makes the bridge load on Prime is committed under `pins/patches/`
+and proven by the package-load probe (provider present in the catalogue) and
+LIVE-004.
 
 ## Residual risks, stated
 
@@ -154,6 +162,6 @@ package-load probe (provider present in the catalogue) and LIVE-004.
 | Destructive shell/Python inside the kernel cannot be gated by any extension | open; upstream hook or OS sandbox |
 | Silent extension load failure in headless modes | mitigated by the package-load conformance probe |
 | `ctx.hasUI` true in headless modes misleads approval logic | open upstream; no approval package admitted |
-| Claude billed outside the plan | closed by construction: no API key, Prime's Claude login unused, inference only through Claude Code's own login; plan billing rests on a paused Anthropic change (June 15 2026) |
+| Claude billed outside the plan | enforced: the vendored bridge refuses any harness-held Anthropic credential and strips inherited ones (BRIDGE-001…004); inference only through Claude Code's own login. Plan billing itself rests on a paused Anthropic change (June 15 2026) |
 | Undocumented ChatGPT transport (`pi-gpt`) | accepted by the user; vendored and patched in-repo (TRN-003); sends bound to the leaf and reconciled by readback (TRN-002); provider drift caught by the opt-in live lane |
 | Package churn (daily releases, version floors, no Prime compatibility statements) | every re-pin re-runs the load probe and the black-box suite |

@@ -117,6 +117,14 @@ workers on purpose, and every file ends by sweeping its own process tree
   (003). Credential-free, no network. The correlation rules themselves are
   prose in the skill and are not re-encoded as tests: a test of a checker
   that lives in the test file measures nothing about the product.
+- **BRIDGE-001…004** (`conformance/runtime/claude-bridge-boundary.test.ts`)
+  the subscription-only invariant on the vendored bridge's own `child-env`
+  module, credential-free: a poisoned inherited environment never reaches
+  the Claude Code child while harmless variables do; an API key, an OAuth
+  token and a bearer resolved by the harness (Prime-shaped and Pi-shaped
+  registries) are each refused before any child; the same registries with
+  no credential pass. Also asserts the shipped module contains no credential
+  injection at all.
 - **GATE-001** Prime's `--autonomous --autonomous-gate "<cmd>"` is a
   host-owned gate: with an identical scripted model, a run does not finish
   while the gate command fails, and finishes once the test (not the model)

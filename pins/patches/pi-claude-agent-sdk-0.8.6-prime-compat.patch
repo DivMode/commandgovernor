@@ -1,34 +1,100 @@
 diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/child-env.ts patched/src/child-env.ts
 --- a/src/child-env.ts	1985-10-25 22:15:00
-+++ b/src/child-env.ts	2026-09-05 00:14:43
-@@ -46,7 +46,13 @@
++++ b/src/child-env.ts	2026-09-05 00:40:41
+@@ -11,42 +11,36 @@
+ 	getProviderAuth(provider: string): Promise<AuthResult | undefined>;
+ }
+ 
+-/** Build an isolated child environment from Pi's resolved Anthropic auth.
++/** Build an isolated child environment for the Claude Code child.
+  *
+- * Pi refreshes stored OAuth before getProviderAuth() resolves. Claude Code's
+- * supported OAuth injection point is CLAUDE_CODE_OAUTH_TOKEN; API keys keep
+- * using ANTHROPIC_API_KEY. All inherited Claude/Anthropic auth and alternate
+- * backend settings are removed so every child relies exclusively on the
+- * credential and endpoint resolved by Pi.
++ * Command Governor patch for Prime Agent: every inherited Claude/Anthropic
++ * credential and backend variable is removed, and a credential resolved by the
++ * harness is REFUSED rather than injected, so the child can only authenticate
++ * with Claude Code's own login. (Upstream injects the harness credential as
++ * CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.)
+  */
+ export function buildClaudeChildEnv(
+ 	base: NodeJS.ProcessEnv,
+ 	resolved?: AuthResult,
+ ): NodeJS.ProcessEnv {
+ 	const env: NodeJS.ProcessEnv = { ...base, ...(resolved?.env ?? {}), ...CC_CHILD_ENV };
+-	for (const key of [
+-		"ANTHROPIC_API_KEY",
+-		"ANTHROPIC_AUTH_TOKEN",
+-		"ANTHROPIC_OAUTH_TOKEN",
+-		"ANTHROPIC_IDENTITY_TOKEN",
+-		"ANTHROPIC_IDENTITY_TOKEN_FILE",
+-		"ANTHROPIC_BASE_URL",
+-		"ANTHROPIC_CUSTOM_HEADERS",
+-		"CLAUDE_CODE_OAUTH_TOKEN",
+-		"CLAUDE_CODE_CUSTOM_OAUTH_URL",
+-		"CLAUDE_CODE_OAUTH_CLIENT_ID",
+-		"CLAUDE_CODE_USE_BEDROCK",
+-		"CLAUDE_CODE_USE_FOUNDRY",
+-		"CLAUDE_CODE_USE_VERTEX",
+-	] as const) delete env[key];
++	for (const key of STRIPPED_ENV_KEYS) delete env[key];
+ 
++	// Command Governor patch for Prime Agent: this product runs Claude ONLY on
++	// Claude Code's own login (the user's subscription, plan-billed). A credential
++	// resolved by the harness — API key, OAuth token or bearer — is refused
++	// before any child is spawned, and no Anthropic credential variable is ever
++	// set from the harness. Upstream injects the harness credential here.
+ 	const headers = Object.entries(resolved?.auth.headers ?? {}).filter((entry): entry is [string, string] => entry[1] != null);
+ 	const authorization = headers.find(([name]) => name.toLowerCase() === "authorization")?.[1];
+ 	const bearerToken = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
  	const headerApiKey = headers.find(([name]) => name.toLowerCase() === "x-api-key")?.[1];
- 	const credential = resolved?.auth.apiKey ?? headerApiKey;
- 	if (!credential && !bearerToken) {
+-	const credential = resolved?.auth.apiKey ?? headerApiKey;
+-	if (!credential && !bearerToken) {
 -		throw new Error("No Anthropic credential is configured in Pi. Configure Anthropic authentication in Pi before using claude-bridge.");
-+		// Command Governor patch for Prime Agent: with no Anthropic credential
-+		// configured in the harness, do not fail. Every inherited variable is
-+		// already stripped above, so the Claude Code child falls back to its own
-+		// login (macOS Keychain / ~/.claude credentials), which is how a wrapper
-+		// like T3 Code uses a Claude subscription: the harness never holds the
-+		// token. Upstream throws here because Pi always resolves its own auth.
-+		return env;
++	const credential = resolved?.auth.apiKey ?? headerApiKey ?? bearerToken;
++	if (credential) {
++		throw new Error(
++			"claude-bridge: an Anthropic credential is configured in the harness. Command Governor runs Claude only on Claude Code's own login " +
++				"(subscription, plan-billed); remove the `anthropic` auth entry and any Anthropic credential from models.json, then retry.",
++		);
  	}
  
  	if (resolved?.auth.baseUrl) env.ANTHROPIC_BASE_URL = resolved.auth.baseUrl;
-@@ -57,7 +63,10 @@
- 
- 	if (bearerToken) {
- 		env.ANTHROPIC_AUTH_TOKEN = bearerToken;
+@@ -54,21 +48,55 @@
+ 	if (customHeaders.length > 0) {
+ 		env.ANTHROPIC_CUSTOM_HEADERS = customHeaders.map(([name, value]) => `${name}: ${value}`).join("\n");
+ 	}
+-
+-	if (bearerToken) {
+-		env.ANTHROPIC_AUTH_TOKEN = bearerToken;
 -	} else if (resolved?.source?.toLowerCase().includes("oauth")) {
-+	} else if (resolved?.source?.toLowerCase().includes("oauth") || credential?.startsWith("sk-ant-oat")) {
-+		// Command Governor patch for Prime Agent: Prime labels stored credentials
-+		// by storage ("stored"), not by kind, so an OAuth token is recognised by
-+		// its prefix as well as by Pi's source label.
- 		env.CLAUDE_CODE_OAUTH_TOKEN = credential;
- 	} else {
- 		env.ANTHROPIC_API_KEY = credential;
-@@ -69,6 +78,31 @@
+-		env.CLAUDE_CODE_OAUTH_TOKEN = credential;
+-	} else {
+-		env.ANTHROPIC_API_KEY = credential;
+-	}
+ 	return env;
+ }
+ 
++/** Every inherited Anthropic/Claude credential or backend variable the child must never see. */
++export const STRIPPED_ENV_KEYS = [
++	"ANTHROPIC_API_KEY",
++	"ANTHROPIC_AUTH_TOKEN",
++	"ANTHROPIC_OAUTH_TOKEN",
++	"ANTHROPIC_IDENTITY_TOKEN",
++	"ANTHROPIC_IDENTITY_TOKEN_FILE",
++	"ANTHROPIC_BASE_URL",
++	"ANTHROPIC_CUSTOM_HEADERS",
++	"CLAUDE_CODE_OAUTH_TOKEN",
++	"CLAUDE_CODE_CUSTOM_OAUTH_URL",
++	"CLAUDE_CODE_OAUTH_CLIENT_ID",
++	"CLAUDE_CODE_USE_BEDROCK",
++	"CLAUDE_CODE_USE_FOUNDRY",
++	"CLAUDE_CODE_USE_VERTEX",
++] as const;
++
+ export async function resolveClaudeChildEnv(
  	registry: AnthropicAuthRegistry | null | undefined,
  	base: NodeJS.ProcessEnv = process.env,
  ): Promise<NodeJS.ProcessEnv> {
