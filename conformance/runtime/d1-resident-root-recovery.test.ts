@@ -1,178 +1,353 @@
 /**
- * D1 — resident roots do not self-heal (Issue #17 blocker; Issue #15 s1-03/s1-05).
+ * D1 — a resident root whose worker dies is recovered, once, as itself.
  *
- * A resident root whose worker dies goes `workerState: failed` and is never
- * relaunched by the pinned supervisor. The Governor owns the reopen:
+ * The bake-off drove the RAW daemon protocol and found that a resident root
+ * whose worker is SIGKILLed parks `failed` and is never relaunched, so a naive
+ * client that re-`create`s could end up with a duplicate logical root. This
+ * file asks the product question: using only `prime-agent` CLI clients, is a
+ * session ever lost, duplicated, or silently re-run?
  *
- *   detect the failed state (from `workerState`, never `activity`)
- *   -> take the recovery lease
- *   -> `create` on the SAME canonical sessionPath, exactly once
- *   -> same Prime `sessionId`, new active-session incarnation recorded
- *   -> stale incarnation refused before dispatch
- *   -> no duplicate logical root
+ * Asserted:
  *
- * Falsification: two Governors race to recover; with the fence exactly one
- * `create` is dispatched. With the fence disabled both dispatch a `create`
- * (Prime usually converges them, and sometimes refuses the loser's with
- * `session_already_active`, an ambiguous pair the Governor records as
- * UNCERTAIN; either way the duplicate is visible only in the ledgers --
- * which is why the fence is the Governor's, not the substrate's).
+ *   1. `prime-agent -r <sessionFile>` reopens it with the SAME `sessionId` and
+ *      `sessionFile` and a DIFFERENT `activeSessionId` — Prime's own
+ *      durable-session vs process-incarnation distinction — and `list` then
+ *      shows exactly one row for that session.
+ *   2. Prime writes exactly one `prime-agent.worker_recovery` transcript entry
+ *      per worker loss, and the transcript only grows.
+ *   3. Two simultaneous `prime-agent -r <same file>` clients converge on ONE
+ *      worker and one `list --all` record.
+ *   4. Killing the supervisor under a live worker yields a replacement
+ *      supervisor on the same socket that adopts the same worker pid and the
+ *      same `activeSessionId`, and the session keeps serving work.
+ *
+ * What the killed root's `workerState` does in the meantime is RECORDED, not
+ * asserted. On 0.9.1 the supervisor never returns it to `ready` on its own
+ * (measured: `failed failed absent absent …`), but that is upstream behaviour,
+ * not a product invariant — a future Prime that relaunched the root without
+ * replaying the interrupted work would be fine, and is not a regression this
+ * suite should turn red for. The invariants above hold either way, and the
+ * timeline is written to the fixture's notes so a change in it is visible.
+ *
+ * Each experiment gets its OWN fixture root, and the reason is measured rather
+ * than tidiness: when one experiment kills the last worker in a root, that
+ * supervisor begins an idle shutdown, and the next experiment's TUI connects
+ * during that window and gets a session the daemon archives one turn later
+ * (observed: the client prints "The daemon stopped this agent session" and the
+ * transcript ends with `session_state: archived`). Sharing a root makes the
+ * experiments interact through the supervisor's lifecycle; a root each does
+ * not, and costs about a second.
+ *
+ * Within each experiment the work runs once in `before`; the `it` blocks read
+ * what it recorded.
  */
 
 import assert from "node:assert/strict";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { join } from "node:path";
+import {
+	alive,
+	daemonRequest,
+	lineCount,
+	listAgents,
+	ptyCli,
+	reopenSaved,
+	sessionRow,
+	sleep,
+	startResidentSession,
+	startRoot,
+	STOCK_CLIENT_FLAGS,
+	toolPrompt,
+	waitUntil,
+	type PrimeRoot,
+	type SessionRow,
+} from "../lib/prime.ts";
+import { assertCleanTeardown } from "../lib/teardown.ts";
 
-import { NotRecoverable } from "../../governor/governor.ts";
-import { StaleCursorError, StaleIncarnationError } from "../../governor/session/registry.ts";
-import { type PrimeFixture, startPrimeFixture } from "../lib/prime-fixture.ts";
-
-let fixture: PrimeFixture;
-
-before(async () => {
-	fixture = await startPrimeFixture();
-});
-
-after(async () => {
-	await fixture.stop();
-});
-
-async function messagesText(governor: Awaited<ReturnType<PrimeFixture["governor"]>>, sessionId: string): Promise<string> {
-	const current = governor.registry.current(sessionId);
-	const response = await governor.read({ type: "get_messages", activeSessionId: current.activeSessionId });
-	assert.ok(response.success, `get_messages: ${response.success ? "" : response.error}`);
-	return JSON.stringify(response.data);
+interface RecoveryMarker {
+	readonly customType?: string;
+	readonly content?: string;
+	readonly details?: { readonly operations?: string[] };
 }
 
-describe("D1: a dead resident root is reopened exactly once under the same logical session", () => {
-	it("reopens on the same path, keeps sessionId, records a new incarnation, and refuses the stale one", async () => {
-		const governor = await fixture.governor("d1");
-		const sessionPath = join(fixture.sessionDir, "d1-root.jsonl");
-		const created = await governor.createSession({ sessionPath, name: "cg-d1" });
-		const { sessionId } = created.record;
-		const first = created.record.incarnations[0]!;
-		await governor.attach(sessionId);
+function recoveryMarkers(sessionFile: string): RecoveryMarker[] {
+	return readFileSync(sessionFile, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			try {
+				return JSON.parse(line) as RecoveryMarker;
+			} catch {
+				return {};
+			}
+		})
+		.filter((entry) => entry.customType === "prime-agent.worker_recovery");
+}
 
-		const firstGeneration = governor.registry.current(sessionId).generation;
-		assert.ok(firstGeneration, "attach recorded the first incarnation's event-cursor generation");
+// ---------------------------------------------------------------------------
 
-		// Observable work before the crash.
-		const prompt = await governor.dispatchMutation(sessionId, first.activeSessionId, { type: "prompt", message: "ECHO:d1-before" });
-		assert.equal(prompt.verdict.verdict, "completed");
-		const idle = await governor.read({ type: "wait_for_idle", activeSessionId: first.activeSessionId }, 60_000);
-		assert.ok(idle.success);
-		assert.match(await messagesText(governor, sessionId), /d1-before/);
-		const staleCursor = governor.client.lastCursor;
-		assert.ok(staleCursor && staleCursor.generation === firstGeneration, "a cursor observed before the crash belongs to the first incarnation's generation");
+describe("D1: worker loss on a resident root", () => {
+	let fixture: PrimeRoot;
+	let session: SessionRow;
+	let killedPid = 0;
+	const timeline: string[] = [];
+	let reopened: SessionRow;
+	let liveRows = 0;
+	let staleRows = 0;
+	let bytesBefore = 0;
+	let bytesAfter = 0;
+	let transcript = "";
+	let markers: RecoveryMarker[] = [];
+	let effect = 0;
+	let modelCallsBefore = 0;
+	let modelCallsAfter = 0;
 
-		// Healthy root: recovery is a no-op and says so.
-		const healthy = await governor.recoverResidentRoot(sessionId);
-		assert.equal(healthy.action, "healthy");
+	before(async () => {
+		fixture = await startRoot({ label: "d1-worker-loss" });
+		const started = await startResidentSession(fixture, { name: "d1-e1" });
+		session = started.row;
+		killedPid = session.workerPid as number;
 
-		// Kill the worker. The supervisor reports failed; `activity` is not consulted.
-		assert.ok(created.summary.workerPid);
-		process.kill(created.summary.workerPid, "SIGKILL");
-		const failed = await governor.waitFailed(sessionId);
-		assert.equal(failed.workerState, "failed");
-		assert.equal(failed.sessionId, sessionId, "the failed summary still names the logical session");
+		// The model asks Prime's own tool to append one line and then sleep, so the
+		// worker can be killed while the effect is on disk and the turn is
+		// demonstrably still in flight.
+		const target = join(fixture.work, "d1-effect.txt");
+		await started.client.submit(toolPrompt(target, 25));
+		await waitUntil(() => (lineCount(target) === 1 ? true : undefined), 600_000, 250, "the tool effect reaching disk");
 
-		const outcome = await governor.recoverResidentRoot(sessionId);
-		assert.equal(outcome.action, "reopened", JSON.stringify(outcome));
-		assert.equal(outcome.previous.activeSessionId, first.activeSessionId);
-		assert.notEqual(outcome.incarnation.activeSessionId, first.activeSessionId, "reopen yields a new active-session id");
-		assert.equal(outcome.incarnation.cause, "reopen");
-		assert.equal(outcome.incarnation.index, 1);
+		bytesBefore = statSync(session.sessionFile as string).size;
+		modelCallsBefore = fixture.modelCalls().length;
+		assert.ok(alive(killedPid), `the resident worker ${killedPid} died before it could be killed`);
+		process.kill(killedPid, "SIGKILL");
+		fixture.note("SIGKILL resident worker", String(killedPid));
 
-		const record = governor.registry.require(sessionId);
-		assert.equal(record.sessionPath, created.record.sessionPath, "the same canonical path");
-		assert.equal(record.incarnations.length, 2);
+		// Sampled, not inferred: what does the stock `list` say for seven seconds?
+		for (let i = 0; i < 10; i += 1) {
+			await sleep(700);
+			const sample = sessionRow(fixture, session.sessionId as string);
+			timeline.push(sample ? String(sample.workerState) : "absent");
+		}
+		fixture.note("workerState timeline:", timeline.join(" "));
 
-		await governor.waitReady(sessionId);
-		await governor.attach(sessionId);
-		const secondGeneration = governor.registry.current(sessionId).generation;
-		assert.ok(secondGeneration && secondGeneration !== firstGeneration, "the reopened incarnation has a new generation");
-		const text = await messagesText(governor, sessionId);
-		assert.match(text, /d1-before/, "history survived the reopen");
-		assert.match(text, /worker_recovery|recovery/i, "the transcript carries Prime's visible recovery marker");
+		const back = await reopenSaved(fixture, session.sessionFile as string, session.sessionId as string, {
+			name: "d1-e1-resume",
+			excludePid: killedPid,
+			timeoutMs: 120_000,
+		});
+		if (back.crashes.length > 0) fixture.note("the stock resume crashed before it worked:", JSON.stringify(back.crashes));
+		reopened = back.row;
+		await sleep(5000);
 
-		// No duplicate logical root.
-		const listed = (await governor.list()).filter((summary) => summary.sessionId === sessionId);
-		assert.equal(listed.length, 1, "exactly one registration for the logical session");
-		assert.equal(listed[0]!.workerState, "ready");
+		liveRows = listAgents(fixture).sessions.filter((row) => row.sessionId === session.sessionId).length;
+		staleRows = listAgents(fixture).sessions.filter((row) => row.activeSessionId === session.activeSessionId).length;
+		bytesAfter = statSync(session.sessionFile as string).size;
+		transcript = readFileSync(session.sessionFile as string, "utf8");
+		markers = recoveryMarkers(session.sessionFile as string);
+		effect = lineCount(target);
+		modelCallsAfter = fixture.modelCalls().length;
 
-		// Stale incarnation is refused before any I/O.
-		const ledgerBefore = governor.ledger.list().length;
-		await assert.rejects(
-			governor.dispatchMutation(sessionId, first.activeSessionId, { type: "prompt", message: "ECHO:stale" }),
-			(error: unknown) => error instanceof StaleIncarnationError && error.presented === first.activeSessionId,
-		);
-		assert.equal(governor.ledger.list().length, ledgerBefore, "a refused stale dispatch writes no ledger record");
-
-		// Scenario 6, cursor half: a cursor from the dead generation is refused by the Governor ...
-		assert.throws(() => governor.assertCurrentCursor(sessionId, staleCursor), (error: unknown) => error instanceof StaleCursorError && error.presented === firstGeneration && error.current === secondGeneration);
-		assert.equal(governor.assertCurrentCursor(sessionId, { generation: secondGeneration, sequence: 0 }).activeSessionId, outcome.incarnation.activeSessionId);
-		// ... and Prime itself does not honour it as a position (Issue #15 D3): replay restarts at the new generation.
-		const replayed = await governor.read({ type: "attach", activeSessionId: outcome.incarnation.activeSessionId, clientId: governor.clientId, telemetryDisabled: true, resumeCursor: staleCursor }, 60_000);
-		assert.ok(replayed.success);
-		const replay = (replayed.data as { replay?: { toCursor?: { generation: string; sequence: number }; toSequence?: number } }).replay;
-		assert.equal(replay?.toCursor?.generation, secondGeneration, "the substrate answers in the new generation");
-		assert.equal(replay?.toSequence, 0, "and restarts replay at its baseline rather than honouring the dead sequence");
-		assert.ok(!(await messagesText(governor, sessionId)).includes("ECHO:stale"), "the stale prompt never reached the new incarnation");
-
-		// The new incarnation serves work.
-		const after = await governor.dispatchMutation(sessionId, outcome.incarnation.activeSessionId, { type: "prompt", message: "ECHO:d1-after" });
-		assert.equal(after.verdict.verdict, "completed");
-		await governor.read({ type: "wait_for_idle", activeSessionId: outcome.incarnation.activeSessionId }, 60_000);
-		assert.match(await messagesText(governor, sessionId), /d1-after/);
-
-		// Second recovery call after a successful reopen: nothing to do.
-		const again = await governor.recoverResidentRoot(sessionId);
-		assert.equal(again.action, "healthy");
-		governor.close();
+		back.client.kill();
+		started.client.kill();
+		await sleep(1500);
 	});
 
-	it("fences concurrent recoverers: exactly one create is dispatched (and the negative control shows two without the fence)", async () => {
-		for (const fenced of [true, false]) {
-			const stateDir = join(fixture.root, "governor", `d1-race-${fenced ? "fenced" : "unfenced"}`);
-			const a = await fixture.governor(`d1-race-${fenced}-a`, { stateDir, unsafeDisableRecoveryFence: !fenced });
-			const b = await fixture.governor(`d1-race-${fenced}-b`, { stateDir, unsafeDisableRecoveryFence: !fenced });
-			assert.equal(a.clientId, b.clientId, "two Governor processes over one state dir share the client identity");
-			const created = await a.createSession({ sessionPath: join(fixture.sessionDir, `d1-race-${fenced}.jsonl`) });
-			const { sessionId } = created.record;
-			assert.ok(created.summary.workerPid);
-			process.kill(created.summary.workerPid, "SIGKILL");
-			await a.waitFailed(sessionId);
+	after(async () => {
+		if (fixture) await fixture.stop();
+	});
 
-			const settled = await Promise.allSettled([a.recoverResidentRoot(sessionId), b.recoverResidentRoot(sessionId)]);
-			const creates = a.ledger.list().filter((r) => r.commandType === "create" && r.sessionId === sessionId);
-			if (fenced) {
-				// With the fence, both recoveries must complete without error.
-				for (const outcome of settled) if (outcome.status === "rejected") throw outcome.reason;
-				const actions = settled.map((outcome) => (outcome.status === "fulfilled" ? outcome.value.action : "rejected")).sort();
-				assert.deepEqual(actions.filter((x) => x === "reopened"), ["reopened"], `exactly one reopen: ${JSON.stringify(actions)}`);
-				assert.ok(actions.includes("lease_held") || actions.includes("converged"), `the other observed the lease or converged: ${JSON.stringify(actions)}`);
-				assert.equal(creates.length, 1, "with the fence, one reopen create was dispatched");
-			} else {
-				// Negative control: the property is that BOTH Governors dispatched a create. What Prime
-				// then does with two racing creates on one path is Prime's business: usually it
-				// converges both, sometimes the loser's create is refused (`session_already_active`
-				// from the worker's lease, an ambiguous pair => UNCERTAIN => NotRecoverable). Either
-				// way the ledger holds two create records, which is exactly the hazard the fence removes.
-				assert.equal(creates.length, 2, "negative control: without the fence both Governors dispatched a create");
-				for (const outcome of settled) {
-					if (outcome.status === "rejected") {
-						assert.ok(outcome.reason instanceof NotRecoverable, `an unfenced loser fails only as NotRecoverable: ${String(outcome.reason)}`);
-					}
+	it("`prime-agent -r <sessionFile>` reopens the SAME durable session as a NEW incarnation", () => {
+		assert.equal(reopened.sessionId, session.sessionId, "the durable sessionId changed");
+		assert.equal(reopened.sessionFile, session.sessionFile, "the durable transcript path changed");
+		assert.notEqual(reopened.activeSessionId, session.activeSessionId, "the reopened root reused the dead incarnation's active-session id");
+		assert.notEqual(reopened.workerPid, killedPid, "the reopened root reports the killed worker's pid");
+	});
+
+	it("exactly one live root for the logical session, and the dead incarnation is gone", () => {
+		assert.equal(liveRows, 1, "the recovery created a duplicate logical root");
+		assert.equal(staleRows, 0, "the dead incarnation is still listed as live");
+	});
+
+	it("the transcript only grows, and keeps the pre-crash turn", () => {
+		assert.ok(bytesAfter >= bytesBefore, `${bytesBefore} -> ${bytesAfter}`);
+		assert.match(transcript, /TOOL:ipython/, "the pre-crash turn is missing from the recovered transcript");
+	});
+
+	it("Prime writes exactly one worker_recovery entry for one worker loss", () => {
+		assert.equal(markers.length, 1, JSON.stringify(markers.map((marker) => marker.details)));
+	});
+
+	it("the interrupted tool effect is not replayed, and the model is not re-prompted", () => {
+		assert.equal(effect, 1, "the external effect was duplicated by the recovery");
+		assert.equal(modelCallsAfter, modelCallsBefore, "the model was asked again after the recovery");
+	});
+
+	it("nothing survived teardown", async () => {
+		assertCleanTeardown(await fixture.stop());
+	});
+});
+
+// ---------------------------------------------------------------------------
+
+describe("D1: two stock clients resume the same saved session at once", () => {
+	let fixture: PrimeRoot;
+	let rows: SessionRow[] = [];
+	let allRows = 0;
+	let bytesBefore = 0;
+	let bytesAfter = 0;
+	let loserScreen = "";
+
+	before(async () => {
+		fixture = await startRoot({ label: "d1-resume-race" });
+		const started = await startResidentSession(fixture, { name: "d1-e2" });
+		const session = started.row;
+		await started.client.submit("ECHO:d1-race-warm");
+		await waitUntil(
+			() => (readFileSync(session.sessionFile as string, "utf8").includes("d1-race-warm") ? true : undefined),
+			180_000,
+			250,
+			"the warm turn reaching the transcript",
+		);
+		bytesBefore = statSync(session.sessionFile as string).size;
+		process.kill(session.workerPid as number, "SIGKILL");
+		await waitUntil(
+			() => ((sessionRow(fixture, session.sessionId as string)?.workerState ?? "absent") !== "ready" ? true : undefined),
+			90_000,
+			400,
+			"the killed worker leaving ready",
+		);
+		started.client.kill();
+		await sleep(1500);
+
+		fixture.note("racing two stock `prime-agent -r <sessionFile>` clients on the same saved session");
+		const resumeArgs = [...STOCK_CLIENT_FLAGS, "--session-dir", fixture.sessionDir, "-r", session.sessionFile as string];
+		const a = ptyCli(fixture, resumeArgs, { name: "d1-e2-a" });
+		const b = ptyCli(fixture, resumeArgs, { name: "d1-e2-b" });
+		await waitUntil(
+			() => (sessionRow(fixture, session.sessionId as string)?.workerState === "ready" ? true : undefined),
+			180_000,
+			500,
+			"one of the racing resumes reopening the session",
+		);
+		await sleep(12_000);
+		rows = listAgents(fixture).sessions.filter((row) => row.sessionId === session.sessionId);
+		allRows = listAgents(fixture, { all: true }).sessions.filter((row) => row.sessionId === session.sessionId).length;
+		bytesAfter = statSync(session.sessionFile as string).size;
+		loserScreen = b.screen().slice(-200).replace(/\s+/g, " ");
+		fixture.note(
+			"rows after the race:",
+			JSON.stringify(rows.map((row) => ({ id: row.activeSessionId, pid: row.workerPid, state: row.workerState, clients: row.attachedClients }))),
+		);
+		a.kill();
+		b.kill();
+		await sleep(1500);
+	});
+
+	after(async () => {
+		if (fixture) await fixture.stop();
+	});
+
+	it("both resumes converge on ONE worker", () => {
+		assert.equal(rows.length, 1, JSON.stringify(rows.map((row) => ({ id: row.activeSessionId, pid: row.workerPid, state: row.workerState }))));
+		assert.ok((rows[0]?.attachedClients ?? 0) >= 1, `attachedClients=${rows[0]?.attachedClients}; the second client showed: ${loserScreen}`);
+	});
+
+	it("`prime-agent list --all` holds exactly one record for that session", () => {
+		assert.equal(allRows, 1, "the race forked the logical session");
+	});
+
+	it("the transcript was not forked or truncated by the race", () => {
+		assert.ok(bytesAfter >= bytesBefore, `${bytesBefore} -> ${bytesAfter}`);
+	});
+
+	it("nothing survived teardown", async () => {
+		assertCleanTeardown(await fixture.stop());
+	});
+});
+
+// ---------------------------------------------------------------------------
+
+describe("D1: supervisor loss under a live worker", () => {
+	let fixture: PrimeRoot;
+	let supervisorBefore = 0;
+	let supervisorAfter = 0;
+	let workerBefore = 0;
+	let activeBefore = "";
+	let adopted: SessionRow;
+	let servedAfterAdoption = false;
+
+	before(async () => {
+		fixture = await startRoot({ label: "d1-supervisor-loss" });
+		const started = await startResidentSession(fixture, { name: "d1-e3" });
+		const session = started.row;
+		await started.client.submit("ECHO:d1-supervisor-warm");
+		await waitUntil(
+			() => (readFileSync(session.sessionFile as string, "utf8").includes("d1-supervisor-warm") ? true : undefined),
+			180_000,
+			250,
+			"the warm turn reaching the transcript",
+		);
+
+		supervisorBefore = (await daemonRequest(fixture.socketPath, { type: "list" })).hello.supervisorPid as number;
+		workerBefore = session.workerPid as number;
+		activeBefore = session.activeSessionId as string;
+		assert.ok(alive(workerBefore), `the resident worker ${workerBefore} died before the supervisor was killed`);
+		fixture.note("SIGKILL supervisor", String(supervisorBefore), "under live worker", String(workerBefore));
+		process.kill(supervisorBefore, "SIGKILL");
+
+		const replacement = await waitUntil(
+			async () => {
+				try {
+					const { hello } = await daemonRequest(fixture.socketPath, { type: "list" }, { timeoutMs: 5000 });
+					return hello && hello.supervisorPid !== supervisorBefore ? hello : undefined;
+				} catch {
+					return undefined;
 				}
-				assert.ok(settled.some((outcome) => outcome.status === "fulfilled" && outcome.value.action === "reopened"), `at least one unfenced create reopened the root: ${JSON.stringify(settled.map((o) => (o.status === "fulfilled" ? o.value.action : "rejected")))}`);
-			}
-			// Either way Prime converged: one registration, one logical root.
-			await a.waitReady(sessionId);
-			const listed = (await a.list()).filter((summary) => summary.sessionId === sessionId);
-			assert.equal(listed.length, 1);
-			a.close();
-			b.close();
-		}
+			},
+			120_000,
+			1000,
+			"a replacement supervisor on the same socket",
+		);
+		supervisorAfter = replacement.supervisorPid as number;
+		adopted = await waitUntil(
+			() => {
+				const candidate = sessionRow(fixture, session.sessionId as string);
+				return candidate?.workerState === "ready" ? candidate : undefined;
+			},
+			120_000,
+			1000,
+			"the adopted session becoming ready again",
+		);
+		await started.client.submit("ECHO:d1-after-supervisor");
+		servedAfterAdoption = await waitUntil(
+			() => (readFileSync(session.sessionFile as string, "utf8").includes("d1-after-supervisor") ? true : undefined),
+			180_000,
+			250,
+			"the adopted session serving another turn",
+		);
+		started.client.kill();
+		await sleep(1500);
+	});
+
+	after(async () => {
+		if (fixture) await fixture.stop();
+	});
+
+	it("a replacement supervisor answers on the same socket", () => {
+		assert.notEqual(supervisorAfter, supervisorBefore, "no replacement supervisor answered");
+	});
+
+	it("it adopts the live worker and keeps the same incarnation", () => {
+		assert.equal(adopted.workerPid, workerBefore, "the replacement supervisor did not adopt the live worker");
+		assert.equal(adopted.activeSessionId, activeBefore, "the session lost its incarnation across the supervisor replacement");
+	});
+
+	it("the adopted session keeps serving work through the stock TUI", () => {
+		assert.ok(servedAfterAdoption);
+	});
+
+	it("nothing survived teardown", async () => {
+		assertCleanTeardown(await fixture.stop());
 	});
 });

@@ -1,0 +1,31 @@
+{
+  "$comment": [
+    "Command Governor project settings for Prime Agent: copy to",
+    "<project>/.prime/agent/settings.json (or merge into it). Prime installs",
+    "any missing package on startup. Versions here MUST equal pins/pins.json",
+    "packages[].exactVersion; the conformance suite compares them.",
+    "",
+    "Deliberately absent, with the measured reason (2026-09-04):",
+    "  pi-squad         does not load on Prime (pi-ai/compat alias) and ends",
+    "                   tasks only on agent_settled, which Prime never emits",
+    "  pi-subagents     does not load on Prime (same alias); superseded by",
+    "                   @gotgenes/pi-subagents, which registers the same",
+    "                   `subagent` tool name, so the two must never coexist",
+    "  pi-governance-pipeline  loads, but wants to own AGENTS.md/SOUL.md/",
+    "                   SYSTEM.md/MEMORY.md and its shell half hardcodes `pi`",
+    "  pi-oracle        does not load on Prime until its compatibility patch",
+    "                   lands upstream (docs/upstream/)",
+    "  (pi-gpt is installed below: adopted 2026-09-04 as the foreman transport",
+    "                   on the user's explicit acceptance of the account risk)",
+    "  @gotgenes/pi-permission-system  does not load on Prime and cannot see",
+    "                   kernel-side bash() even when patched",
+    "  pi-observational-memory / pi-continual-harness  not baked; Prime's",
+    "                   continual harness is the default memory owner"
+  ],
+  "packages": [
+    "npm:pi-tasks@0.2.5",
+    "npm:@gotgenes/pi-subagents@21.4.0",
+    "npm:pi-pr-review@1.17.10",
+    "npm:pi-gpt@0.4.3"
+  ]
+}

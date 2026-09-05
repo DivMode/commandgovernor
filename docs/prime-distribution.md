@@ -1,25 +1,26 @@
 # The Prime Agent distribution
 
 How Command Governor pins, installs, verifies and re-pins its runtime
-substrate. Substrate selection is ADR 0009; the empirical evidence behind the
-pin is Issue #15; the adaptation layer that makes the pin production-safe is
-Issue #17 and [`prime-native/adaptation-layer.md`](prime-native/adaptation-layer.md).
+substrate. Substrate selection is ADR 0009; the composition boundary is
+ADR 0010; the proof that no custom runtime code sits between the pin and the
+user is [`research/2026-09-04-zero-custom-code-proof.md`](research/2026-09-04-zero-custom-code-proof.md).
 
 ## What is pinned
 
 `pins/pins.json` is the component manifest (ADR 0009 §11) and the single
-source of truth for the substrate. Nothing else hardcodes a version string;
-the Governor's daemon client reads the expected protocol, version and schema
-revision from it at runtime and refuses any daemon that disagrees.
+source of truth for the substrate and for every third-party package the
+distribution installs. Nothing else hardcodes a version string; the
+conformance suite reads the expected protocol, version and schema revision
+from it and compares them with what the installed daemon reports.
 
 | Field | Value |
 | --- | --- |
-| substrate | Prime Agent `v0.8.1`, commit `514633727bf26d74f39f3119c2b0e31a5ceb2a9d` |
+| substrate | Prime Agent `v0.9.1`, commit `81ae3cb34d27d38ee37f9e205a1e73694993b344` |
 | license | MIT (Mario Zechner 2025, Prime Intellect 2026) |
-| daemon protocol | `prime-agent.daemon` v7, schema revision 22 |
-| assets | wrapper `prime-agent-0.8.1.tgz` plus siblings `prime-agent-core`, `prime-agent-ai`, `prime-agent-tui`, each with sha256 and sha512 |
-| install root | `pins/prime-0.8.1/` (committed `package.json`, `package-lock.json`, `.npmrc`; `vendor/` and `node_modules/` are derived and ignored) |
-| fallback | upstream Pi v0.84.4, recorded, never co-installed; working bootstrap on frozen PR #16 |
+| daemon protocol | `prime-agent.daemon` v7, schema revision 25 |
+| assets | wrapper `prime-agent-0.9.1.tgz` plus siblings `prime-agent-core`, `prime-agent-ai`, `prime-agent-tui`, each with sha256 and sha512 |
+| install root | `pins/prime-0.9.1/` (committed `package.json`, `package-lock.json`, `.npmrc`; `vendor/` and `node_modules/` are derived and ignored) |
+| fallback | upstream Pi v0.85.0, recorded, never co-installed |
 
 Prime is not on the npm registry. Its wrapper package names its three
 sibling packages as bare URLs on a Cloudflare R2 bucket with no integrity
@@ -31,8 +32,8 @@ its own version line. Two consequences the manifest encodes:
   `conformance/tier1/pin.test.ts` proves the two are equal. The bytes may
   come from the R2 mirror, but they are accepted only if they hash to what
   the GitHub release published.
-- **Never co-install.** One `node_modules` tree cannot hold Pi 0.84.4 and
-  Prime 0.8.1. Bootstrap and the pin test both refuse an
+- **Never co-install.** One `node_modules` tree cannot hold upstream Pi and
+  Prime. Bootstrap and the pin test both refuse an
   `@earendil-works/pi-coding-agent` in the install root and any
   `@earendil-works` tree at the repository root.
 
@@ -47,7 +48,7 @@ In order:
 1. `node` satisfies the floor in the manifest.
 2. The release's `SHA256SUMS` is fetched from the immutable GitHub release
    and must be byte-identical to the committed `pins/SHA256SUMS`.
-3. Each asset is downloaded into `pins/prime-0.8.1/vendor/` (or reused if
+3. Each asset is downloaded into `pins/prime-0.9.1/vendor/` (or reused if
    already present and correct) and verified against both the manifest and
    `SHA256SUMS`; the two must agree with each other first.
 4. `npm ci --ignore-scripts` in the install root (lockfile integrity for the
@@ -61,41 +62,37 @@ no-op unless opt-in `PRIME_AGENT_BOOTSTRAP_*` variables are set, and the
 native dependencies (zeromq, koffi) ship prebuilt binaries for the supported
 platforms.
 
-The Python kernel (uv, CPython 3.11, a ~270 MB venv under the agent
-directory) is bootstrapped lazily by Prime on first tool use. The
-credential-free conformance tier never triggers a tool call and runs with
-`PRIME_AGENT_INSTALL_UV=0`, so neither CI nor a local run needs it.
+The Python kernel (uv, CPython, a venv under the agent directory) is
+bootstrapped lazily by Prime on first tool use. The conformance runtime tier
+does exercise a real tool call (the D2 effect is a real `ipython` cell), so
+a conformance run needs `uv` reachable and network access for the one-time
+kernel bootstrap into the fixture's own agent directory.
 
-## Runtime layout
+## Runtime layout the conformance suite relies on
 
-The Governor never uses Prime's default socket (`$TMPDIR/prime-agent-<uid>/daemon.sock`)
-or the developer's `~/.prime`. A Governor instance names its own supervisor
-socket, agent directory, HOME and TMPDIR, and spawns the supervisor with
-`prime-agent --mode daemon --daemon-socket <path>` under a positive
-environment allowlist (`governor/prime/env.ts`).
+The suite never uses Prime's default socket
+(`$TMPDIR/prime-agent-<uid>/daemon.sock`) or the developer's `~/.prime`. Each
+fixture names its own supervisor socket, agent directory, HOME and TMPDIR
+under `/tmp/cg-XXXXXX` and starts the supervisor with
+`prime-agent --mode daemon --daemon-socket <path>`.
 
-`TMPDIR` must be short. Prime places worker sockets at
-`<TMPDIR>/prime-agent-<uid>/worker-<12 hex>-<12 hex>.sock`, and macOS caps a
-Unix socket path at 104 bytes. The default macOS `TMPDIR` overflows this for
-worker sockets (a bare `listen EINVAL`), which is why the conformance fixture
-lives under `/tmp/cg-XXXXXX` and why `spawnSupervisor` refuses a `TMPDIR`
-that cannot fit.
+Prime facts measured on the pinned build (the 2026-09-04 proof unless noted):
 
-Prime facts the Governor depends on, all measured on the pinned build
-(Issue #15 unless noted):
-
-- `create`/`attach` forward `launchEnv` to the supervisor, and the supervisor
-  hands its own environment to every worker (Issue #17). Both edges are
-  allowlisted.
+- `TMPDIR` must be short. Prime places worker sockets at
+  `<TMPDIR>/prime-agent-<uid>/worker-<12 hex>-<12 hex>.sock`, and macOS caps a
+  Unix socket path at 104 bytes; the default macOS `TMPDIR` overflows this.
 - `prime-agent --version` prints to stderr.
-- All print-mode invocations read a prompt from stdin; close it.
-- `shutdown` without a TTY needs `force: true`; the fixture always sends it.
-- `activity` in a session summary is not a health signal (D10);
-  `workerState` is.
-- `get_rlm_children` on a reopened parent is empty (D9); read the roster.
-- `ack_result` compacts the journal entry and re-admits the same id as new
-  work (D6). The Governor never sends it for a mutation it may still need
-  to reconcile.
+- Print-mode invocations read a prompt from stdin; close it.
+- `prime-agent shutdown` cannot be pointed at a non-default socket; the
+  fixture sends `{type:"shutdown", force:true}` on its own socket instead.
+- Prime sets `process.title = "prime-agent"`, so a `ps` command-line sweep
+  cannot see supervisors or workers on macOS. The fixture sweeps from the
+  pids it started plus the worker pids Prime persists under
+  `<agentDir>/daemon-workers/*.json`.
+- A resident root whose worker dies is not relaunched by the supervisor;
+  the stock way back is `prime-agent -r <sessionFile>`, which reopens the
+  same `sessionId` on the same transcript. `prime-agent attach <agent>` does
+  not (recorded upstream in `upstream/2026-09-04-prime-extension-and-daemon-gaps.md`).
 
 ## Re-pin ritual
 
@@ -104,21 +101,22 @@ A new Prime release is a new substrate until proven otherwise.
 1. Verify the tag resolves to a commit through the GitHub API; record both.
 2. Download every release asset and `SHA256SUMS`; hash each asset (sha256
    and sha512); confirm the release's own checksum file agrees.
-3. Update `pins/pins.json` (version, tag, commit, assets, protocol version
-   and schema revision as reported by `daemon_hello`), replace
-   `pins/SHA256SUMS`, and regenerate the install-root lockfile with
+3. Create `pins/prime-<version>/` with the install-root `package.json`,
+   `.npmrc` and a lockfile regenerated with
    `npm install --ignore-scripts --package-lock-only` against the vendored
-   wrapper tarball.
-4. Re-read the D2 code path. `conformance/tier1/prime-protocol.test.ts`
-   asserts the pinned supervisor still journals a worker-transport failure
-   as a definite result; if a new pin changes that, the assertion fails on
-   purpose so the Governor guard is re-evaluated deliberately rather than
-   kept by inertia. The read-only command set and the error-code
-   vocabulary are diffed against the pinned build the same way.
-5. `scripts/bootstrap.sh && scripts/conformance.sh` locally, then the
+   wrapper tarball; remove the previous install root; update
+   `pins/pins.json` (version, tag, commit, assets, protocol version and
+   schema revision as reported by `daemon_hello`) and replace
+   `pins/SHA256SUMS`.
+4. Re-read the upstream defect records under `docs/upstream/`. Each names
+   the Prime behaviour it depends on; a release that changes one of them
+   closes or reopens that record deliberately rather than by inertia.
+5. Re-screen every entry in `packages[]` against the new Prime: a package
+   that loads on Pi is not thereby proven on Prime (extension load failures
+   are silent in headless modes). The package-load conformance test is the
+   gate.
+6. `scripts/bootstrap.sh && scripts/conformance.sh` locally, then the
    `harness` CI job on the pull request. Both must be green.
-6. An independent reviewer who did not perform the re-pin re-runs the
-   D1/D2/D8 runtime tests.
 
 Upgrading across a daemon protocol or schema revision is a substrate change
 in its own right and goes back through ADR 0009's acceptance conditions.

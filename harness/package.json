@@ -1,0 +1,30 @@
+{
+  "name": "@commandgovernor/harness",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Command Governor: skills, prompts, roles and project configuration for a pinned Prime Agent. Contains no extensions and no runtime code.",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": [],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  },
+  "commandgovernor": {
+    "$comment": [
+      "What this package is, so a reader does not look for the runtime.",
+      "Everything that executes is Prime Agent (pins/pins.json substrate) or a",
+      "package listed in pins/pins.json packages[]. This package ships:",
+      "  skills/   Agent Skills (progressive disclosure; loaded on match)",
+      "  prompts/  Prime prompt templates (slash commands)",
+      "  agents/   role definitions in @gotgenes/pi-subagents' agent-file",
+      "            format; install into the project's .pi/agents/",
+      "  settings.project.json  the .prime/agent/settings.json a project",
+      "            adopts, listing the pinned packages by exact version",
+      "The existence proof for every component is",
+      "docs/research/2026-09-04-zero-custom-code-proof.md."
+    ],
+    "agents": "./agents",
+    "projectSettings": "./settings.project.json"
+  }
+}

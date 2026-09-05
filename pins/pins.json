@@ -1,8 +1,9 @@
 {
   "$comment": [
-    "Command Governor component manifest and pin record (ADR 0009 §11).",
-    "This file is the single source of truth for which runtime substrate the",
-    "distribution targets; nothing else may hardcode a version string.",
+    "Command Governor component manifest and pin record (ADR 0009 §11, ADR 0010).",
+    "This file is the single source of truth for the runtime substrate and for",
+    "every third-party package the distribution installs; nothing else may",
+    "hardcode a version string.",
     "",
     "Prime Agent is not published to the npm registry. Its wrapper package",
     "declares its three sibling packages as bare URLs on a Cloudflare R2 bucket",
@@ -14,97 +15,272 @@
     "proceed if pins/SHA256SUMS and this record disagree.",
     "",
     "Prime republishes upstream Pi's package names (@earendil-works/pi-agent-core,",
-    "pi-ai, pi-tui) at its own 0.8.1 line. One node_modules tree cannot hold",
-    "both Pi 0.84.4 and Prime 0.8.1, so the upstream-Pi fallback below is a",
-    "record, never a co-install; the conformance suite asserts the install root",
+    "pi-ai, pi-tui) at its own version line. One node_modules tree cannot hold",
+    "both upstream Pi and Prime, so the upstream-Pi fallback below is a record,",
+    "never a co-install; the conformance suite asserts the install root",
     "contains no @earendil-works/pi-coding-agent.",
     "",
     "Third-party package policy (packages[]): an entry MUST carry either an",
     "exact npm version (exactVersion) or a 40-character git commit SHA",
-    "(resolvedSha), a license, a review date and the authority it owns. A bare",
-    "name, a branch, or a tag is not a pin and the conformance suite rejects it."
+    "(resolvedSha), a license, a review date and the single concern it owns.",
+    "A bare name, a branch, or a tag is not a pin and the conformance suite",
+    "rejects it. Two entries may not own the same concern.",
+    "",
+    "Concerns (concerns[]): one owner per concern with its ADR 0010 disposition. Assigned owners are `prime-agent`, a packages[] source, or a repository path. Unassigned concerns name a planned owner and a phase so they cannot be adopted by accident."
   ],
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "substrate": {
     "name": "prime-agent",
     "displayName": "Prime Agent",
-    "version": "0.8.1",
-    "tag": "v0.8.1",
+    "version": "0.9.1",
+    "tag": "v0.9.1",
     "repository": "https://github.com/PrimeIntellect-ai/prime-agent",
-    "commit": "514633727bf26d74f39f3119c2b0e31a5ceb2a9d",
-    "commitNote": "Tag v0.8.1 resolves to this commit; verified via the GitHub API during Gate S0 (Issue #15) and again when this manifest was written.",
+    "commit": "81ae3cb34d27d38ee37f9e205a1e73694993b344",
+    "commitNote": "Tag v0.9.1 resolves to this commit; verified via the GitHub API (git/ref/tags/v0.9.1) on 2026-09-04.",
     "license": "MIT",
-    "licenseNote": "MIT License, Copyright (c) 2025 Mario Zechner, Copyright (c) 2026 Prime Intellect (LICENSE at the pinned commit). No distribution restriction blocks shipping it as the substrate.",
-    "releaseBaseUrl": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.8.1/",
-    "installRoot": "pins/prime-0.8.1",
-    "vendorDir": "pins/prime-0.8.1/vendor",
-    "binary": "pins/prime-0.8.1/node_modules/.bin/prime-agent",
-    "daemonProtocol": { "name": "prime-agent.daemon", "version": 7, "schemaRevision": 22 },
-    "engines": { "node": ">=22.19.0" },
+    "licenseNote": "MIT License, Copyright (c) 2025 Mario Zechner, Copyright (c) 2026 Prime Intellect. No distribution restriction blocks shipping it as the substrate.",
+    "releaseBaseUrl": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.1/",
+    "installRoot": "pins/prime-0.9.1",
+    "vendorDir": "pins/prime-0.9.1/vendor",
+    "binary": "pins/prime-0.9.1/node_modules/.bin/prime-agent",
+    "daemonProtocol": {
+      "name": "prime-agent.daemon",
+      "version": 7,
+      "schemaRevision": 25
+    },
+    "engines": {
+      "node": ">=22.19.0"
+    },
     "assets": [
       {
-        "name": "prime-agent-0.8.1.tgz",
+        "name": "prime-agent-0.9.1.tgz",
         "role": "wrapper",
         "npmName": "prime-agent",
-        "sha256": "46c24db1782dd31adc35d5c6cbcc75564faba6ced3bf2ccf03d836ee77134475",
-        "sha512": "sha512-KM5zKMOG1tVCYbpqe+vjzUIL9vYl7Wy2qfrmykgVmIx2e48/D/PTqVA3q1ZqF+B0sYEDmj2i7JKfTGcSulGTHQ==",
-        "bytes": 9616163
+        "sha256": "573bce0cd004fc62052e9a924089941b7f39266ab71e66a94c85a1f9d35835ba",
+        "sha512": "sha512-qsqmeLacEIr+g62ZsKffICoS0W7hy4inzU0wD8ATKWTFT9VwPSPb/cFBBy4Omdzndct7qkAqFh6g/V+g8CDOvA==",
+        "bytes": 9803080
       },
       {
-        "name": "prime-agent-core-0.8.1.tgz",
+        "name": "prime-agent-core-0.9.1.tgz",
         "role": "sibling",
         "npmName": "@earendil-works/pi-agent-core",
-        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.8.1/prime-agent-core-0.8.1.tgz",
-        "sha256": "0cc3660953545f8ac9a7e704fcb9875f954d58c3085304080ef615c280aa5748",
-        "sha512": "sha512-5UDt+8xrX7XmlHUNTkrDuO13eOBTTydDzKCf7sjvbYsCjeKXpkyRECCyxykYe6pCskfYxnn7HnKEP0nP3snYag==",
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.1/prime-agent-core-0.9.1.tgz",
+        "sha256": "fb6f3a5dcc8b69c5eeb3beff722b5e0f09885c14849db50bc1d7c0f1d064151c",
+        "sha512": "sha512-db0B1P5k57UU7jhyEvZIxkJ5ICG/yCKDB/4dUbw9E87TJDx5Qioy+dgr5KcbECjJfKDiqWy+HvYzMIDMizTY6g==",
         "bytes": 59520
       },
       {
-        "name": "prime-agent-ai-0.8.1.tgz",
+        "name": "prime-agent-ai-0.9.1.tgz",
         "role": "sibling",
         "npmName": "@earendil-works/pi-ai",
-        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.8.1/prime-agent-ai-0.8.1.tgz",
-        "sha256": "f6c3bdb6093bc24a327546fe865ef9a4a172c734fcd4c4093e30c19476f0134d",
-        "sha512": "sha512-d0p72C8xYe4i3ktmIfbaWmftgT9U5UZiLvHhyWmVhXhubKAFI6lNJt1l4qxeKbfagFBTwvkDWfqny1Os87rY7Q==",
-        "bytes": 552864
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.1/prime-agent-ai-0.9.1.tgz",
+        "sha256": "11b5b4cf67b6bb2d3420a44fb69181bc9d94d81e69a2b4fde07eb9c99f5faf4f",
+        "sha512": "sha512-whZ00rxQB7FSH457ge+SoH3m60S3ciLfmIGWdlJs3AN7m6yr9nF4CLJ3sAs59494/a2ufEuaxSafj7ALdMqF3w==",
+        "bytes": 554911
       },
       {
-        "name": "prime-agent-tui-0.8.1.tgz",
+        "name": "prime-agent-tui-0.9.1.tgz",
         "role": "sibling",
         "npmName": "@earendil-works/pi-tui",
-        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.8.1/prime-agent-tui-0.8.1.tgz",
-        "sha256": "bd07bccee0ca495565b1d62e9411f3fdebe49e3dfa52870564f08af5e61fde15",
-        "sha512": "sha512-Pr9XuhRNN8NihzSxHvoTUTXg/o7HbJEJXSnGM/PU7D2FaUenF3tMmaRbroqmsfcFl27nP5SQ30U0ipl/USMy/A==",
-        "bytes": 427328
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.1/prime-agent-tui-0.9.1.tgz",
+        "sha256": "4f3eaca2814944d3993073e0b88c0bde54a641ddb5132fbe107e392b997e38ec",
+        "sha512": "sha512-eCsBi6FTUkCI9n1OZvQpcoSrreYmFr7rTV2zpb1tbU69iBWOEkSMGThTZ0fmwF4W9HMuKKKcKfUT2RMqADXneA==",
+        "bytes": 427760
       }
     ],
     "checksumAsset": "SHA256SUMS",
     "requirements": {
       "node": ">=22.19.0",
       "npm": "lockfile v3 (npm >= 9)",
-      "python": "CPython 3.11 via uv, bootstrapped lazily on first tool use into <agentDir>/kernel-venv (~270 MB, network required). Not needed by the credential-free conformance tier, which never triggers a tool call.",
+      "python": "CPython via uv, bootstrapped lazily into <agentDir>/kernel-venv on first tool use (network required). 0.9.x uses a minimal REPL runtime without ipykernel.",
       "network": "GitHub release download at bootstrap; npm registry for transitive dependencies; R2 mirror for the three sibling tarballs (bytes verified against the sha512 above).",
       "installScripts": "ignored (npm ci --ignore-scripts). Prime's postinstall is a no-op unless PRIME_AGENT_BOOTSTRAP_* opt-ins are set; zeromq and koffi ship prebuilt binaries for darwin-arm64 and linux-x64."
     },
-    "authority": {
-      "processes": "detached supervisor plus one resident worker process per root session (each may spawn a Python kernel and bash subprocesses)",
-      "filesystem": "<agentDir> (sessions, daemon-workers, session-leases, session-artifacts, rlm-ledger, logs, kernel-venv) and <TMPDIR>/prime-agent-<uid>/ for Unix sockets",
-      "network": "model providers as configured; telemetry disabled by the Governor (PRIME_AGENT_TELEMETRY=0)",
-      "credentials": "create/attach forward launchEnv to the supervisor and worker; the Governor client sends a positive allowlist only (governor/prime/env.ts)"
-    },
-    "updatePolicy": "Re-pin only through docs/prime-distribution.md's ritual: new tag -> commit verified via API -> assets downloaded and hashed -> pins.json, pins/SHA256SUMS and the install-root lockfile updated together -> scripts/conformance.sh green locally AND in the merge-gating harness job -> independent re-run of D1/D2/D8.",
-    "conformance": "scripts/conformance.sh (Tier 1 credential-free, including the runtime tier under conformance/runtime that drives the pinned daemon in isolation).",
-    "reviewedAt": "2026-09-01",
-    "reviewedBy": "docs/research/2026-09-01-agent-harness-landscape-and-substrate-bakeoff.md; Issue #15 (Gate S0/S1 real-machine evidence); Issue #17 (this adaptation layer)"
+    "updatePolicy": "Re-pin only through docs/prime-distribution.md's ritual: new tag -> commit verified via API -> assets downloaded and hashed -> pins.json, pins/SHA256SUMS and the install-root lockfile updated together -> scripts/conformance.sh green locally AND in the merge-gating harness job.",
+    "conformance": "scripts/conformance.sh (credential-free; drives the pinned Prime through its own stock clients in isolated roots).",
+    "reviewedAt": "2026-09-04",
+    "reviewedBy": "docs/research/2026-09-04-zero-custom-code-proof.md"
   },
   "fallback": {
-    "$comment": "Recorded, not installed. ADR 0009 §2 names upstream Pi v0.84.4 as the first fallback if Prime fails; frozen PR #16 carries the working bootstrap for it.",
+    "$comment": "Recorded, not installed. ADR 0009 §2 names upstream Pi as the first fallback if Prime fails.",
     "package": "@earendil-works/pi-coding-agent",
-    "version": "0.84.4",
-    "commit": "b79e4cc834970cca69daebffab7df1da7d1e52c4",
-    "donor": "PR #16 @ 9e9b892271a1dc09a9b2215875754b39a750183b (tag preserve/pi-native-foundation-9e9b892)",
+    "version": "0.85.0",
     "coInstall": "forbidden"
   },
-  "packages": [],
-  "authorities": "harness/authorities.json"
+  "packages": [
+    {
+      "source": "npm:pi-tasks@0.2.5",
+      "exactVersion": "0.2.5",
+      "integrity": "sha512-JF4bj8bSkpkeBloU3pe1yQZXov9LlyR17jeQeH8KTeOLVY7KX2Oz15pN/YQiHLmK/KdUgd/DFfE0+9fUnIq1fQ==",
+      "repository": "https://github.com/nczz/pi-tasks",
+      "gitHead": "49fdcc18b7d4503c4907acec10b5b6388f13a595",
+      "license": "MIT",
+      "reviewedAt": "2026-09-04",
+      "authority": "durable-task-evidence",
+      "registers": "task_* tools; state lives in Prime's session JSONL as pi-tasks:event custom entries (branch-local, compaction-safe)",
+      "note": "Evidence-gated completion enforced in its reducer. force_with_reason is a recorded bypass (warning + capped confidence), acceptable for an advisory evidence ledger; acceptance authority is GitHub, not this ledger. Loads on the pinned Prime (measured 2026-09-04)."
+    },
+    {
+      "source": "npm:@gotgenes/pi-subagents@21.4.0",
+      "exactVersion": "21.4.0",
+      "integrity": "sha512-Ng0NiV9GKKcmRJzMw919WbadvLpeh6HNC+tTT4BM+MNfIXPvETXuFbe3/azobcrUPJtWkIaZ79MwFuP5amPiag==",
+      "repository": "https://github.com/gotgenes/pi-packages",
+      "license": "MIT",
+      "reviewedAt": "2026-09-04",
+      "authority": "delegation-runtime",
+      "registers": "subagent, get_subagent_result, steer_subagent tools; /subagents:* commands; agent types from .pi/agents/<name>.md",
+      "note": "The only delegation package that loads unpatched on the pinned Prime (pi-subagents and pi-squad fail on Prime's @earendil-works/pi-ai/compat alias). Terminal state comes from its own subagents:* event bus, not from agent_settled, which Prime lacks; completion nudges to the parent do not fire on Prime, so the parent polls get_subagent_result. Command Governor's roles are its agent files (harness/agents)."
+    },
+    {
+      "source": "npm:pi-pr-review@1.17.10",
+      "exactVersion": "1.17.10",
+      "integrity": "sha512-XWKzel+DdtoIyxTMQAwjs4busrgSTW9ewRQudoQlfzJOQSeIEFwclxDa6ellLDn126De9FFD4sm7i2p+Uwz80Q==",
+      "repository": "https://github.com/10ego/pi-pr-review",
+      "license": "MIT",
+      "reviewedAt": "2026-09-04",
+      "authority": "github-pr-review",
+      "registers": "/pr-review command and review tools; host-owned structured findings",
+      "note": "Reviewed-head binding (40/64-hex SHA, frozen), staleness re-check at publish, stale APPROVE refused by default, publicationAttemptId for idempotent retries. Loads on the pinned Prime (measured 2026-09-04). Live GitHub publishing is exercised only with real credentials."
+    },
+    {
+      "source": "npm:pi-gpt@0.4.3",
+      "exactVersion": "0.4.3",
+      "integrity": "sha512-tYeYG9kZMIzRouw+YxNphvtdOE0qw5CbtXiPTRltSevCW0hgVQbTJps3AU1G4J7KYR0P9RUEJyKmoLbJBBPtPw==",
+      "repository": "https://github.com/davidroman0O/pi-gpt (declared; returns 404 — the npm tarball is the only obtainable source)",
+      "gitHead": "d0be5dc743d1edf223f5ebb63f85a4744e76e92f",
+      "license": "MIT",
+      "reviewedAt": "2026-09-04",
+      "authority": "foreman-transport",
+      "registers": "gpt_account_status, gpt_list_models, gpt_chat, gpt_list_chats, gpt_get_conversation, gpt_get_message tools; /gpt-observer command (observer extension, off by default); chatgpt skill",
+      "note": "Direct ChatGPT Web transport over chatgpt.com/backend-api with the user's Codex login token (~/.codex/auth.json); its send path solves the provider's sentinel/proof-of-work/turnstile checks. Adopted 2026-09-04 on the user's explicit decision to accept that account risk (ADR 0008 §8, amended). Measured on Prime 0.9.1: loads unmodified; the token reads browser-created threads and the project conversation list; a send into an exact pre-existing browser thread and a correlated readback both succeeded (docs/research/2026-09-04-zero-custom-code-proof.md §6). Not durable across a send: the delivery id goes in the message body and an ambiguous send is resolved by readback, never by resend (harness/skills/cg-foreman). Known defects carried as upstream reports: no assertion that the returned conversation_id equals the requested one; a swallowed leafMessageId failure sends with a fabricated parent."
+    }
+  ],
+  "concerns": [
+    {
+      "concern": "runtime-substrate",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "prime-agent",
+      "note": "Daemon supervisor, resident/client-owned workers, session leases, command journal, schedules, goals, RLM children, agent messaging, continual harness, ACP."
+    },
+    {
+      "concern": "session-persistence",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "prime-agent",
+      "note": "Prime's session JSONL. No competing transcript format; package state that must be durable lives in Prime custom entries (pi-tasks) or the package's own store."
+    },
+    {
+      "concern": "resident-root-recovery",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "prime-agent",
+      "note": "D1. A dead resident root is reopened by the stock client (`prime-agent -r <sessionFile>`) on the same sessionId; concurrent reopens converge on one worker via the per-path lease; a dead supervisor is replaced by a live worker. Measured 2026-09-04; asserted by conformance/runtime/d1-*."
+    },
+    {
+      "concern": "external-effect-ambiguity",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "prime-agent",
+      "note": "D2. After worker loss Prime restores the root with a model-visible prime-agent.worker_recovery marker and replays nothing; no stock client re-issues a tool call, agent message, scheduled prompt or RPC bash command. Effect count 1 on every stock surface (negative control 2). Asserted by conformance/runtime/d2-*. The remaining upstream defect (untyped `Daemon worker socket closed` on RPC) misreports and duplicates nothing: docs/upstream."
+    },
+    {
+      "concern": "session-path",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "prime-agent",
+      "note": "D8. Every stock persistent session gets <sessionDir>/<sessionId>.jsonl; --no-session is the only pathless surface. Asserted by conformance/runtime/d8-*."
+    },
+    {
+      "concern": "durable-task-evidence",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "npm:pi-tasks@0.2.5",
+      "note": "Evidence-gated completion, acceptance criteria, blockers, plans, drift detection; state in Prime session entries."
+    },
+    {
+      "concern": "delegation-runtime",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "npm:@gotgenes/pi-subagents@21.4.0",
+      "note": "In-process delegation with agent types, per-agent tool allowlists, locked fields, recursion guard, terminal-state events. Command Governor's roles are agent files in its format (harness/agents)."
+    },
+    {
+      "concern": "agent-role-definitions",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "harness/agents",
+      "note": "Configuration in @gotgenes/pi-subagents' agent-file format, installed into the project's .pi/agents/. On Prime the only built-in tool is ipython, so a read-only reviewer cannot be expressed by tool allowlist; the reviewer's independence rests on the acceptance authority below, not on tool restriction."
+    },
+    {
+      "concern": "github-pr-review",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "npm:pi-pr-review@1.17.10",
+      "note": "Reviewer lane for GitHub-backed work; reviewed-head binding and stale-approval refusal for reviews written on GitHub. Not the acceptance authority (see independent-acceptance)."
+    },
+    {
+      "concern": "independent-acceptance",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "npm:pi-gpt@0.4.3",
+      "note": "worker finished != work accepted. The acceptance record is the foreman's correlated reply in its ChatGPT thread (cg-foreman skill: echoes the delivery id, names the head SHA), written by a model the implementer does not run; GitHub merge follows that verdict and is bound to the same head. GitHub review is NOT the boundary on this repository: protect-main requires zero approving reviews and the foreman's GitHub connector is the same user as the PR author (measured by the foreman 2026-09-05), so pi-pr-review's reviewed-head binding guards GitHub-side reviews but does not constitute acceptance. Prime's --autonomous-gate can require the verdict before a run may finish. On a single-user machine no local file, env var or extension tool is an identity boundary, so no local plugin can provide this property; the proposed cg_accept plugin was not built."
+    },
+    {
+      "concern": "conformance-suite",
+      "status": "assigned",
+      "disposition": "PLUGIN",
+      "owner": "conformance",
+      "note": "Test code, not production code. Black-box against stock Prime clients and the pinned packages; gates every re-pin and merge. No second suite may claim to verify the pin."
+    },
+    {
+      "concern": "pin-and-distribution",
+      "status": "assigned",
+      "disposition": "PLUGIN",
+      "owner": "pins",
+      "note": "Manifest, checksums, install root and scripts/bootstrap.sh. Install/distribution metadata plus a verification shell script; no runtime behaviour."
+    },
+    {
+      "concern": "foreman-transport",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "npm:pi-gpt@0.4.3",
+      "note": "Exact pre-existing ChatGPT thread, message ids, active-branch readback; send and correlated readback measured live 2026-09-05 (UTC) on the user's real foreman thread. The correlation rules (CG-D envelope, reply echo, stale-revision rejection, never resend on ambiguity) are the cg-foreman skill, not code. pi-oracle stays the browser-backed alternative once its Prime patch lands upstream (docs/upstream/); @cobuild/review-gpt is UNLICENSED and a standalone CLI. Command Governor owns no browser runtime."
+    },
+    {
+      "concern": "tool-gating-and-veto",
+      "status": "unassigned",
+      "phase": "upstream",
+      "plannedOwner": "a Prime kernel-boundary host hook for rlm.bash (upstream), then npm:@gotgenes/pi-permission-system once it loads on Prime; OS containment of the kernel process meanwhile",
+      "note": "ADR 0008 invariant 7 has no enforcement point on Prime 0.9.1: the only built-in tool is ipython and bash() runs inside the kernel below every extension hook. Measured: the permission package does not load on Prime and, patched, cannot see kernel-side bash. No Command Governor extension can close this either."
+    },
+    {
+      "concern": "compaction-summary",
+      "status": "unassigned",
+      "phase": "memory-bakeoff",
+      "plannedOwner": "Prime's own compaction unless a measured gap justifies exactly one package",
+      "note": "Only one owner; exact control facts remain deterministic rather than model-memory authority."
+    },
+    {
+      "concern": "observational-memory",
+      "status": "unassigned",
+      "phase": "memory-bakeoff",
+      "plannedOwner": "Prime's continual harness (memories/skills/subagent specs) unless downstream-action evaluation shows a gap",
+      "note": "Optional and advisory. No Governor memory engine."
+    },
+    {
+      "concern": "acp-boundary",
+      "status": "unassigned",
+      "phase": "interop",
+      "plannedOwner": "Prime's stable ACP v1 server when a shipped path needs it",
+      "note": "Interoperability, not internal authority. Prime has no ACP client; driving another ACP agent from Prime is an upstream contribution."
+    },
+    {
+      "concern": "sandbox-profile",
+      "status": "unassigned",
+      "phase": "optional-hardening",
+      "plannedOwner": "an OS isolation mechanism applied to the Prime kernel process for untrusted workloads",
+      "note": "Optional for the trusted-local product (ADR 0010 §19); the load-bearing control for destructive work until tool gating exists."
+    }
+  ]
 }

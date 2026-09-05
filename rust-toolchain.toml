@@ -1,7 +1,0 @@
-[toolchain]
-# Pinned current stable at the scaffold commit (verified 2026-08-31:
-# `rustup update stable` resolved to 1.98.0, released 2026-08-20).
-# docs/architecture.md names 1.98.0 as the candidate toolchain; re-verified here.
-channel = "1.98.0"
-components = ["rustfmt", "clippy"]
-profile = "minimal"

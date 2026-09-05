@@ -1,78 +1,99 @@
 # Command Governor
 
-Command Governor is a curated Prime/Pi-family harness distribution for durable, foreman-led AI/software-engineering work.
+Command Governor is a curated, pinned distribution of [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent)
+for durable, foreman-led AI/software-engineering work.
 
 [commandgovernor.com](https://commandgovernor.com)
 
+## What it is
+
+```text
+Prime Agent v0.9.1 (release assets verified against two checksum authorities)
+  + pi-tasks                 durable task/evidence contract
+  + @gotgenes/pi-subagents   delegation runtime; Command Governor's roles are its agent files
+  + pi-pr-review             GitHub review lane with reviewed-head binding
+  + @commandgovernor/harness skills, prompts, role files, project settings
+  + pins/ and scripts/       manifest, checksums, install root, bootstrap
+  + conformance/             black-box tests through stock Prime clients
+```
+
+**Command Governor contains no custom production code.** Everything that
+executes is Prime Agent or a package Prime loads. The repository ships a
+manifest, two shell scripts, configuration, prose, and tests. That is not a
+minimalism preference; it is the result of a proof
+([`docs/research/2026-09-04-zero-custom-code-proof.md`](docs/research/2026-09-04-zero-custom-code-proof.md))
+that ran every product requirement through the surfaces a user actually
+runs and found that the substrate and existing packages already satisfy
+them, or that the gap is one no local code could close.
+
 ## Current architecture
 
-**Do not infer the current implementation direction from old Rust topology documents, closed PRs, or previously green implementation branches.**
+Read in order:
 
-Read these first:
+1. [ADR 0008](docs/adr/0008-adopt-pi-native-command-governor-harness.md) — Command Governor is a Pi-family distribution, not a runtime.
+2. [ADR 0009](docs/adr/0009-prime-agent-substrate-and-acp-boundary.md) — Prime Agent is the substrate (Accepted 2026-09-04).
+3. [ADR 0010](docs/adr/0010-keep-command-governor-composition-first.md) — every capability is `USE EXISTING`, `PLUGIN`, `TEMP WORKAROUND` or `DELETE`, and existence is proven before correctness.
+4. [The proof](docs/research/2026-09-04-zero-custom-code-proof.md) — the dispositions, with evidence.
 
-1. [ADR 0008 — adopt the Pi-native harness architecture](docs/adr/0008-adopt-pi-native-command-governor-harness.md)
-2. [ADR 0009 — Prime Agent substrate selection](docs/adr/0009-prime-agent-substrate-and-acp-boundary.md) — still Proposed while final substrate acceptance is proven
-3. [ADR 0010 — keep Command Governor composition-first](docs/adr/0010-keep-command-governor-composition-first.md)
-4. [2026-09-02 composition/de-duplication audit](docs/research/2026-09-02-command-governor-composition-deduplication-audit.md)
+`main` plus the accepted ADRs are the architecture authority. Documents under
+`docs/history/` describe the retired standalone Rust design and are provenance
+only.
 
-The intended product shape is:
+## What the product guarantees, and who guarantees it
 
-```text
-Prime Agent
-  + selected reviewed Pi/Prime packages
-  + @commandgovernor/harness
-      - small Command-Governor-specific policy/integration extensions
-      - roles / skills / prompts / configuration
-      - focused conformance tests
-      - temporary compatibility shims only for proven upstream defects
+| Requirement (ADR 0008 §4) | Owner | How it is checked |
+| --- | --- | --- |
+| delegated work survives worker, supervisor and client restarts | Prime: per-path session leases, `prime-agent -r <sessionFile>`, supervisor replacement | `conformance/runtime/d1-*` |
+| an ambiguous external effect is never blindly replayed | Prime: worker recovery marker, no stock client re-issues a mutation | `conformance/runtime/d2-*` |
+| every session has an explicit durable transcript | Prime | `conformance/runtime/d8-*` |
+| worker finished ≠ work accepted; stale revisions cannot be accepted | the foreman's correlated ChatGPT reply (delivery id echoed, head SHA named) is the acceptance record; GitHub merge follows it; Prime `--autonomous-gate` | `conformance/runtime/foreman-transport` (TRN); `pins.json` concerns; gate test |
+| the pin is exactly what the release published | `pins/`, `scripts/bootstrap.sh` | `conformance/tier1/pin.test.ts` |
+| one owner per concern; every package pinned, licensed, and observed to load | `pins/pins.json` | `conformance/tier1`, `conformance/runtime/package-load` |
+
+One requirement has **no enforcement point on the current substrate** and
+is documented as open rather than claimed: user-owned approval of high-risk
+actions (Prime has no permission system and its Python kernel runs shell
+commands below every extension hook; see
+[`docs/threat-model.md`](docs/threat-model.md)).
+
+The ChatGPT Web foreman transport is the pinned `pi-gpt` package, driving
+ChatGPT's undocumented backend with the user's Codex login. It was adopted
+on the user's explicit acceptance of the account risk (ADR 0008 §8
+amendment) and measured live on the exact foreman thread.
+
+## Use it
+
+```sh
+scripts/bootstrap.sh        # verify and install the pinned Prime Agent
+scripts/conformance.sh      # prove the distribution on this machine
 ```
 
-Command Governor is **not** a second general-purpose runtime or control plane around Prime.
+For a project: copy `harness/settings.project.json` to
+`.prime/agent/settings.json` (Prime installs the pinned packages on startup)
+and `harness/agents/*.md` to `.pi/agents/`. Run `pins/prime-0.9.1/node_modules/.bin/prime-agent`
+from the project, or install the same release yourself and keep the
+`pins.json` version.
 
-Every custom capability must be classified as one of:
+The skill `cg-conformance` explains bootstrap, the suite, and how to read a
+failure; the prompt `cg-review` is the independent-review procedure.
 
-```text
-USE EXISTING
-PLUGIN
-TEMP WORKAROUND
-DELETE / DO NOT BUILD
-```
+## Contributing
 
-The first review question is always:
+Read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). The first review question for any
+production change is still **"should this code exist in Command Governor at
+all?"**, and as of this release the answer for every capability was no.
 
-> **Should this code exist in Command Governor at all?**
-
-Only after that is demonstrated should implementation correctness be reviewed.
-
-## Reliability goals
-
-The architecture pivot does not weaken the product semantics:
-
-- delegated work must survive relevant restarts and remain discoverable until disposition;
-- worker completion is not the same as independent acceptance/foreman disposition;
-- stale revisions cannot close newer work;
-- ambiguous external effects are reconciled rather than blindly replayed;
-- lossy memory/compaction is never authority for exact lifecycle, capability, safety, or user-owned decisions;
-- independent review cannot be satisfied by implementer self-certification.
-
-These are product requirements, not justification for duplicating Prime/Pi capabilities that already satisfy them.
-
-## Historical architecture
-
-ADRs 0001–0007 and the older Rust daemon/browser/MCP documents remain useful provenance and invariant material. Their implementation topology is superseded to the extent described by ADRs 0008–0010.
-
-The merged PR #18 Prime adaptation code is also subject to salvage under ADR 0010. Passing correctness review does not make a custom subsystem permanent architecture.
-
-## Instructions and contribution policy
-
-Global Claude Code and Codex instructions are managed declaratively by `DivMode/nix-config`; this repository does **not** duplicate them in repo-local `CLAUDE.md` or `AGENTS.md` files. Project-specific architecture lives in the ADRs and research above.
-
-Contributors should read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Global Claude Code and Codex instructions are managed declaratively by
+`DivMode/nix-config`; this repository does not carry repo-local `CLAUDE.md` or
+`AGENTS.md` copies.
 
 ## Research
 
-Current and historical source-grounded research lives under [`docs/research/`](docs/research/), including Pi/Prime package evaluation, ChatGPT transport research, DeepSeek Harness donor research, memory/session research, and the current de-duplication audit.
+Source-grounded research lives under [`docs/research/`](docs/research/);
+upstream defect records and ready-to-file drafts under
+[`docs/upstream/`](docs/upstream/).
 
 ## License
 
-Command Governor is licensed under the [MIT License](LICENSE).
+MIT, see [LICENSE](LICENSE).

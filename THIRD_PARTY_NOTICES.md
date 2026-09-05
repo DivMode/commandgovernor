@@ -3,13 +3,32 @@
 Command Governor is licensed under MIT. This notice records architecture
 inspiration/research separately from the compiled or packaged dependency graph.
 
-The repository currently contains no vendored or copied third-party implementation
-source code. Under ADR 0008 and proposed ADR 0009, Command Governor is now
-**composition-first**: reviewed third-party runtimes/packages may become pinned
-product dependencies after license, security, provenance, and conformance review.
-Research citation alone does not make a project a dependency, and any future source
-copy/adaptation requires file-level provenance plus the applicable license/NOTICE
-obligations before distribution.
+The repository contains no vendored or copied third-party implementation source
+code. Under ADRs 0008–0010 Command Governor is **composition-first** and ships no
+custom production code: the product is the pinned Prime Agent release plus the
+pinned packages below, installed by their own package managers at bootstrap or
+by Prime at startup. Research citation alone does not make a project a
+dependency, and any source copy/adaptation requires file-level provenance plus
+the applicable license/NOTICE obligations before distribution.
+
+## Pinned product dependencies
+
+Exact versions, hashes, repositories, licenses and owned concerns are in
+`pins/pins.json`; this list is the notice.
+
+| Component | Version | License | Source |
+| --- | --- | --- | --- |
+| Prime Agent (`prime-agent`, `@earendil-works/pi-agent-core`, `pi-ai`, `pi-tui` at Prime's line) | 0.9.1 | MIT (Mario Zechner 2025, Prime Intellect 2026) | <https://github.com/PrimeIntellect-ai/prime-agent> |
+| `pi-tasks` | 0.2.5 | MIT | <https://github.com/nczz/pi-tasks> |
+| `@gotgenes/pi-subagents` | 21.4.0 | MIT | <https://github.com/gotgenes/pi-packages> |
+| `pi-pr-review` | 1.17.10 | MIT | <https://github.com/10ego/pi-pr-review> |
+
+## Patch offered upstream, not shipped
+
+`docs/upstream/2026-09-04-pi-oracle-prime-compat.patch` is a proposed change to
+`fitchmultz/pi-oracle` (MIT) at tag `v0.7.20`, written for upstream submission.
+It is not applied, vendored or distributed by Command Governor; it is recorded
+so the provenance of the idea and the exact target revision are reviewable.
 
 ## Architecture / protocol references
 

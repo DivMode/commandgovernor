@@ -376,3 +376,17 @@ For every meaningful production change, reviewers must answer this question befo
 > **Should this code exist in Command Governor at all?**
 
 If the answer is not demonstrated from the current architecture and current capability evidence, the change is not ready to merge.
+## Outcome (2026-09-04)
+
+The existence test was applied to every component on `main` and to every
+donor idea above, with the actual product path exercised through stock
+Prime clients ([`../research/2026-09-04-zero-custom-code-proof.md`](../research/2026-09-04-zero-custom-code-proof.md)).
+Result: no `PLUGIN` and no `TEMP WORKAROUND` survived; every merged custom
+subsystem was `DELETE`; the package selection is `USE EXISTING` for task
+evidence, delegation, GitHub review and the ChatGPT foreman transport
+(`pi-gpt`, adopted on the user's explicit risk decision, ADR 0008 §8
+amendment); independent acceptance is the foreman's correlated reply in its
+ChatGPT thread, with GitHub merge after it; and the one concern with no
+owner (tool gating) is an upstream gap that no Command Governor extension
+could close. Command Governor ships zero custom production code.
+This ADR remains the controlling rule for any future proposal to add some.
