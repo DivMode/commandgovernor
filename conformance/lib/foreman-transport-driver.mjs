@@ -14,8 +14,8 @@
 //
 // Nothing here re-implements a transport rule. Commands map one-to-one onto the
 // package's public surface: `leaf` -> leafMessageId, `send` -> complete,
-// `read` -> the same GET the package's gpt_get_conversation issues, `redact`
-// -> its output redaction. Output is one JSON object on stdout.
+// `read` -> the same GET the package's gpt_get_conversation issues, `tool` ->
+// one registered tool run through the extension's own entry point. Output is one JSON object on stdout.
 
 import { readFileSync } from "node:fs";
 
@@ -34,7 +34,6 @@ globalThis.fetch = (input, init) => {
 
 const { BackendClient } = await import(`${packageDir}/src/client.ts`);
 const { ConversationClient } = await import(`${packageDir}/src/conversation.ts`);
-const { redact } = await import(`${packageDir}/src/redact.ts`);
 
 const [command, ...args] = process.argv.slice(2);
 const emit = (value) => process.stdout.write(JSON.stringify(value));
@@ -82,10 +81,6 @@ try {
 				.filter((node) => node.message && !onBranch.has(node.message.id))
 				.map((node) => ({ id: node.message.id, role: node.message.author?.role ?? null }));
 			emit({ ok: true, conversationId: detail?.conversation_id ?? null, currentNode: detail?.current_node ?? null, chain, elsewhere });
-			break;
-		}
-		case "redact": {
-			emit({ ok: true, redacted: redact(args[0]) });
 			break;
 		}
 		case "tool": {

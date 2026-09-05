@@ -50,7 +50,7 @@ patches; Prime then installs it by path (`harness/settings.project.json`, or
 from another project). Nothing about it waits on a registry, an author, or an
 upstream. The manifest entry carries `origin` (where the tarball came from),
 `tarball` and `patches`; `conformance/runtime/foreman-transport.test.ts`
-(TRN-000, TRN-006) checks the committed bytes against the pin and that the
+(TRN-000, TRN-003) checks the committed bytes against the pin and that the
 patch holds on the shipped tool.
 
 To re-vendor: fetch the new tarball, record its sha512 as `integrity`, re-base

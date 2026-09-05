@@ -28,7 +28,7 @@ has to own, not by how much it builds.
 - Conformance rewritten as a black-box suite through stock clients.
 - `pi-gpt` vendored in-repo (committed tarball, committed two-guard patch,
   applied by bootstrap, installed by path) so nothing about the foreman
-  transport waits on a registry or an author; TRN-006 proves the patch on
+  transport waits on a registry or an author; TRN-003 proves the patch on
   the shipped tool; the opt-in live lane (LIVE-001…003) proves the transport
   inside a real Prime worker against the real account.
 - Substrate and package defect records kept under `docs/upstream/` as this

@@ -103,19 +103,18 @@ workers on purpose, and every file ends by sweeping its own process tree
   The role files under `harness/agents/` are installed into the fixture
   project's `.pi/agents/` and observed through the delegation package
   itself, which is what reads them.
-- **TRN-000…005** the ChatGPT foreman transport, on the pinned `pi-gpt`
-  package's own modules (tarball integrity checked against the manifest)
-  against a mock backend served by the test: exact-thread binding under the
-  current leaf with the caller's message id, persistently; the correlation
-  rules (echo, stale head, moved branch) decidable from the readback; the
-  package's redaction destroying an all-digit delivery id (why ids carry
-  letters); an ambiguous send producing exactly one request and being
-  resolved by reading (accepted-then-cut lands, rejected does not); thread
-  drift visible in the returned id; and TRN-006, the repository's own
-  patch on the vendored package holding on the shipped `gpt_chat` tool (a
-  drifted reply fails; an unreadable leaf fails before sending; the same
-  call passes when the backend behaves). Credential-free; the package under
-  test is the vendored tree bootstrap extracted and patched.
+- **TRN-000…003** the ChatGPT foreman transport, on the vendored `pi-gpt`
+  tree bootstrap extracted and patched, against a mock backend served by
+  the test. Three things that would break the foreman loop if a re-vendor
+  or re-base changed them: the committed tarball hashes to the pin and the
+  tree carries the patch (000); a send lands in the requested thread under
+  its current leaf with the caller's message id, persistently, and reads
+  back on the active branch (001); an ambiguous send is exactly one request
+  and is classified by reading, never by resending (002); the repository's
+  patch holds on the shipped `gpt_chat` tool, with the passing control
+  (003). Credential-free, no network. The correlation rules themselves are
+  prose in the skill and are not re-encoded as tests: a test of a checker
+  that lives in the test file measures nothing about the product.
 - **GATE-001** Prime's `--autonomous --autonomous-gate "<cmd>"` is a
   host-owned gate: with an identical scripted model, a run does not finish
   while the gate command fails, and finishes once the test (not the model)

@@ -243,7 +243,7 @@ extracts it and applies the committed patch `pins/patches/pi-gpt-0.4.3-foreman-g
 and Prime installs it by path. The patch closes the two shipped defects in
 `gpt_chat` (a drifted reply now fails instead of being reported as the
 requested thread's; an unreadable leaf now fails before sending instead of
-sending under a fabricated parent); TRN-006 runs the patched tool through
+sending under a fabricated parent); TRN-003 runs the patched tool through
 the extension's own entry point against the mock and shows both failures
 plus the passing control. Second, the transport was verified **inside a
 Prime worker**, not only from a script: with the scripted model issuing the
@@ -261,10 +261,10 @@ as rejected, a send is bound to the thread's current leaf, and an ambiguous
 send is classified by reading the thread and never resent. The delivery id
 must contain letters because `pi-gpt`'s readback redaction replaces any run
 of ten or more digits with `<PHONE>`. The credential-free conformance file
-`conformance/runtime/foreman-transport.test.ts` (TRN-000…005) measures, on
-the pinned package's own modules against a mock backend, that those rules
-are decidable from what the package sends and reads back, with negative
-controls for each; §12.
+`conformance/runtime/foreman-transport.test.ts` (TRN-000…003) protects the
+three package facts the rules stand on (exact-thread binding, one request
+per send, the repository's patch) against a re-vendor; the rules themselves
+are not re-encoded as tests; §12.
 
 ## 7. Tool gating and user-owned decisions — an upstream gap no plugin can close
 
@@ -373,7 +373,7 @@ The PR was retargeted onto `main` and finished on its branch.
 | Rust source + tests (`crates/`) | 49,142 (110 files) | 0 |
 | shell (`scripts/bootstrap.sh`, `scripts/conformance.sh`) | 251 | 276 |
 | harness configuration and prose (roles, skill, prompt, manifest, settings) | 495 | 398 |
-| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,540 in 10 test files (+10 lib); 90 tests, 15 suites, ~3 min; plus the opt-in live lane (3) |
+| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,433 in 10 test files (+10 lib); 87 tests, 15 suites, ~3 min; plus the opt-in live lane (3) |
 | tracked files | 238 | 91 |
 | Prime pin | 0.8.1 | 0.9.1 |
 | pinned packages | 0 | 3 |
@@ -388,7 +388,7 @@ Which external capability replaced each deleted subsystem:
 | durable filesystem helpers, process-identity probe | nothing needed; they served the two stores above |
 | daemon client, protocol slice, version gate | Prime's own clients; `daemon_hello` compared with the manifest by the conformance suite |
 | environment allowlist | not needed; Command Governor runs no process of its own |
-| foreman transport stub | the `cg-foreman` skill over the pinned `pi-gpt`; TRN-000…005 in the suite |
+| foreman transport stub | the `cg-foreman` skill over the pinned `pi-gpt`; TRN-000…003 in the suite |
 | role schema and its validator | `@gotgenes/pi-subagents` agent-file format, observed through the package by LOAD-001 |
 | authorities inventory | `pins/pins.json` `concerns[]`, checked by OWN-001 |
 | Rust oracle | `docs/research/2026-09-01-rust-invariant-catalog.md`, Git history, and the black-box suite for the semantics that survived |
