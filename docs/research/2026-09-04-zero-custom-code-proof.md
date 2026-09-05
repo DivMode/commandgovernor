@@ -373,7 +373,7 @@ The PR was retargeted onto `main` and finished on its branch.
 | Rust source + tests (`crates/`) | 49,142 (110 files) | 0 |
 | shell (`scripts/bootstrap.sh`, `scripts/conformance.sh`) | 251 | 276 |
 | harness configuration and prose (roles, skill, prompt, manifest, settings) | 495 | 398 |
-| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,514 in 10 test files (+10 lib); 90 tests, 15 suites, ~3 min; plus the opt-in live lane (3) |
+| conformance TypeScript/Python | 5,534 in 29 test files (+6 lib) | 4,540 in 10 test files (+10 lib); 90 tests, 15 suites, ~3 min; plus the opt-in live lane (3) |
 | tracked files | 238 | 91 |
 | Prime pin | 0.8.1 | 0.9.1 |
 | pinned packages | 0 | 3 |
