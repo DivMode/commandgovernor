@@ -26,7 +26,7 @@
     "A bare name, a branch, or a tag is not a pin and the conformance suite",
     "rejects it. Two entries may not own the same concern.",
     "",
-    "A vendored entry (tarball + patches) is pinned by the committed tarball's sha512 and installed by path; `origin` records where it came from. This is how a needed package with no maintainable upstream is kept in this repository instead of waited on.",
+    "A vendored entry (tarball + patches) is pinned by the committed tarball's sha512 and installed by path; `origin` records where it came from. This is how a needed package with no maintainable upstream is kept in this repository instead of waited on. `linkInto` lists repository paths whose node_modules get a link to the extracted tree, for a consumer that resolves the package by name rather than by path.",
     "Concerns (concerns[]): one owner per concern with its ADR 0010 disposition. Assigned owners are `prime-agent`, a packages[] source, or a repository path. Unassigned concerns name a planned owner and a phase so they cannot be adopted by accident."
   ],
   "schemaVersion": 3,
@@ -161,6 +161,24 @@
       "note": "Direct ChatGPT Web transport over chatgpt.com/backend-api with the user's Codex login token (~/.codex/auth.json); its send path solves the provider's sentinel/proof-of-work/turnstile checks. Adopted 2026-09-04 on the user's explicit decision to accept that account risk (ADR 0008 §8, amended). Vendored: scripts/bootstrap.sh verifies the committed tarball against `integrity`, extracts it to `source` and applies `patches` (two guards in gpt_chat: a failed leaf read fails the call instead of sending with a fabricated parent; a reply from another conversation id fails instead of being reported as the requested thread's). Measured on Prime 0.9.1: loads unmodified and patched; the token reads browser-created threads; a send into an exact pre-existing browser thread and a correlated readback both succeeded, from a script and from inside a Prime worker (docs/research/2026-09-04-zero-custom-code-proof.md §6). Not durable across a send: the delivery id goes in the message body and an ambiguous send is resolved by readback, never by resend (harness/skills/cg-foreman)."
     },
     {
+      "source": "./pins/packages/claude-agent-acp-0.75.1",
+      "origin": "npm:@agentclientprotocol/claude-agent-acp@0.75.1",
+      "tarball": "pins/packages/claude-agent-acp-0.75.1.tgz",
+      "lockfile": "pins/packages/claude-agent-acp-0.75.1.package-lock.json",
+      "linkInto": ["harness/extensions/claude-acp"],
+      "primePackage": false,
+      "exactVersion": "0.75.1",
+      "integrity": "sha512-Un6I4BRkhpCFS3I7kr5C/lkAm8Nc3VuGZU2YQ3xIpJAIxV94iWO0Q2CH2QABxMERpONRu4Le6XC9V+5PImQZ2A==",
+      "repository": "https://github.com/agentclientprotocol/claude-agent-acp",
+      "gitHead": "3e23c5b960b66a6d2c892e7524c952e731c076a7",
+      "license": "Apache-2.0",
+      "licenseNote": "Apache-2.0, Zed Industries. Redistribution is permitted; the tarball is committed unmodified and NOT forked, and THIRD_PARTY_NOTICES.md carries the attribution the licence requires.",
+      "reviewedAt": "2026-09-05",
+      "authority": "claude-agent-transport",
+      "registers": "nothing in Prime. `primePackage: false`: this is not a Prime extension but the ACP agent binary `dist/index.js`, spawned over stdio by harness/extensions/claude-acp. The conformance suite therefore measures it by running it and speaking ACP to it, not by asking Prime what it registered.",
+      "note": "The official ACP adapter for the Claude Agent SDK, published by Zed Industries and depending on @anthropic-ai/claude-agent-sdk 0.3.257 — the same SDK the retired bridge pinned. It is the piece that makes Claude Code the owner of its own session, transcript, compaction and resume cursor: the client sends only the new prompt and the adapter keeps the conversation. Vendored rather than installed from the registry so nothing depends on npm at run time: scripts/bootstrap.sh verifies the committed tarball against `integrity`, extracts it, installs its runtime dependencies from the committed lockfile (`npm ci --omit=dev`) and links it into `linkInto` so the extension resolves it by name. Not patched, and not forked. Measured 2026-09-05: initialize advertises loadSession, a session/new + two session/prompt turns answered on the user's Claude Code login with every Anthropic credential stripped from the child environment, and PromptResponse.usage carries per-turn inputTokens / cachedReadTokens / cachedWriteTokens."
+    },
+    {
       "source": "./pins/packages/pi-claude-agent-sdk-0.8.6",
       "origin": "npm:pi-claude-agent-sdk@0.8.6",
       "tarball": "pins/packages/pi-claude-agent-sdk-0.8.6.tgz",
@@ -272,11 +290,18 @@
       "note": "Exact pre-existing ChatGPT thread, message ids, active-branch readback; send and correlated readback measured live 2026-09-05 (UTC) on the user's real foreman thread. The correlation rules (CG-D envelope, reply echo, stale-revision rejection, never resend on ambiguity) are the cg-foreman skill, not code. pi-oracle stays the browser-backed alternative once its Prime patch lands upstream (docs/upstream/); @cobuild/review-gpt is UNLICENSED and a standalone CLI. Command Governor owns no browser runtime."
     },
     {
+      "concern": "claude-agent-transport",
+      "status": "assigned",
+      "disposition": "USE EXISTING",
+      "owner": "./pins/packages/claude-agent-acp-0.75.1",
+      "note": "The ACP agent Command Governor drives for Claude: the official @agentclientprotocol/claude-agent-acp, unforked and unpatched. It owns the Claude Code process, the SDK query and — decisively — the session, transcript, compaction and resume cursor. Command Governor owns the CLIENT half of that conversation (harness/extensions/claude-acp) and never the conversation itself."
+    },
+    {
       "concern": "tool-gating-and-veto",
       "status": "unassigned",
       "phase": "upstream",
       "plannedOwner": "a Prime kernel-boundary host hook for rlm.bash (upstream), then npm:@gotgenes/pi-permission-system once it loads on Prime; OS containment of the kernel process meanwhile",
-      "note": "ADR 0008 invariant 7 has no enforcement point on Prime 0.9.1: the only built-in tool is ipython and bash() runs inside the kernel below every extension hook. Measured: the permission package does not load on Prime and, patched, cannot see kernel-side bash. No Command Governor extension can close this either."
+      "note": "ADR 0008 invariant 7 still has no enforcement point for PRIME's own tools on Prime 0.9.1: the only built-in tool is ipython and bash() runs inside the kernel below every extension hook. Measured: the permission package does not load on Prime and, patched, cannot see kernel-side bash. PARTIALLY closed since 2026-09-05 for work done through the claude-acp provider: tool execution there happens inside Claude Code, which asks its ACP client before every tool, and harness/extensions/claude-acp answers that request from a user-owned approval policy (default `ask`; no interactive surface means deny). That covers the Claude lane only — a run on any other provider, or Prime's own kernel path, is still ungated — so the concern stays unassigned rather than being claimed closed."
     },
     {
       "concern": "compaction-summary",
@@ -297,7 +322,7 @@
       "status": "unassigned",
       "phase": "interop",
       "plannedOwner": "Prime's stable ACP v1 server when a shipped path needs it",
-      "note": "Interoperability, not internal authority. Prime has no ACP client; driving another ACP agent from Prime is an upstream contribution."
+      "note": "This entry is about Prime as an ACP SERVER — the edge where Prime is driven. `prime-agent --mode acp` is that, and nothing here ships a path that needs it yet. Correction, 2026-09-05: this note previously said driving another ACP agent from Prime 'is an upstream contribution'. That is false. Upstream Pi declined ACP twice on the record (issue #836, a working --mode acp PR closed the same day; issue #7320, the client-side ask specifically, closed not_planned), so there is no upstream to contribute the client half to; the supported seam is the extension mechanism, and at least eight published packages already use it. The client half is therefore a Command Governor concern with its own owner: see `claude-model-provider`."
     },
     {
       "concern": "sandbox-profile",

@@ -187,11 +187,61 @@ while [ "$i" -lt "$vendored_count" ]; do
 	if [ -n "$lockfile_rel" ]; then
 		[ -f "$repo_root/$lockfile_rel" ] || fail "vendored lockfile $lockfile_rel is missing"
 		cp "$repo_root/$lockfile_rel" "$dir/package-lock.json"
-		( cd "$dir" && npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 ) || fail "npm ci failed in $dir_rel (lockfile $lockfile_rel)"
+		# --omit=dev: a vendored package is installed to be RUN, never built here.
+		# Its devDependencies are its own build and test toolchain (test runners,
+		# linters, a second TypeScript) and installing them would add hundreds of
+		# packages to the trusted surface for no runtime effect.
+		( cd "$dir" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 ) || fail "npm ci failed in $dir_rel (lockfile $lockfile_rel)"
 	fi
+	# A consumer that resolves this package BY NAME (rather than by the path Prime
+	# installs it from) needs it on its own resolution path. `linkInto` names the
+	# repository directories whose node_modules gets a symlink to the extracted
+	# tree, so the pin's own layout stays the single authority for where the code
+	# is and nothing hardcodes a version-scoped path.
+	npm_name=$(printf '%s' "$entry" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).origin?.replace(/^npm:/,"").replace(/@[^@/]*$/,"") || ""')
+	link_targets=$(printf '%s' "$entry" | node -p '(JSON.parse(require("fs").readFileSync(0,"utf8")).linkInto||[]).join(" ")')
+	for link_rel in $link_targets; do
+		[ -d "$repo_root/$link_rel" ] || fail "linkInto target $link_rel does not exist"
+		[ -n "$npm_name" ] || fail "$dir_rel declares linkInto but has no npm origin to take a package name from"
+		link_dir="$repo_root/$link_rel/node_modules/$npm_name"
+		rm -rf "$link_dir"
+		mkdir -p "$(dirname "$link_dir")"
+		ln -s "$dir" "$link_dir" || fail "cannot link $dir_rel into $link_rel/node_modules/$npm_name"
+		printf 'bootstrap: linked %s into %s/node_modules/%s\n' "$dir_rel" "$link_rel" "$npm_name"
+	done
 	printf 'bootstrap: vendored %s -> %s (%s patch(es)%s)\n' "$tarball_rel" "$dir_rel" "$(printf '%s' "$patches" | wc -w | tr -d ' ')" "${lockfile_rel:+, dependencies from $lockfile_rel}"
 	i=$((i + 1))
 done
+
+# --- step 3c: substrate modules on the extension's resolution path ----------
+# Prime hands its extensions `@earendil-works/*` and `typebox` as jiti aliases
+# at load time, so nothing on disk is needed to RUN one. `tsc --noEmit` and the
+# conformance suite, which import the extension's modules directly, do need to
+# resolve them, so the pinned install root is linked into the Command Governor
+# extension's own node_modules. The jiti aliases still win at run time (they map
+# the specifier to Prime's own file paths), so this cannot create a second copy
+# of a package inside a Prime process. Every path comes from pins.json, so no
+# version string is written down a second time.
+
+ext_root="$repo_root/harness/extensions/claude-acp"
+if [ -d "$ext_root" ]; then
+	mkdir -p "$ext_root/node_modules/@earendil-works"
+	for sibling in pi-agent-core pi-ai pi-tui; do
+		rm -rf "$ext_root/node_modules/@earendil-works/$sibling"
+		ln -s "$install_root/node_modules/@earendil-works/$sibling" "$ext_root/node_modules/@earendil-works/$sibling" ||
+			fail "cannot link @earendil-works/$sibling into the claude-acp extension"
+	done
+	# Prime republishes upstream Pi's wrapper name from its own package.
+	rm -rf "$ext_root/node_modules/@earendil-works/pi-coding-agent"
+	ln -s "$install_root/node_modules/prime-agent" "$ext_root/node_modules/@earendil-works/pi-coding-agent" ||
+		fail 'cannot link prime-agent as @earendil-works/pi-coding-agent'
+	for direct in typebox; do
+		rm -rf "$ext_root/node_modules/$direct"
+		ln -s "$install_root/node_modules/$direct" "$ext_root/node_modules/$direct" ||
+			fail "cannot link $direct into the claude-acp extension"
+	done
+	printf 'bootstrap: linked the pinned substrate modules into harness/extensions/claude-acp/node_modules\n'
+fi
 
 # --- step 3b: the repository's own tooling ---------------------------------
 

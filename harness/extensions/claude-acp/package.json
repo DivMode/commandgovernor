@@ -1,0 +1,27 @@
+{
+  "name": "@commandgovernor/claude-acp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude on the user's subscription inside Prime Agent: a thin ACP client that drives the official claude-agent-acp adapter, so Claude Code owns its session, transcript, compaction and prompt-cache lineage.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "commandgovernor": {
+    "$comment": [
+      "The one piece of production code in this distribution, and ADR 0011 says",
+      "why it exists: Prime 0.9.1 ships an ACP *server* and no client, so nothing",
+      "already published can drive another ACP agent from inside Prime.",
+      "",
+      "It has no runtime dependencies on purpose. Prime exposes only its own pi-*",
+      "and typebox modules to extensions, so an ACP SDK import would need a",
+      "node_modules tree of its own; the wire surface used here is four requests,",
+      "one notification and two inbound request kinds.",
+      "",
+      "The adapter it drives is pinned separately in pins/pins.json and installed",
+      "by scripts/bootstrap.sh; this package resolves it, never vendors it."
+    ]
+  }
+}
