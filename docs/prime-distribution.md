@@ -38,6 +38,26 @@ its own version line. Two consequences the manifest encodes:
   `@earendil-works/pi-coding-agent` in the install root and any
   `@earendil-works` tree at the repository root.
 
+## Substrate patches
+
+Prime is installed verbatim from the verified release, then
+`scripts/bootstrap.sh` applies the deltas `pins/pins.json` lists under
+`substrate.patches`, each a `patch -p1` inside `substrate.installRoot`, right
+after `npm ci`. They are the only changes carried on the substrate itself.
+Every patch is named `prime-<version>-<what>.patch`, has a record under
+`docs/upstream/`, and is proved applied on the installed tree by
+`conformance/tier1/pin.test.ts` (reverse dry-run, plus a behavioural check for
+each). Upstream contribution is not a route here (Prime accepts changes only
+from approved contributors), so the record in `docs/upstream/` is the whole
+trail. Re-base at each re-pin; the bundle chunk names are content hashes.
+
+Current:
+
+- `prime-0.9.2-model-picker-configured-only.patch`: `/model`, Ctrl+P and the
+  configuration menu list only models a configured provider can run, instead
+  of Prime's entire built-in catalog with "sign in" rows
+  (`upstream/2026-09-05-prime-model-picker-lists-unconfigured-providers.md`).
+
 ## Vendored packages
 
 A package the product needs but whose only source is an npm tarball from an
@@ -180,7 +200,9 @@ A new Prime release is a new substrate until proven otherwise.
    repository's own records of substrate and package behaviour it works
    around, kept here whether or not anyone files them elsewhere; a release
    that changes one of them closes or reopens that record deliberately
-   rather than by inertia. Re-base the patches under `pins/patches/`.
+   rather than by inertia. Re-base the patches under `pins/patches/`, the
+   package ones and the substrate ones (`substrate.patches`; rename each to
+   the new version, since the conformance suite ties the name to the pin).
 5. Re-screen every entry in `packages[]` against the new Prime: a package
    that loads on Pi is not thereby proven on Prime (extension load failures
    are silent in headless modes). The package-load conformance test is the
