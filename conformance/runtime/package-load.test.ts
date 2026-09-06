@@ -85,8 +85,8 @@ const EXPECTED: Record<string, { tools: string[]; commands: string[]; providers?
 	},
 	"./pins/packages/pi-gpt-0.4.3": {
 		tools: ["gpt_account_status", "gpt_list_models", "gpt_chat", "gpt_list_chats", "gpt_get_conversation", "gpt_get_message"],
-		commands: ["gpt-observer"],
-		note: "The foreman transport, vendored and patched by scripts/bootstrap.sh and installed by path. Its ChatGPT client is constructed lazily on first tool use, so registration needs no Codex login; the fixture has none. The observer extension registers only its command and is off by default.",
+		commands: ["gpt-observer", "gpt"],
+		note: "The foreman transport, vendored and patched by scripts/bootstrap.sh and installed by path. Its ChatGPT client is constructed lazily on first tool use, so registration needs no Codex login; the fixture has none. The observer extension registers only its command and is off by default. The `/gpt` command (extensions/gpt-command.ts, added by the foreman-guards patch) is a deterministic slash command: review/research/chat driven directly on the keystroke, zero harness-model tokens.",
 	},
 	"./pins/packages/pi-claude-agent-sdk-0.8.6": {
 		tools: [],

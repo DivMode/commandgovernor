@@ -1,20 +1,53 @@
 diff -ruN a/README.md b/README.md
---- a/README.md	2026-09-05 19:26:04
-+++ b/README.md	2026-09-05 19:26:04
-@@ -43,8 +43,8 @@
+--- a/README.md	2026-09-06 01:59:58
++++ b/README.md	2026-09-06 00:47:46
+@@ -43,9 +43,40 @@
  ### Intelligence levels
  
  For `normal` chats: `instant` → `medium` → `high` → `extra_high` → `pro`.
 -Higher levels use more capable models and deeper thinking. `pro` uses
 -`gpt-5-5-pro`. You can also pin a specific `model` and `thinking_effort`
-+The default is `extra_high` (latest model, max thinking). `pro` uses
-+`gpt-6-pro`. You can also pin a specific `model` and `thinking_effort`
- (`min` / `standard` / `extended` / `max`).
+-(`min` / `standard` / `extended` / `max`).
++The default is `extra_high`, which resolves to `gpt-5-6-thinking` at `max`
++thinking — the newest non-pro thinker that is confirmed to serve its own model.
++`pro` uses `gpt-6-pro`. You can also pin a specific `model` and
++`thinking_effort` (`min` / `standard` / `extended` / `max`).
++
++> No intelligence tier maps to a `*-wm` "work model". `gpt-6-astra-wm` silently
++> serves `gpt-5-mini` at every effort while echoing the requested slug in
++> `default_model_slug`, so it is never used. When you pin a `model` explicitly,
++> the served model is `resolved_model_slug` (then `model_slug`), never
++> `default_model_slug` — see `src/served.ts`.
++
++### `/gpt` command
++
++Command Governor adds a deterministic `/gpt` slash command
++(`extensions/gpt-command.ts`) that drives your ChatGPT account with **zero
++harness-model tokens** — Prime runs the handler as code on the keystroke:
++
++- `/gpt review [gpt|pro|max] [context]` — gathers the working-tree diff (vs the
++  merge-base with the default branch) and sends it to a **brand-new** ChatGPT
++  conversation for review. Fresh context is deliberate: a session reviewing its
++  own work shares the context that made the mistake. `gpt` (default) =
++  `gpt-5-6-thinking@max`, unmetered, for reviewing everything; `pro` =
++  `gpt-6-pro`, a capped lane reserved for hard reviews; `max` = a fresh Claude
++  reviewer via the harness (metered — the command prints the exact path rather
++  than faking an in-process Claude reviewer).
++- `/gpt research <topic>` — cited Pro-tier deep research (the capped lane;
++  surfaces the deep-research rate-limit fields and errors if the quota is spent).
++- `/gpt chat <prompt> [--model <slug>] [--effort <min|standard|extended|max>]` —
++  ad-hoc one-shot in a fresh chat; `--model`/`--effort` tab-complete from the
++  account's real model list.
++
++Every reply's served model is asserted against what was requested. If the
++backend serves a different or downgraded model, `/gpt` errors loudly and never
++retries on a lesser model.
  
  ### Files
+ 
 diff -ruN a/extensions/chatgpt.ts b/extensions/chatgpt.ts
---- a/extensions/chatgpt.ts	2026-09-05 19:26:04
-+++ b/extensions/chatgpt.ts	2026-09-05 19:26:04
+--- a/extensions/chatgpt.ts	2026-09-06 01:59:58
++++ b/extensions/chatgpt.ts	2026-09-06 00:47:46
 @@ -22,7 +22,7 @@
    type ChatType,
    type Intelligence,
@@ -63,9 +96,547 @@ diff -ruN a/extensions/chatgpt.ts b/extensions/chatgpt.ts
        return done(result.text, result.conversationId || p.conversation_id || null, {
          model,
          intelligence: isAgent || p.model ? null : intelligence,
+diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
+--- a/extensions/gpt-command.ts	1969-12-31 14:00:00
++++ b/extensions/gpt-command.ts	2026-09-06 01:59:46
+@@ -0,0 +1,521 @@
++// /gpt — a deterministic slash command that drives the user's ChatGPT account
++// for code review, deep research, and ad-hoc chat, WITHOUT spending any
++// harness-model tokens. Prime runs a registerCommand handler as code on the
++// keystroke: the model never decides to call anything, so gpt/pro/research do
++// their work entirely on the (unmetered) ChatGPT subscription.
++//
++// Three subcommands:
++//   /gpt review [gpt|pro|max] [extra context]
++//       Gather the working-tree diff vs the default branch and send it, with a
++//       reviewer prompt, to a BRAND-NEW ChatGPT conversation — fresh context is
++//       the point: a session reviewing its own work shares the context that
++//       made the mistake. Default target `gpt` = gpt-5-6-thinking@max (unmetered,
++//       for reviewing everything). `pro` = gpt-6-pro (capped; reserve for hard
++//       reviews). `max` = a fresh Claude reviewer via the harness (metered).
++//   /gpt research <topic>
++//       Cited deep research on the Pro tier (gpt-6-pro connector). The capped
++//       lane — surfaces the deep-research rate-limit fields and errors if spent.
++//   /gpt chat <prompt> [--model <slug>] [--effort <min|standard|extended|max>]
++//       Ad-hoc one-shot in a fresh chat. Model + effort tab-completed from the
++//       account's real model list.
++//
++// FIRM RULE (memory: gpt-command-no-fallback): the served model is read on
++// every reply and asserted. If the backend serves a different (or downgraded)
++// model, the command ERRORS loudly and never retries on a lesser model. See
++// src/served.ts.
++
++import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
++import { BackendClient } from "../src/client.ts";
++import { ConversationClient, type ChatMessage } from "../src/conversation.ts";
++import { resolveModel, effortsForModel } from "../src/models.ts";
++import { redactError } from "../src/redact.ts";
++import {
++  assertServedModel,
++  isWorkModel,
++  servedModelFromConversationDetail,
++} from "../src/served.ts";
++
++// ── module-local lazy clients (independent of the other extensions) ──────────
++let _backend: BackendClient | null = null;
++let _conv: ConversationClient | null = null;
++function clients(): { backend: BackendClient; conv: ConversationClient } {
++  if (!_backend) _backend = new BackendClient();
++  if (!_conv) _conv = new ConversationClient(_backend);
++  return { backend: _backend, conv: _conv };
++}
++
++const EFFORTS = ["min", "standard", "extended", "max"] as const;
++const REVIEW_TARGETS = ["gpt", "pro", "max"] as const;
++// The model /gpt research asks the deep_research_heavy lane for. It is a pin
++// (ADR 0011 §3/§6): the served model is asserted against it on every reply and
++// a mismatch — including the lane routing to a different Pro slug — is a loud
++// error, never a silent acceptance. Re-ground it by probe, not by assumption.
++const RESEARCH_MODEL = "gpt-6-pro";
++type ReviewTarget = (typeof REVIEW_TARGETS)[number];
++
++// The reviewer prompt. ChatGPT cannot read the working tree, so the diff and
++// task are inlined as text; the instructions ask for a decisive verdict.
++const REVIEW_PROMPT_HEADER =
++  "You are an independent, senior code reviewer. You are reviewing a git diff " +
++  "you are seeing for the FIRST time — you have no prior context on this change, " +
++  "which is deliberate. Judge only what the diff shows.\n\n" +
++  "Give, in this order:\n" +
++  "  1. VERDICT: one line — APPROVE, APPROVE WITH NITS, or REQUEST CHANGES.\n" +
++  "  2. Blocking issues (correctness, security, data loss, broken contracts), each with the file and why.\n" +
++  "  3. Non-blocking suggestions.\n" +
++  "  4. Anything the diff alone cannot tell you that a human must check.\n" +
++  "Be specific and terse. Do not restate the diff back.\n";
++
++// ── small helpers ────────────────────────────────────────────────────────────
++
++function print(pi: ExtensionAPI, title: string, body: string): void {
++  // A custom message with triggerTurn:false appends to the transcript and
++  // renders (as markdown) WITHOUT starting an LLM turn — zero harness tokens.
++  void pi.sendMessage(
++    { customType: "gpt-command", content: `**${title}**\n\n${body}`, display: true },
++    { triggerTurn: false },
++  );
++}
++
++function notify(ctx: ExtensionCommandContext, message: string, type: "info" | "warning" | "error" = "info"): void {
++  if (!ctx.hasUI) return;
++  try {
++    ctx.ui.notify(message, type);
++  } catch {
++    /* best-effort */
++  }
++}
++
++function fail(pi: ExtensionAPI, ctx: ExtensionCommandContext, title: string, err: unknown): void {
++  const msg = redactError(String((err as any)?.message ?? err ?? "unknown error"));
++  print(pi, title, `❌ ${msg}`);
++  notify(ctx, msg, "error");
++}
++
++/** Split a raw argument string into whitespace-separated tokens, keeping the rest. */
++function tokenize(args: string): string[] {
++  return args.trim().length ? args.trim().split(/\s+/) : [];
++}
++
++// ── git diff gathering (review) ──────────────────────────────────────────────
++
++async function exec(pi: ExtensionAPI, cwd: string, cmd: string, cmdArgs: string[]): Promise<{ ok: boolean; out: string; err: string }> {
++  try {
++    const r = await pi.exec(cmd, cmdArgs, { cwd, timeout: 60_000 });
++    return { ok: r.code === 0, out: r.stdout, err: r.stderr };
++  } catch (e: any) {
++    return { ok: false, out: "", err: String(e?.message ?? e) };
++  }
++}
++
++/** Resolve the base to diff against: merge-base with the default branch, else HEAD. */
++async function reviewDiff(pi: ExtensionAPI, cwd: string): Promise<{ diff: string; baseLabel: string }> {
++  const top = await exec(pi, cwd, "git", ["rev-parse", "--show-toplevel"]);
++  if (!top.ok) throw new Error(`not a git repository (${top.err.trim() || "git rev-parse failed"})`);
++
++  // Find a default branch to compare against.
++  let base: string | null = null;
++  let baseLabel = "";
++  const originHead = await exec(pi, cwd, "git", ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
++  const candidates: string[] = [];
++  if (originHead.ok && originHead.out.trim()) candidates.push(originHead.out.trim().replace(/^refs\/remotes\//, ""));
++  candidates.push("origin/main", "origin/master", "main", "master");
++  for (const ref of candidates) {
++    const mb = await exec(pi, cwd, "git", ["merge-base", "HEAD", ref]);
++    if (mb.ok && mb.out.trim()) {
++      base = mb.out.trim();
++      baseLabel = `${ref} (merge-base ${base.slice(0, 12)})`;
++      break;
++    }
++  }
++
++  let diff: string;
++  if (base) {
++    // `git diff <base>` compares base against the WORKING TREE: the full branch
++    // delta including uncommitted edits — exactly what a reviewer should see.
++    const d = await exec(pi, cwd, "git", ["diff", base]);
++    if (!d.ok) throw new Error(`git diff failed: ${d.err.trim()}`);
++    diff = d.out;
++  } else {
++    baseLabel = "HEAD (no default branch found)";
++    const d = await exec(pi, cwd, "git", ["diff", "HEAD"]);
++    if (!d.ok) throw new Error(`git diff HEAD failed: ${d.err.trim()}`);
++    diff = d.out;
++  }
++
++  // Also include untracked files' names so the reviewer knows they exist (their
++  // content is not diffed to avoid dumping generated files).
++  const untracked = await exec(pi, cwd, "git", ["ls-files", "--others", "--exclude-standard"]);
++  if (untracked.ok && untracked.out.trim()) {
++    diff += `\n\n# Untracked files (not shown):\n${untracked.out.trim().split(/\n/).map((f) => `#   ${f}`).join("\n")}\n`;
++  }
++  return { diff, baseLabel };
++}
++
++const MAX_DIFF_BYTES = 400_000;
++
++// ── served-model readback ────────────────────────────────────────────────────
++
++async function readServedModel(backend: BackendClient, conversationId: string): Promise<string | null> {
++  try {
++    const detail = await backend.get(`/backend-api/conversation/${conversationId}`);
++    return servedModelFromConversationDetail(detail);
++  } catch {
++    return null;
++  }
++}
++
++// ── subcommands ──────────────────────────────────────────────────────────────
++
++async function runReview(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string[]): Promise<void> {
++  let target: ReviewTarget = "gpt";
++  if (rest.length && (REVIEW_TARGETS as readonly string[]).includes(rest[0])) {
++    target = rest.shift() as ReviewTarget;
++  }
++  const extraContext = rest.join(" ").trim();
++
++  notify(ctx, `Gathering diff for /gpt review ${target}…`);
++  let diffInfo: { diff: string; baseLabel: string };
++  try {
++    diffInfo = await reviewDiff(pi, ctx.cwd);
++  } catch (e) {
++    return fail(pi, ctx, `/gpt review ${target}`, e);
++  }
++  let { diff } = diffInfo;
++  const { baseLabel } = diffInfo;
++  if (!diff.trim()) {
++    print(pi, `/gpt review ${target}`, `No changes to review (diff against ${baseLabel} is empty).`);
++    return;
++  }
++  let truncatedNote = "";
++  if (Buffer.byteLength(diff, "utf8") > MAX_DIFF_BYTES) {
++    diff = diff.slice(0, MAX_DIFF_BYTES);
++    truncatedNote = `\n\n[diff truncated to ${MAX_DIFF_BYTES} bytes for review]`;
++  }
++
++  if (target === "max") return runReviewMax(pi, ctx, diff, extraContext, baseLabel);
++
++  const prompt =
++    REVIEW_PROMPT_HEADER +
++    (extraContext ? `\nTASK / CONTEXT:\n${extraContext}\n` : "") +
++    `\nBASE: ${baseLabel}\n\nDIFF UNDER REVIEW:\n\`\`\`diff\n${diff}\n\`\`\`${truncatedNote}`;
++
++  // gpt (default, unmetered): gpt-5-6-thinking@max. pro (capped): gpt-6-pro.
++  const requested = target === "pro" ? "gpt-6-pro" : "gpt-5-6-thinking";
++  const choice = resolveModel(
++    target === "pro"
++      ? { intelligence: "pro" }
++      : { model: "gpt-5-6-thinking", thinkingEffort: "max" },
++  );
++  const laneNote =
++    target === "pro"
++      ? "gpt-6-pro — CAPPED lane, reserve for hard/high-stakes reviews"
++      : "gpt-5-6-thinking@max — unmetered lane, for routine reviews";
++
++  notify(ctx, `Reviewing with ${requested}… (fresh chat)`, "info");
++  const { conv, backend } = clients();
++  let result: { text: string; conversationId: string | null };
++  try {
++    result = await conv.complete(choice.model, [{ role: "user", content: prompt }] as ChatMessage[], {
++      thinkingEffort: choice.thinkingEffort,
++      temporary: false, // persistent so the served model can be read back
++      signal: ctx.signal,
++    });
++  } catch (e) {
++    return fail(pi, ctx, `/gpt review ${target}`, e);
++  }
++  if (!result.conversationId) {
++    return fail(pi, ctx, `/gpt review ${target}`, new Error("no conversation id came back; cannot verify the served model — refusing to trust the reply"));
++  }
++
++  const served = await readServedModel(backend, result.conversationId);
++  try {
++    assertServedModel(served, requested, {
++      match: target === "pro" ? "family" : "exact",
++      context: `/gpt review (${target})`,
++    });
++  } catch (e) {
++    return fail(pi, ctx, `/gpt review ${target}`, e);
++  }
++
++  print(
++    pi,
++    `/gpt review (${target}) — ${served}`,
++    `_${laneNote} · base: ${baseLabel} · chat: ${result.conversationId}_\n\n${result.text || "(no response)"}`,
++  );
++}
++
++async function runReviewMax(
++  pi: ExtensionAPI,
++  ctx: ExtensionCommandContext,
++  _diff: string,
++  _extraContext: string,
++  baseLabel: string,
++): Promise<void> {
++  // `max` is a Claude/Fable review through the harness, NOT a GPT consult. A
++  // pi-gpt command cannot cleanly spawn a fresh, independent Claude reviewer
++  // with guaranteed clean context and correct plan-billed routing from inside
++  // its own process (the extension API exposes no "run a fresh reviewer worker
++  // and return its text", and an in-process one-shot on ctx.model cannot be
++  // verified here to route through claude-bridge without leaking session
++  // context or a credential). Rather than fake it, point the user at the real
++  // fresh-context path. Documented in docs/adr/0012 and the pi-gpt README.
++  const model = ctx.model?.id ?? "<your configured claude-bridge model>";
++  const body =
++    "`/gpt review max` is intentionally NOT run in-process.\n\n" +
++    "A Claude review must run in a FRESH reviewer with clean context (the whole " +
++    "point of an independent review), on the metered claude-bridge model — which " +
++    "this GPT command cannot spawn and verify from inside its own process. Use the " +
++    "harness's own review path instead:\n\n" +
++    `  • Ask this session (model: ${model}) to review, or\n` +
++    "  • Run a fresh Prime reviewer worker on the bridge, clean context:\n\n" +
++    "```sh\n" +
++    "prime-agent -p --no-session --provider claude-bridge --model <claude-model> \\\n" +
++    "  \"Review the working-tree diff (git diff against the default branch) and give a verdict.\"\n" +
++    "```\n\n" +
++    `For a routine review that costs no Claude tokens, use \`/gpt review\` (gpt-5-6-thinking@max) ` +
++    `or \`/gpt review pro\` (gpt-6-pro). Diff base would have been: ${baseLabel}.`;
++  print(pi, "/gpt review (max)", body);
++}
++
++async function runResearch(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string[]): Promise<void> {
++  const topic = rest.join(" ").trim();
++  if (!topic) {
++    print(pi, "/gpt research", "Usage: `/gpt research <topic>` — cited deep research on the Pro tier (capped lane).");
++    return;
++  }
++  const { conv, backend } = clients();
++  notify(ctx, "Deep research started (Pro tier, can take many minutes)…");
++
++  let finalText = "";
++  let refs: any[] = [];
++  let convId: string | null = null;
++  let deepResearchStatus: string | null = null;
++  let connectorFailed = false;
++  let bytes = 0;
++  try {
++    // Pro-tier deep research on RESEARCH_MODEL (not the vendored default
++    // gpt-5-5-pro). If the lane does not serve it, the served-model assertion
++    // below and the rate-limit path error loudly — never a silent fallback.
++    for await (const ev of conv.deepResearchHeavy(topic, ctx.signal, RESEARCH_MODEL)) {
++      if (ev.type === "conversation" && ev.conversation_id) {
++        convId = ev.conversation_id;
++      } else if (ev.type === "done") {
++        finalText = ev.text || "";
++        refs = ev.content_references || [];
++        if (ev.connector_failed) connectorFailed = true;
++        if (ev.deep_research_status) deepResearchStatus = ev.deep_research_status;
++      } else if (ev.type === "progress" && ev.text) {
++        bytes += ev.text.length;
++        if (ctx.hasUI) {
++          try {
++            ctx.ui.setStatus("gpt-research", `🔬 researching… ${bytes} chars`);
++          } catch {}
++        }
++      }
++    }
++  } catch (e) {
++    if (ctx.hasUI) try { ctx.ui.setStatus("gpt-research", undefined); } catch {}
++    return fail(pi, ctx, "/gpt research", e);
++  }
++  if (ctx.hasUI) try { ctx.ui.setStatus("gpt-research", undefined); } catch {}
++
++  // Capped lane: surface the rate-limit fields and error — never fall back.
++  if (deepResearchStatus === "rate_limited") {
++    let detail = "";
++    try {
++      const init: any = await backend.post("/backend-api/conversation/init", { conversation_mode_kind: "primary_assistant" });
++      const limit = (init?.limits_progress || []).find((i: any) => i?.feature_name === "deep_research");
++      const blocked = (init?.blocked_features || []).find((i: any) => i?.name === "deep_research");
++      if (limit?.reset_after) detail += ` reset_after=${limit.reset_after}`;
++      if (typeof limit?.remaining === "number") detail += ` remaining=${limit.remaining}`;
++      if (blocked?.limit) detail += ` limit=${blocked.limit}`;
++    } catch {}
++    return fail(pi, ctx, "/gpt research", new Error(`deep research is rate-limited (Pro-tier quota spent).${detail} No fallback — retry after the reset.`));
++  }
++  if (connectorFailed) {
++    return fail(pi, ctx, "/gpt research", new Error("the Deep Research connector is unavailable; enable it at chatgpt.com → Settings → Connectors, then retry."));
++  }
++  if (!finalText.trim()) {
++    return fail(pi, ctx, "/gpt research", new Error("deep research returned no report (it may still be running server-side; check the conversation later)."));
++  }
++
++  // The same no-fallback standard as review/chat: an unreadable served model
++  // (no conversation id, or no resolved_model_slug/model_slug on the leaf) is
++  // a hard error, and the served model must be RESEARCH_MODEL's family — not
++  // merely "not mini". A report served by any other model is not presented.
++  const served = convId ? await readServedModel(backend, convId) : null;
++  try {
++    assertServedModel(served, RESEARCH_MODEL, { match: "family", context: "/gpt research" });
++  } catch (e) {
++    return fail(pi, ctx, "/gpt research", e);
++  }
++
++  let body = finalText;
++  if (refs.length) {
++    const seen = new Set<string>();
++    const lines = ["\n\n---\n**Sources:**"];
++    for (const ref of refs) for (const item of ref.items || []) if (item.url && !seen.has(item.url)) { seen.add(item.url); lines.push(`- [${item.title || item.url}](${item.url})`); }
++    body += lines.join("\n");
++  }
++  print(pi, `/gpt research — ${served}`, `_deep research (${RESEARCH_MODEL}, capped lane) · ${refs.length} sources${convId ? ` · chat: ${convId}` : ""}_\n\n${body}`);
++}
++
++/** True for a Pro-tier slug (`gpt-6-pro`, `gpt-5-5-pro`, `o3-pro`, …). */
++function isProFamily(slug: string): boolean {
++  return /-pro$/i.test(slug);
++}
++
++async function runChat(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string[]): Promise<void> {
++  // Parse --model / --effort flags out of the token stream; the remainder is the prompt.
++  let model = "gpt-5-6-thinking";
++  let modelExplicit = false;
++  let effort: string | undefined;
++  const promptTokens: string[] = [];
++  for (let i = 0; i < rest.length; i++) {
++    const t = rest[i];
++    if (t === "--model" && i + 1 < rest.length) { model = rest[++i]; modelExplicit = true; }
++    else if (t.startsWith("--model=")) { model = t.slice("--model=".length); modelExplicit = true; }
++    else if (t === "--effort" && i + 1 < rest.length) { effort = rest[++i]; }
++    else if (t.startsWith("--effort=")) { effort = t.slice("--effort=".length); }
++    else promptTokens.push(t);
++  }
++  const prompt = promptTokens.join(" ").trim();
++  if (!prompt) {
++    print(pi, "/gpt chat", "Usage: `/gpt chat <prompt> [--model <slug>] [--effort <min|standard|extended|max>]`");
++    return;
++  }
++  if (effort && !(EFFORTS as readonly string[]).includes(effort)) {
++    return fail(pi, ctx, "/gpt chat", new Error(`unknown --effort ${effort}; expected one of ${EFFORTS.join(", ")}`));
++  }
++  // Default the effort to max for the default thinker when none was given.
++  if (!effort && !modelExplicit) effort = "max";
++
++  notify(ctx, `Asking ${model}${effort ? `@${effort}` : ""}… (fresh chat)`);
++  const { conv, backend } = clients();
++  let result: { text: string; conversationId: string | null };
++  try {
++    result = await conv.complete(model, [{ role: "user", content: prompt }] as ChatMessage[], {
++      thinkingEffort: effort,
++      temporary: false,
++      signal: ctx.signal,
++    });
++  } catch (e) {
++    return fail(pi, ctx, "/gpt chat", e);
++  }
++  if (!result.conversationId) {
++    return fail(pi, ctx, "/gpt chat", new Error("no conversation id came back; cannot verify the served model — refusing to trust the reply"));
++  }
++  const served = await readServedModel(backend, result.conversationId);
++  try {
++    // A pinned Pro-family slug is family-matched (a dated `gpt-6-pro-…` variant
++    // is still gpt-6-pro), exactly as `/gpt review pro` does; everything else
++    // must match exactly. Erroring is the safe direction either way.
++    assertServedModel(served, model, { match: isProFamily(model) ? "family" : "exact", context: "/gpt chat" });
++  } catch (e) {
++    return fail(pi, ctx, "/gpt chat", e);
++  }
++  print(pi, `/gpt chat — ${served}${effort ? `@${effort}` : ""}`, `_chat: ${result.conversationId}_\n\n${result.text || "(no response)"}`);
++}
++
++function usage(pi: ExtensionAPI): void {
++  print(
++    pi,
++    "/gpt",
++    [
++      "Drive your ChatGPT account with no harness-model tokens.",
++      "",
++      "• `/gpt review [gpt|pro|max] [context]` — review the working-tree diff in a FRESH chat.",
++      "    `gpt` (default): gpt-5-6-thinking@max — unmetered, review everything.",
++      "    `pro`: gpt-6-pro — CAPPED, reserve for hard/high-stakes reviews.",
++      "    `max`: a fresh Claude reviewer via the harness (metered).",
++      "• `/gpt research <topic>` — cited Pro-tier deep research (capped lane).",
++      "• `/gpt chat <prompt> [--model <slug>] [--effort <min|standard|extended|max>]` — ad-hoc, fresh chat.",
++      "",
++      "The served model is verified on every reply; a downgrade errors loudly (never a silent fallback).",
++    ].join("\n"),
++  );
++}
++
++// ── extension entry ──────────────────────────────────────────────────────────
++
++export default function (pi: ExtensionAPI) {
++  pi.registerCommand("gpt", {
++    description: "Review / research / chat via your ChatGPT account (no harness tokens; fresh context; served-model checked).",
++    getArgumentCompletions: async (argumentPrefix: string) => {
++      const tokens = tokenize(argumentPrefix);
++      const trailingSpace = /\s$/.test(argumentPrefix);
++      const sub = tokens[0];
++
++      // First token: the subcommand.
++      if (tokens.length === 0 || (tokens.length === 1 && !trailingSpace)) {
++        return [
++          { value: "review", label: "review", description: "Review the working-tree diff in a fresh chat" },
++          { value: "research", label: "research", description: "Cited Pro-tier deep research (capped)" },
++          { value: "chat", label: "chat", description: "Ad-hoc one-shot in a fresh chat" },
++        ].filter((i) => !sub || i.value.startsWith(sub));
++      }
++
++      // review: offer the target.
++      if (sub === "review" && (tokens.length === 1 || (tokens.length === 2 && !trailingSpace))) {
++        const t = tokens[1] || "";
++        return [
++          { value: "gpt", label: "gpt", description: "gpt-5-6-thinking@max — unmetered, routine reviews" },
++          { value: "pro", label: "pro", description: "gpt-6-pro — capped, hard/high-stakes reviews" },
++          { value: "max", label: "max", description: "fresh Claude reviewer via the harness (metered)" },
++        ].filter((i) => !t || i.value.startsWith(t));
++      }
++
++      // chat: complete --model <slug> from the account, and --effort.
++      if (sub === "chat") {
++        const last = trailingSpace ? "" : tokens[tokens.length - 1] || "";
++        const prev = trailingSpace ? tokens[tokens.length - 1] : tokens[tokens.length - 2];
++        if (prev === "--effort" || last.startsWith("--effort=")) {
++          const p = last.startsWith("--effort=") ? last.slice("--effort=".length) : last;
++          return EFFORTS.filter((e) => e.startsWith(p)).map((e) => ({ value: e, label: e }));
++        }
++        if (prev === "--model" || last.startsWith("--model=")) {
++          const p = last.startsWith("--model=") ? last.slice("--model=".length) : last;
++          try {
++            const { backend } = clients();
++            const data: any = await backend.get("/backend-api/models?history_and_training_disabled=false", "/backend-api/models");
++            const models = (data?.models || []) as any[];
++            return models
++              .filter((m) => typeof m.slug === "string" && !isWorkModel(m.slug) && m.slug.startsWith(p))
++              .map((m) => {
++                const efforts = effortsForModel(m.slug, models);
++                return { value: m.slug, label: m.slug, description: `${m.reasoning_type || ""}${efforts.length ? ` · efforts: ${efforts.join(",")}` : ""}`.trim() } as const;
++              });
++          } catch {
++            return null;
++          }
++        }
++        if (last.startsWith("--")) {
++          return [
++            { value: "--model", label: "--model", description: "Pin an explicit model slug" },
++            { value: "--effort", label: "--effort", description: "Pin the reasoning effort" },
++          ].filter((i) => i.value.startsWith(last));
++        }
++      }
++      return null;
++    },
++    handler: async (args: string, ctx: ExtensionCommandContext) => {
++      const tokens = tokenize(args);
++      const sub = (tokens.shift() || "").toLowerCase();
++      try {
++        switch (sub) {
++          case "review": return await runReview(pi, ctx, tokens);
++          case "research": return await runResearch(pi, ctx, tokens);
++          case "chat": return await runChat(pi, ctx, tokens);
++          case "":
++          case "help": return usage(pi);
++          default:
++            print(pi, "/gpt", `Unknown subcommand \`${sub}\`. Try \`/gpt help\`.`);
++            return;
++        }
++      } catch (e) {
++        fail(pi, ctx, "/gpt", e);
++      }
++    },
++  });
++}
+diff -ruN a/package.json b/package.json
+--- a/package.json	2026-09-06 01:59:58
++++ b/package.json	2026-09-06 00:47:46
+@@ -20,7 +20,8 @@
+   "pi": {
+     "extensions": [
+       "extensions/chatgpt.ts",
+-      "extensions/observer.ts"
++      "extensions/observer.ts",
++      "extensions/gpt-command.ts"
+     ],
+     "skills": [
+       "skills/chatgpt"
 diff -ruN a/skills/chatgpt/SKILL.md b/skills/chatgpt/SKILL.md
---- a/skills/chatgpt/SKILL.md	2026-09-05 19:26:04
-+++ b/skills/chatgpt/SKILL.md	2026-09-05 19:26:04
+--- a/skills/chatgpt/SKILL.md	2026-09-06 01:59:58
++++ b/skills/chatgpt/SKILL.md	2026-09-06 00:47:46
 @@ -57,7 +57,7 @@
    prompt_file:      "<path>",        # prepared UTF-8 prompt packet
    files:            ["<path>", ...], # local files supplied as review/context material
@@ -75,18 +646,24 @@ diff -ruN a/skills/chatgpt/SKILL.md b/skills/chatgpt/SKILL.md
    model:            "<slug>",         # overrides the model for normal chats
    thinking_effort:  min | standard | extended | max,  # explicit normal-chat effort
    conversation_id:  "<id>",           # continue an existing thread
-@@ -83,8 +83,8 @@
+@@ -83,10 +83,12 @@
    `deep_research_heavy` = Pro-tier gpt-5-5-pro (5–30+ min, uses monthly quota);
    `agent` = autonomous browsing/code (262K context, async).
  - **intelligence** picks model + reasoning depth for normal chats:
 -  `instant` (no thinking) → `medium` → `high` → `extra_high` (max thinking) →
 -  `pro` (gpt-5-5-pro). Pass **model** + **thinking_effort** to pin both
+-  explicitly; use an effort listed by `gpt_list_models`. Agent mode uses
+-  `agent-mode`; Deep Research uses its own models.
 +  `instant` (gpt-5-6-instant, no thinking) → `medium` → `high` → `extra_high`
-+  (gpt-6-astra-wm, max thinking; the default) → `pro` (gpt-6-pro). Pass **model** + **thinking_effort** to pin both
-   explicitly; use an effort listed by `gpt_list_models`. Agent mode uses
-   `agent-mode`; Deep Research uses its own models.
++  (gpt-5-6-thinking at max thinking; the default) → `pro` (gpt-6-pro). No tier
++  uses a `*-wm` work model: gpt-6-astra-wm silently serves gpt-5-mini, so it is
++  never mapped. Pass **model** + **thinking_effort** to pin both explicitly; use
++  an effort listed by `gpt_list_models`. Agent mode uses `agent-mode`; Deep
++  Research uses its own models.
  - **conversation_id** continues a chat from `gpt_list_chats`. The tool returns
-@@ -112,7 +112,8 @@
+   the `conversation_id` of every chat it starts.
+ - Deep research streams progress and appends a **Sources** section with
+@@ -112,7 +114,8 @@
  
  ## Tips
  
@@ -97,18 +674,25 @@ diff -ruN a/skills/chatgpt/SKILL.md b/skills/chatgpt/SKILL.md
    cases that genuinely need the full multi-section Pro report (quota is limited).
  - Tool output is PII-redacted (emails, tokens, phone numbers masked).
 diff -ruN a/src/models.ts b/src/models.ts
---- a/src/models.ts	2026-09-05 19:26:04
-+++ b/src/models.ts	2026-09-05 19:26:04
-@@ -7,14 +7,17 @@
+--- a/src/models.ts	2026-09-06 01:59:58
++++ b/src/models.ts	2026-09-06 01:58:15
+@@ -7,14 +7,24 @@
    reasoningType: string;
  }
  
 -// Default family: gpt-5-5 (latest at time of writing). `model` param overrides.
 -// Each level picks the reasoning depth that ChatGPT exposes for that family.
-+// Command Governor: default to the latest family the account lists
-+// (gpt_list_models, measured 2026-09-05) and to the deepest reasoning level.
-+// `model` param overrides. Each level picks the reasoning depth that ChatGPT
-+// exposes for that family. Instant has no gpt-6 variant, so it stays on 5.6.
++// Command Governor: map each level to the honest newest thinker the account
++// serves, and default to the deepest reasoning level. `model` param overrides.
++//
++// NO TIER MAY POINT AT A *-wm MODEL. gpt-6-astra-wm (shipped by PR #30) is a
++// silent liar: at every effort the backend serves gpt-5-mini while echoing the
++// requested slug in `default_model_slug` (measured 2026-09-05,
++// docs/research/2026-09-06-chatgpt-served-model-and-wm-downgrade.md). extra_high therefore
++// resolves to gpt-5-6-thinking at max — the newest non-pro thinker that is
++// CONFIRMED to serve its own model (resolved_model_slug=gpt-5-6-thinking). The
++// no-*-wm invariant is enforced by conformance/tier1/gpt-models.test.ts;
++// tests/models.test.ts pins the exact resolution.
 +export const DEFAULT_INTELLIGENCE: Intelligence = "extra_high";
  export const INTELLIGENCE_MAP: Record<Intelligence, ModelChoice> = {
 -  instant: { model: "gpt-5-5-instant", reasoningType: "none" },
@@ -117,14 +701,14 @@ diff -ruN a/src/models.ts b/src/models.ts
 -  extra_high: { model: "gpt-5-5-thinking", thinkingEffort: "max", reasoningType: "reasoning" },
 -  pro: { model: "gpt-5-5-pro", thinkingEffort: "extended", reasoningType: "pro" },
 +  instant: { model: "gpt-5-6-instant", reasoningType: "none" },
-+  medium: { model: "gpt-6-astra-wm", thinkingEffort: "standard", reasoningType: "reasoning" },
-+  high: { model: "gpt-6-astra-wm", thinkingEffort: "extended", reasoningType: "reasoning" },
-+  extra_high: { model: "gpt-6-astra-wm", thinkingEffort: "max", reasoningType: "reasoning" },
++  medium: { model: "gpt-5-6-thinking", thinkingEffort: "standard", reasoningType: "reasoning" },
++  high: { model: "gpt-5-6-thinking", thinkingEffort: "extended", reasoningType: "reasoning" },
++  extra_high: { model: "gpt-5-6-thinking", thinkingEffort: "max", reasoningType: "reasoning" },
 +  pro: { model: "gpt-6-pro", thinkingEffort: "standard", reasoningType: "pro" },
  };
  
  export const INTELLIGENCE_LEVELS = Object.keys(INTELLIGENCE_MAP) as Intelligence[];
-@@ -31,7 +34,7 @@
+@@ -31,7 +41,7 @@
        reasoningType: opts.thinkingEffort ? "reasoning" : "auto",
      };
    }
@@ -133,18 +717,159 @@ diff -ruN a/src/models.ts b/src/models.ts
    return opts.thinkingEffort ? { ...choice, thinkingEffort: opts.thinkingEffort } : choice;
  }
  
+diff -ruN a/src/served.ts b/src/served.ts
+--- a/src/served.ts	1969-12-31 14:00:00
++++ b/src/served.ts	2026-09-06 00:47:46
+@@ -0,0 +1,137 @@
++// Served-model discipline for Command Governor's /gpt command.
++//
++// ChatGPT's backend reports THREE model fields on an assistant reply, and they
++// do not agree. `default_model_slug` merely ECHOES the slug the request asked
++// for — it is what gpt-6-astra-wm uses to lie, reporting the requested slug
++// while gpt-5-mini actually answered. The truth is `resolved_model_slug`, and
++// where that is absent, `model_slug`. So the served model is the first defined
++// of (resolved_model_slug, model_slug) — never default_model_slug.
++//
++// The firm rule (memory: gpt-command-no-fallback): if the served model is not
++// the requested one, the command errors LOUDLY and says exactly what happened.
++// It never retries on a lesser model and never silently downgrades. Reading the
++// served model on every reply and asserting it is the whole point of this file.
++
++/** The real served model of one assistant message's metadata, or null. */
++export function pickServedModel(metadata: unknown): string | null {
++  if (!metadata || typeof metadata !== "object") return null;
++  const md = metadata as Record<string, unknown>;
++  const resolved = md.resolved_model_slug;
++  if (typeof resolved === "string" && resolved) return resolved;
++  const slug = md.model_slug;
++  if (typeof slug === "string" && slug) return slug;
++  return null;
++}
++
++/**
++ * Read the served model from a full /backend-api/conversation/{id} detail
++ * document. Walks the active branch from current_node toward the root and
++ * returns the served model of the newest assistant message that carries one.
++ * Persistent chats only — a temporary chat 404s the readback, which surfaces
++ * before this is ever called.
++ */
++export function servedModelFromConversationDetail(detail: unknown): string | null {
++  if (!detail || typeof detail !== "object") return null;
++  const d = detail as { mapping?: Record<string, any>; current_node?: string };
++  const mapping = d.mapping || {};
++  const seen = new Set<string>();
++  let nodeId: string | undefined = d.current_node;
++  // Preferred: walk the active branch from the leaf.
++  while (nodeId && mapping[nodeId] && !seen.has(nodeId)) {
++    seen.add(nodeId);
++    const node = mapping[nodeId];
++    const msg = node?.message;
++    if (msg?.author?.role === "assistant") {
++      const served = pickServedModel(msg.metadata);
++      if (served) return served;
++    }
++    nodeId = node?.parent;
++  }
++  // Fallback: no current_node chain — take the newest assistant message anywhere.
++  let bestTime = -1;
++  let best: string | null = null;
++  for (const node of Object.values<any>(mapping)) {
++    const msg = node?.message;
++    if (msg?.author?.role !== "assistant") continue;
++    const served = pickServedModel(msg.metadata);
++    if (!served) continue;
++    const t = typeof msg.create_time === "number" ? msg.create_time : 0;
++    if (t >= bestTime) {
++      bestTime = t;
++      best = served;
++    }
++  }
++  return best;
++}
++
++/** True for a *-wm "work model" slug (gpt-6-astra-wm and any sibling). */
++export function isWorkModel(slug: string): boolean {
++  return /(^|[-_])wm$/i.test(slug) || /-wm-/i.test(slug);
++}
++
++/** True for a gpt-5-mini downgrade (what the *-wm liars actually serve). */
++export function isMiniModel(slug: string): boolean {
++  return /(^|[-_])mini($|[-_])/i.test(slug) || /gpt-5-mini/i.test(slug);
++}
++
++export class ServedModelError extends Error {
++  readonly requested: string;
++  readonly served: string | null;
++  constructor(message: string, requested: string, served: string | null) {
++    super(message);
++    this.name = "ServedModelError";
++    this.requested = requested;
++    this.served = served;
++  }
++}
++
++export interface AssertServedOptions {
++  /**
++   * How to judge the served model against the requested one.
++   *  - "exact" (default): served must equal requested.
++   *  - "family": served must START WITH requested (a family prefix, e.g.
++   *    "gpt-6-pro" accepting "gpt-6-pro-2026-xx"), and must not be a mini/wm
++   *    downgrade.
++   */
++  match?: "exact" | "family";
++  /** A label for the error message, e.g. "/gpt review (gpt)". */
++  context: string;
++}
++
++/**
++ * Assert the backend actually served the requested model. Throws a loud
++ * ServedModelError on a null read or any mismatch. No fallback, ever.
++ */
++export function assertServedModel(
++  served: string | null,
++  requested: string,
++  opts: AssertServedOptions,
++): void {
++  const { context } = opts;
++  const match = opts.match || "exact";
++  if (served === null) {
++    throw new ServedModelError(
++      `${context}: could not read the served model from ChatGPT's reply (no resolved_model_slug or model_slug). ` +
++        `Refusing to trust a reply whose model cannot be verified — requested ${requested}. No fallback.`,
++      requested,
++      served,
++    );
++  }
++  if (isWorkModel(served) || isMiniModel(served)) {
++    throw new ServedModelError(
++      `${context}: the backend served ${served} — a downgraded/work model — for a request for ${requested}. ` +
++        `This is the silent-downgrade failure the no-fallback rule exists to catch. Erroring instead of accepting it.`,
++      requested,
++      served,
++    );
++  }
++  const ok = match === "family" ? served.startsWith(requested) : served === requested;
++  if (!ok) {
++    throw new ServedModelError(
++      `${context}: requested ${requested} but the backend served ${served}. ` +
++        `The requested model was unavailable or intercepted; erroring loudly rather than falling back to a lesser model.`,
++      requested,
++      served,
++    );
++  }
++}
 diff -ruN a/tests/models.test.ts b/tests/models.test.ts
---- a/tests/models.test.ts	2026-09-05 19:26:04
-+++ b/tests/models.test.ts	2026-09-05 19:26:04
-@@ -1,5 +1,20 @@
+--- a/tests/models.test.ts	2026-09-06 01:59:58
++++ b/tests/models.test.ts	2026-09-06 00:47:46
+@@ -1,5 +1,38 @@
  import { describe, expect, test } from "bun:test";
 -import { resolveModel } from "../src/models.ts";
-+import { resolveModel, DEFAULT_INTELLIGENCE } from "../src/models.ts";
++import { resolveModel, DEFAULT_INTELLIGENCE, INTELLIGENCE_MAP } from "../src/models.ts";
 +
 +describe("defaults", () => {
-+  test("no arguments resolve to the latest model at max effort", () => {
++  test("no arguments resolve to the honest newest thinker at max effort", () => {
 +    expect(resolveModel({})).toEqual({
-+      model: "gpt-6-astra-wm",
++      model: "gpt-5-6-thinking",
 +      thinkingEffort: "max",
 +      reasoningType: "reasoning",
 +    });
@@ -153,6 +878,24 @@ diff -ruN a/tests/models.test.ts b/tests/models.test.ts
 +  test("extra_high is the default intelligence", () => {
 +    expect(DEFAULT_INTELLIGENCE).toBe("extra_high");
 +    expect(resolveModel({ intelligence: DEFAULT_INTELLIGENCE })).toEqual(resolveModel({}));
++  });
++});
++
++describe("no silent-downgrade models in the map", () => {
++  // gpt-6-astra-wm (PR #30) echoed the requested slug while serving gpt-5-mini.
++  // No intelligence tier may resolve to any *-wm work model, ever.
++  test("no tier maps to a *-wm slug", () => {
++    for (const [level, choice] of Object.entries(INTELLIGENCE_MAP)) {
++      expect(/(^|[-_])wm$|-wm-/i.test(choice.model), `${level} → ${choice.model} is a *-wm work model`).toBe(false);
++    }
++  });
++
++  test("extra_high resolves to gpt-5-6-thinking at max", () => {
++    expect(INTELLIGENCE_MAP.extra_high).toEqual({
++      model: "gpt-5-6-thinking",
++      thinkingEffort: "max",
++      reasoningType: "reasoning",
++    });
 +  });
 +});
  
