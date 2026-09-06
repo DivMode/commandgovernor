@@ -102,10 +102,26 @@ function assistantSaid(token: string): boolean {
 	);
 }
 
+/**
+ * `waitUntil` with the client's screen as it is WHEN THE WAIT FAILS.
+ *
+ * `waitUntil`'s own label is a string built before the wait starts, which for
+ * this file would report the screen a moment after the keystroke rather than
+ * the error the client eventually printed — and that error text is the whole
+ * diagnostic value of a regression here.
+ */
+async function waitWithScreen(probe: () => boolean, timeoutMs: number, what: string, screenChars = 400): Promise<void> {
+	try {
+		await waitUntil(() => probe() || undefined, timeoutMs, 1000, what);
+	} catch (error) {
+		throw new Error(`${String((error as Error).message)} — client screen: ${client!.screen().slice(-screenChars).replace(/\s+/g, " ")}`);
+	}
+}
+
 /** Type one prompt and wait for the answer to land in Prime's transcript. */
 async function turn(prompt: string, token: string, timeoutMs = 300_000): Promise<void> {
 	await client!.submit(prompt, 1500);
-	await waitUntil(() => assistantSaid(token) || undefined, timeoutMs, 1000, `the answer ${token}: ${client!.screen().slice(-400).replace(/\s+/g, " ")}`);
+	await waitWithScreen(() => assistantSaid(token), timeoutMs, `the answer ${token}`);
 }
 
 describe("BRIDGE: Prime compaction through the vendored claude-bridge", { skip: reason }, () => {
@@ -162,12 +178,7 @@ describe("BRIDGE: Prime compaction through the vendored claude-bridge", { skip: 
 		// The durable record is the assertion. A failed compaction writes no
 		// entry at all, so this is what times out when the seam regresses — the
 		// client's own error text comes back with it.
-		await waitUntil(
-			() => sessionEntries().some((entry) => entry.type === "compaction") || undefined,
-			300_000,
-			1000,
-			`a compaction entry in Prime's transcript: ${client!.screen().slice(-900).replace(/\s+/g, " ")}`,
-		);
+		await waitWithScreen(() => sessionEntries().some((entry) => entry.type === "compaction"), 300_000, "a compaction entry in Prime's transcript", 900);
 
 		const compactions = sessionEntries().filter((entry) => entry.type === "compaction");
 		assert.equal(compactions.length, 1, `expected exactly one compaction entry, found ${compactions.length}`);
