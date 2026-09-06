@@ -8,6 +8,12 @@ entrypoint.
 **Patch:** attached below / `pi-oracle-prime-compat.patch` — 21 changed lines across 5 files plus
 one new module. No behaviour change on the reference build.
 
+**Still applies on Prime 0.9.2** (re-checked at the 0.9.2 re-pin, 2026-09-05). All three causes
+survive: Prime's entrypoint still exports only `getAgentDir` and `VERSION` from its config module,
+`ExtensionContext` still has no `mode`, and the `hasUI`/theme crash reproduced verbatim. The patch
+needs no rebase for 0.9.2 — it changes `pi-oracle`, and the host surface it defends against did
+not move.
+
 ---
 
 ## Summary

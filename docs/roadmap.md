@@ -43,6 +43,26 @@ has to own, not by how much it builds.
   pi-oracle compatibility patch, the `hasUI`/theme worker crash. Nothing
   waits on them being filed elsewhere.
 
+## Done — 2026-09-05
+
+- Substrate re-pinned to Prime `v0.9.2`
+  (`9c54a35dac3a2ad17910074d66664859ea175666`, released the same day) with
+  assets verified against both authorities and the whole suite re-run on it,
+  live lanes included. Daemon schema revision moved 25 → 26; the protocol
+  version did not.
+- All four Pi-vs-Prime seams in the vendored `pi-claude-agent-sdk` patch
+  re-checked against 0.9.2 and all four still needed — `@earendil-works/pi-ai`
+  still has no `./compat` export, `CONFIG_DIR_NAME` is still unexported,
+  `ModelRegistry` still resolves through `getApiKeyAndHeaders`, and the string
+  `cacheRetention` still does not occur anywhere in Prime's core. The patch
+  applied unchanged and BRIDGE-005 passed live on Haiku.
+- `pins/current` added as the version-stable entry point, maintained by
+  `scripts/bootstrap.sh` and asserted by the pin test, so a re-pin no longer
+  asks anything outside this repository to be edited.
+- Every upstream record under `docs/upstream/` re-checked against 0.9.2.
+  None is fixed; each now says so, and the two that were not re-run say that
+  instead of claiming a result.
+
 ## Next — items that need the user
 
 1. **Browser-backed transport alternative** (`pi-oracle`), only if wanted:

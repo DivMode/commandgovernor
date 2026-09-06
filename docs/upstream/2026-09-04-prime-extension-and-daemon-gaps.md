@@ -7,9 +7,39 @@ to an Issue when they accept it. The Command Governor D2 report is already
 (open, no replies as of 2026-09-04; see
 [`2026-09-01-prime-worker-loss-journal.md`](2026-09-01-prime-worker-loss-journal.md)).
 
-Every item below was measured on the pinned build (`v0.9.1`,
+Every item below was measured on the then-pinned build (`v0.9.1`,
 `81ae3cb34d27d38ee37f9e205a1e73694993b344`) in isolated roots with a
-credential-free scripted model. None of them is worked around by Command
+credential-free scripted model.
+
+**Re-checked at the 0.9.2 re-pin (2026-09-05) on `v0.9.2`
+(`9c54a35dac3a2ad17910074d66664859ea175666`); nothing here was fixed.**
+
+- **A** — `dist/index.d.ts` still re-exports only `{ getAgentDir, VERSION }`
+  from `config.js`, `getPackageDir` and `CONFIG_DIR_NAME` are still defined
+  and unexported, and `ExtensionContext` still carries no `mode` or
+  `isProjectTrusted`.
+- **C** — the `hasUI` repro was re-run verbatim in both headless modes and
+  reproduced exactly (see the linked record).
+- **D** — `createAllToolDefinitions` still returns `{ ipython }` alone.
+  0.9.2 added `core/tools/acp-mcp.ts`, but those tools come from an ACP
+  client's MCP servers, not from the host's default set, so the kernel
+  boundary is unchanged.
+- **E** — `agent_settled` does not occur anywhere in `dist/core/`.
+- **F1** — the worker close is still a bare
+  `new Error("Daemon worker socket closed")` in
+  `dist/modes/daemon/daemon-worker-client.js`, and the D2 conformance test
+  still passes on it.
+- **F4** — `shutdown` still parses only `--force` and `--json`, so it still
+  cannot be pointed at a `--daemon-socket`.
+- **F5** — `normalizeLeadingDaemonSocketOption` still rewrites the leading
+  flag for `stop` and `rename` only.
+- **F6** — `package.json` still declares `"./hooks"` and
+  `dist/core/hooks/` still does not exist.
+
+**F2 and F3 were not re-run** on 0.9.2: both need a live worker or supervisor
+loss to observe, the conformance fixture works around them either way
+(`-r <sessionFile>`, its own socket shutdown), and neither is load-bearing
+for the re-pin. They are recorded as unverified on this release, not as fixed. None of them is worked around by Command
 Governor code: each is either a reporting defect that duplicates nothing, a
 gap that only Prime can close, or a limitation that a package or an OS
 sandbox must own. The reproducers live with the proof

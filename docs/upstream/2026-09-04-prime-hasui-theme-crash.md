@@ -3,6 +3,15 @@
 **Target:** https://github.com/PrimeIntellect-ai/prime-agent/issues/new
 **Version:** `prime-agent@0.9.1` (npm), macOS 15 (Darwin 24.6.0), Node 24.19.0
 
+**Still present on 0.9.2** — the repro below was re-run verbatim at the 0.9.2
+re-pin (2026-09-05, both modes, isolated root, `claude-bridge`/`claude-haiku-4-5`
+as the model), and both lines of `probe.jsonl` came back identical to the
+recorded output: `"hasUI": true`, `"modeType": "undefined"`, `mode` absent from
+`ctxKeys`, `"themeErr": "Theme not initialized. Call initTheme() first."`. The
+mechanism is unchanged in the source too: `hasUI` is still
+`this.uiContext !== noOpUIContext` (`dist/core/extensions/runner.js`) and the
+headless modes still install a real UI context.
+
 ---
 
 ## Summary

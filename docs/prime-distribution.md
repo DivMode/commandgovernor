@@ -83,9 +83,11 @@ in", measured). Then:
 prime-agent --provider claude-bridge --model claude-sonnet-5
 ```
 
-The vendored package carries a Prime compatibility patch (its
-`@earendil-works/pi-ai/compat` import, `CONFIG_DIR_NAME`, and Prime's
-`getApiKeyAndHeaders` in place of Pi's `getProviderAuth`) and one enforced
+The vendored package carries a Prime compatibility patch across four seams (its
+`@earendil-works/pi-ai/compat` import, `CONFIG_DIR_NAME`, Prime's
+`getApiKeyAndHeaders` in place of Pi's `getProviderAuth`, and routing the
+nested completions Prime never marks `cacheRetention: "none"` — compaction
+above all — by prompt capture instead) and one enforced
 behaviour change: the child is started with every inherited Anthropic
 variable stripped, and any Anthropic credential the harness resolves (API
 key, OAuth, bearer) is **refused** before a child is spawned. There is no
