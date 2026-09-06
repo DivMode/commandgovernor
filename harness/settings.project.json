@@ -25,8 +25,13 @@
     "                   continual harness is the default memory owner",
     "  pi-claude-agent-sdk  vendored + patched for Prime: Claude models through the real",
     "                   Claude Code binary on its own login (plan billing). No Anthropic",
-    "                   credential is configured in Prime, on purpose."
+    "                   credential is configured in Prime, on purpose.",
+    "",
+    "defaultThinkingLevel: the effort every new session starts at for every",
+    "model, including Fable through the bridge (Prime's own default is medium).",
+    "Change it in-session with /effort; this is the declared default."
   ],
+  "defaultThinkingLevel": "high",
   "packages": [
     "npm:pi-tasks@0.2.5",
     "npm:@gotgenes/pi-subagents@21.4.0",
