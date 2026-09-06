@@ -52,7 +52,7 @@ hardening for intentionally untrusted repositories, skills or packages
 
 ### The substrate is not a policy engine
 
-Prime 0.9.1 ships no permission or approval system. Its only host-side
+Prime 0.9.2 ships no permission or approval system. Its only host-side
 interception point is the `tool_call` extension event, and its only default
 tool is the Python REPL, inside which `bash()`, `subprocess`, `shutil` and
 file writes run with no host round trip

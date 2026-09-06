@@ -175,7 +175,7 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.t
 +	// (core/refinement/refinement.js) — call pi-ai's `completeSimple` with
 +	// `{ maxTokens, signal, apiKey, headers }` and nothing else, so
 +	// `cacheRetention` keeps its "short" default. The string `cacheRetention`
-+	// does not occur anywhere in Prime 0.9.1's core. Upstream's no-cache marker
++	// does not occur anywhere in Prime 0.9.2's core (nor 0.9.1's). Upstream's marker
 +	// therefore never arrives, every one of those completions enters the
 +	// resumable provider path, and `resolveOrDerive` throws on the 317-char
 +	// SUMMARIZATION_SYSTEM_PROMPT that `before_agent_start` never recorded —

@@ -8,7 +8,7 @@ for durable, foreman-led AI/software-engineering work.
 ## What it is
 
 ```text
-Prime Agent v0.9.1 (release assets verified against two checksum authorities)
+Prime Agent v0.9.2 (release assets verified against two checksum authorities)
   + pi-tasks                 durable task/evidence contract
   + @gotgenes/pi-subagents   delegation runtime; Command Governor's roles are its agent files
   + pi-pr-review             GitHub review lane with reviewed-head binding
@@ -90,7 +90,7 @@ scripts/conformance.sh      # prove the distribution on this machine
 
 For a project: copy `harness/settings.project.json` to
 `.prime/agent/settings.json` (Prime installs the pinned packages on startup)
-and `harness/agents/*.md` to `.pi/agents/`. Run `pins/prime-0.9.1/node_modules/.bin/prime-agent`
+and `harness/agents/*.md` to `.pi/agents/`. Run `pins/prime-0.9.2/node_modules/.bin/prime-agent`
 from the project, or install the same release yourself and keep the
 `pins.json` version.
 

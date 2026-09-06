@@ -15,11 +15,11 @@ from it and compares them with what the installed daemon reports.
 
 | Field | Value |
 | --- | --- |
-| substrate | Prime Agent `v0.9.1`, commit `81ae3cb34d27d38ee37f9e205a1e73694993b344` |
+| substrate | Prime Agent `v0.9.2`, commit `9c54a35dac3a2ad17910074d66664859ea175666` |
 | license | MIT (Mario Zechner 2025, Prime Intellect 2026) |
-| daemon protocol | `prime-agent.daemon` v7, schema revision 25 |
-| assets | wrapper `prime-agent-0.9.1.tgz` plus siblings `prime-agent-core`, `prime-agent-ai`, `prime-agent-tui`, each with sha256 and sha512 |
-| install root | `pins/prime-0.9.1/` (committed `package.json`, `package-lock.json`, `.npmrc`; `vendor/` and `node_modules/` are derived and ignored) |
+| daemon protocol | `prime-agent.daemon` v7, schema revision 26 |
+| assets | wrapper `prime-agent-0.9.2.tgz` plus siblings `prime-agent-core`, `prime-agent-ai`, `prime-agent-tui`, each with sha256 and sha512 |
+| install root | `pins/prime-0.9.2/` (committed `package.json`, `package-lock.json`, `.npmrc`; `vendor/` and `node_modules/` are derived and ignored) |
 | fallback | upstream Pi v0.85.0, recorded, never co-installed |
 
 Prime is not on the npm registry. Its wrapper package names its three
@@ -105,7 +105,7 @@ In order:
 1. `node` satisfies the floor in the manifest.
 2. The release's `SHA256SUMS` is fetched from the immutable GitHub release
    and must be byte-identical to the committed `pins/SHA256SUMS`.
-3. Each asset is downloaded into `pins/prime-0.9.1/vendor/` (or reused if
+3. Each asset is downloaded into `pins/prime-0.9.2/vendor/` (or reused if
    already present and correct) and verified against both the manifest and
    `SHA256SUMS`; the two must agree with each other first.
 4. `npm ci --ignore-scripts` in the install root (lockfile integrity for the

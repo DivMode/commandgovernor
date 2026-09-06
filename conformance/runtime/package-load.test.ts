@@ -56,7 +56,8 @@ import { assertCleanTeardown } from "../lib/teardown.ts";
 
 /**
  * What each pinned package must be observed to register, measured on Prime
- * 0.9.1 on 2026-09-04 rather than read from a README.
+ * 0.9.1 on 2026-09-04 rather than read from a README, and re-measured
+ * unchanged on Prime 0.9.2 at the 2026-09-05 re-pin.
  *
  * `tools` are model-facing and must appear on the wire. `commands` must appear
  * in `get_commands` attributed to that exact package spec. A package with no
