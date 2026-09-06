@@ -369,8 +369,9 @@ TUI sometimes won. Three passing runs and one correctly-failing control were
 therefore luckier than they looked, and an independent reviewer's run of the
 same test hung on turn 2 without ever reaching `/compact` — which also silently
 disarms the negative control. The runner now buffers keystrokes, writes at most
-512 bytes at a time, only when `select()` reports the master writable, advances
-by what `os.write()` actually took, and keeps draining output between chunks.
+512 bytes at a time on a non-blocking master (attempting a write every pass and
+parking in `select()` only while the queue is full), advances by what
+`os.write()` actually took, and keeps draining output between chunks.
 
 ## Sources
 
