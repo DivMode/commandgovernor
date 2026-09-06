@@ -130,4 +130,34 @@ describe("GPT-SERVED-MODEL: the served model is read truthfully", { skip: reason
       "an unverifiable reply must not be trusted",
     );
   });
+
+  // SM-006/SM-007 isolate the two independent rejection branches. For every
+  // case above both branches fire, so deleting either one alone stayed green
+  // (found by mutation in the PR #34 review). Each case below trips exactly one.
+  it("SM-006: a *-wm/mini slug is rejected even when it EQUALS the requested slug (classifier branch alone)", async () => {
+    const { assertServedModel, ServedModelError } = await load();
+    // exact match would pass; only the classifier can reject these.
+    assert.throws(
+      () => assertServedModel("gpt-6-astra-wm", "gpt-6-astra-wm", { match: "exact", context: "/gpt chat" }),
+      (e: unknown) => e instanceof ServedModelError && /downgraded\/work model/.test(String((e as Error).message)),
+    );
+    assert.throws(
+      () => assertServedModel("gpt-5-mini", "gpt-5-mini", { match: "exact", context: "/gpt chat" }),
+      (e: unknown) => e instanceof ServedModelError && /downgraded\/work model/.test(String((e as Error).message)),
+    );
+  });
+
+  it("SM-007: a DIFFERENT non-mini, non-wm model is rejected (match branch alone)", async () => {
+    const { assertServedModel, ServedModelError } = await load();
+    // neither classifier fires; only the exact/family match can reject these.
+    assert.throws(
+      () => assertServedModel("gpt-5-6-instant", "gpt-5-6-thinking", { match: "exact", context: "/gpt chat" }),
+      (e: unknown) => e instanceof ServedModelError && /requested gpt-5-6-thinking but the backend served gpt-5-6-instant/.test(String((e as Error).message)),
+    );
+    // family: a different Pro slug is not the requested family.
+    assert.throws(
+      () => assertServedModel("gpt-5-5-pro", "gpt-6-pro", { match: "family", context: "/gpt research" }),
+      (e: unknown) => e instanceof ServedModelError && /requested gpt-6-pro but the backend served gpt-5-5-pro/.test(String((e as Error).message)),
+    );
+  });
 });

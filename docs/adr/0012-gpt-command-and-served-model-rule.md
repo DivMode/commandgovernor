@@ -1,11 +1,22 @@
-# ADR 0011: `/gpt` command, review targets, and the served-model no-fallback rule
+# ADR 0012: `/gpt` command, review targets, and the served-model no-fallback rule
 
 - **Status:** Proposed
 - **Date:** 2026-09-06
-- **Refines:** ADR 0008 (§8, pi-gpt transport) and ADR 0010 (composition-first)
+- **Refines:** ADR 0008 (§8, pi-gpt transport), ADR 0010 (composition-first),
+  and ADR 0011 (consultant/controller boundary; this ADR is its mechanism)
 - **Research:**
   - [`../research/2026-09-06-chatgpt-web-adapter-evaluation.md`](../research/2026-09-06-chatgpt-web-adapter-evaluation.md)
+  - [`../research/2026-09-06-chatgpt-served-model-and-wm-downgrade.md`](../research/2026-09-06-chatgpt-served-model-and-wm-downgrade.md)
+    (which slug answers; the `*-wm` downgrade)
   - [`../research/2026-09-06-chatgpt-web-vs-work-models.md`](../research/2026-09-06-chatgpt-web-vs-work-models.md)
+    §3a (ADR 0011's research; the same measurements from the account side)
+- **Scope note (2026-09-06):** the *mechanism* here — deterministic command,
+  fresh context, served-model assertion, no `*-wm` tier — is decided. The
+  *slugs* in §3 are pins, not decisions: ADR 0011 §3 records the review pin as
+  open until the Astra Pro / private GitHub connector investigation (ADR 0011
+  §7) lands. The user has not accepted `gpt-5-6-thinking` as the headline
+  reviewer; it is the only non-Pro thinker verified to serve itself, so it is
+  the interim value of the pin, not its accepted value.
 
 ## Context
 
@@ -19,7 +30,7 @@ harness-model tokens), and `pi-gpt`'s `ConversationClient` already drives
 `chatgpt.com/backend-api` on the user's Codex login. No browser adapter and no
 ChatGPT-web model provider are needed.
 
-Two facts force the design (`2026-09-06-chatgpt-web-vs-work-models.md`):
+Two facts force the design (`2026-09-06-chatgpt-served-model-and-wm-downgrade.md`):
 
 1. A reply's `default_model_slug` merely **echoes** the requested slug; the
    truthful served model is `resolved_model_slug` then `model_slug`.
@@ -52,12 +63,16 @@ the mistake; the value of review is an independent context. The same rule govern
 the `max` (Claude) target: it must be a fresh reviewer with clean context, never
 the working session's own history.
 
-### 3. Review targets, and the cost/cap distinction
+### 3. Review targets, and the cost/cap distinction (slugs are interim pins)
 
 - `gpt` (default): `gpt-5-6-thinking@max` — **unmetered**, for reviewing
-  everything routinely.
+  everything routinely. Interim pin (Scope note above).
 - `pro`: `gpt-6-pro` — the **capped** lane; reserve for hard/high-stakes reviews.
-  A rate-limited pro tier surfaces the limit and errors — no fallback.
+  A rate-limited pro tier surfaces the limit and errors — no fallback. Note
+  that on the plain chat lane this slug currently serves mini (research §3a),
+  so today the assertion in §5 makes `/gpt review pro` error rather than
+  silently review on mini. That is the intended behaviour until the real Pro
+  request is captured and replicated (ADR 0011 §7).
 - `max`: a Claude review **via the harness** — metered, rare.
 
 ### 4. `max` is not run in-process (limitation, stated honestly)
@@ -76,10 +91,23 @@ allowed; revisit if Prime exposes a first-class subagent-with-return API.
 
 `src/served.ts` reads the served model from the persistent conversation
 (`resolved_model_slug` → `model_slug`, never `default_model_slug`) on **every**
-`/gpt` reply and asserts it against what was requested. A mismatch, a `*-wm`/mini
-downgrade, or an unreadable served model is a loud error; the command never
-retries on a lesser model (memory: gpt-command-no-fallback). The intelligence map
-in `src/models.ts` maps no tier to any `*-wm` slug.
+`/gpt` reply — `review`, `chat` **and `research`** — and asserts it against what
+was requested. A mismatch, a `*-wm`/mini downgrade, or an unreadable served
+model is a loud error; the command never retries on a lesser model (memory:
+gpt-command-no-fallback). The intelligence map in `src/models.ts` maps no tier
+to any `*-wm` slug. Match rules: `review gpt` and an explicitly pinned non-Pro
+`chat --model` match exactly; `review pro`, `research`, and a pinned Pro-family
+`chat --model` (`*-pro`) match by family prefix, so a dated variant of the
+requested Pro slug passes and any other slug fails.
+
+**Known gap, stated rather than papered over.** `/gpt research` asks the
+`deep_research_heavy` lane for `gpt-6-pro` and asserts that family on the
+reply. The lane has been observed to serve a real Pro model (`gpt-5-5-pro`) for
+its vendored default request; whether it serves `gpt-6-pro` when asked for it
+has **not** been verified in this lineage, because each verification spends one
+of the 250 monthly deep-research requests and 5–30 minutes. If the lane routes a
+`gpt-6-pro` request to `gpt-5-5-pro`, the command errors by design and the
+research pin must be re-grounded — it must not be widened to "any Pro".
 
 ## Consequences
 
@@ -92,7 +120,9 @@ in `src/models.ts` maps no tier to any `*-wm` slug.
 ## Guardrails (tests)
 
 - `conformance/tier1/gpt-served-model.test.ts` — the served-model assertion
-  rejects the astra→mini downgrade and a null read, and passes on a match.
+  rejects the astra→mini downgrade and a null read, passes on a match, and
+  (SM-006/SM-007) rejects through each of its two branches independently: a
+  `*-wm`/mini slug that equals the request, and a different non-mini model.
 - `conformance/tier1/gpt-models.test.ts` — no intelligence tier maps to a `*-wm`
   slug; `extra_high` resolves to `gpt-5-6-thinking@max`.
 - `conformance/runtime/package-load.test.ts` — `/gpt` registers on real Prime.

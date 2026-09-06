@@ -1,6 +1,6 @@
 diff -ruN a/README.md b/README.md
---- a/README.md	1985-10-25 22:15:00
-+++ b/README.md	2026-09-06 00:36:38
+--- a/README.md	2026-09-06 01:59:58
++++ b/README.md	2026-09-06 00:47:46
 @@ -43,9 +43,40 @@
  ### Intelligence levels
  
@@ -46,8 +46,8 @@ diff -ruN a/README.md b/README.md
  ### Files
  
 diff -ruN a/extensions/chatgpt.ts b/extensions/chatgpt.ts
---- a/extensions/chatgpt.ts	1985-10-25 22:15:00
-+++ b/extensions/chatgpt.ts	2026-09-06 00:27:32
+--- a/extensions/chatgpt.ts	2026-09-06 01:59:58
++++ b/extensions/chatgpt.ts	2026-09-06 00:47:46
 @@ -22,7 +22,7 @@
    type ChatType,
    type Intelligence,
@@ -98,8 +98,8 @@ diff -ruN a/extensions/chatgpt.ts b/extensions/chatgpt.ts
          intelligence: isAgent || p.model ? null : intelligence,
 diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 --- a/extensions/gpt-command.ts	1969-12-31 14:00:00
-+++ b/extensions/gpt-command.ts	2026-09-06 00:44:51
-@@ -0,0 +1,504 @@
++++ b/extensions/gpt-command.ts	2026-09-06 01:59:46
+@@ -0,0 +1,521 @@
 +// /gpt — a deterministic slash command that drives the user's ChatGPT account
 +// for code review, deep research, and ad-hoc chat, WITHOUT spending any
 +// harness-model tokens. Prime runs a registerCommand handler as code on the
@@ -133,7 +133,6 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +import { redactError } from "../src/redact.ts";
 +import {
 +  assertServedModel,
-+  isMiniModel,
 +  isWorkModel,
 +  servedModelFromConversationDetail,
 +} from "../src/served.ts";
@@ -149,6 +148,11 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +
 +const EFFORTS = ["min", "standard", "extended", "max"] as const;
 +const REVIEW_TARGETS = ["gpt", "pro", "max"] as const;
++// The model /gpt research asks the deep_research_heavy lane for. It is a pin
++// (ADR 0011 §3/§6): the served model is asserted against it on every reply and
++// a mismatch — including the lane routing to a different Pro slug — is a loud
++// error, never a silent acceptance. Re-ground it by probe, not by assumption.
++const RESEARCH_MODEL = "gpt-6-pro";
 +type ReviewTarget = (typeof REVIEW_TARGETS)[number];
 +
 +// The reviewer prompt. ChatGPT cannot read the working tree, so the diff and
@@ -357,7 +361,7 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +  // and return its text", and an in-process one-shot on ctx.model cannot be
 +  // verified here to route through claude-bridge without leaking session
 +  // context or a credential). Rather than fake it, point the user at the real
-+  // fresh-context path. Documented in docs/adr/0011 and the pi-gpt README.
++  // fresh-context path. Documented in docs/adr/0012 and the pi-gpt README.
 +  const model = ctx.model?.id ?? "<your configured claude-bridge model>";
 +  const body =
 +    "`/gpt review max` is intentionally NOT run in-process.\n\n" +
@@ -392,10 +396,10 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +  let connectorFailed = false;
 +  let bytes = 0;
 +  try {
-+    // Pro-tier deep research on gpt-6-pro (not the vendored default gpt-5-5-pro).
-+    // If the tier does not serve it, the served-model check below and the
-+    // rate-limit path error loudly — never a silent fallback.
-+    for await (const ev of conv.deepResearchHeavy(topic, ctx.signal, "gpt-6-pro")) {
++    // Pro-tier deep research on RESEARCH_MODEL (not the vendored default
++    // gpt-5-5-pro). If the lane does not serve it, the served-model assertion
++    // below and the rate-limit path error loudly — never a silent fallback.
++    for await (const ev of conv.deepResearchHeavy(topic, ctx.signal, RESEARCH_MODEL)) {
 +      if (ev.type === "conversation" && ev.conversation_id) {
 +        convId = ev.conversation_id;
 +      } else if (ev.type === "done") {
@@ -438,10 +442,15 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +    return fail(pi, ctx, "/gpt research", new Error("deep research returned no report (it may still be running server-side; check the conversation later)."));
 +  }
 +
-+  // Never silently accept a downgraded served model.
++  // The same no-fallback standard as review/chat: an unreadable served model
++  // (no conversation id, or no resolved_model_slug/model_slug on the leaf) is
++  // a hard error, and the served model must be RESEARCH_MODEL's family — not
++  // merely "not mini". A report served by any other model is not presented.
 +  const served = convId ? await readServedModel(backend, convId) : null;
-+  if (served && (isWorkModel(served) || isMiniModel(served))) {
-+    return fail(pi, ctx, "/gpt research", new Error(`deep research was served by ${served} — a downgraded/work model. Refusing to present it as Pro research.`));
++  try {
++    assertServedModel(served, RESEARCH_MODEL, { match: "family", context: "/gpt research" });
++  } catch (e) {
++    return fail(pi, ctx, "/gpt research", e);
 +  }
 +
 +  let body = finalText;
@@ -451,7 +460,12 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +    for (const ref of refs) for (const item of ref.items || []) if (item.url && !seen.has(item.url)) { seen.add(item.url); lines.push(`- [${item.title || item.url}](${item.url})`); }
 +    body += lines.join("\n");
 +  }
-+  print(pi, `/gpt research${served ? ` — ${served}` : ""}`, `_deep research (gpt-6-pro, capped lane) · ${refs.length} sources${convId ? ` · chat: ${convId}` : ""}_\n\n${body}`);
++  print(pi, `/gpt research — ${served}`, `_deep research (${RESEARCH_MODEL}, capped lane) · ${refs.length} sources${convId ? ` · chat: ${convId}` : ""}_\n\n${body}`);
++}
++
++/** True for a Pro-tier slug (`gpt-6-pro`, `gpt-5-5-pro`, `o3-pro`, …). */
++function isProFamily(slug: string): boolean {
++  return /-pro$/i.test(slug);
 +}
 +
 +async function runChat(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string[]): Promise<void> {
@@ -496,7 +510,10 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +  }
 +  const served = await readServedModel(backend, result.conversationId);
 +  try {
-+    assertServedModel(served, model, { match: "exact", context: "/gpt chat" });
++    // A pinned Pro-family slug is family-matched (a dated `gpt-6-pro-…` variant
++    // is still gpt-6-pro), exactly as `/gpt review pro` does; everything else
++    // must match exactly. Erroring is the safe direction either way.
++    assertServedModel(served, model, { match: isProFamily(model) ? "family" : "exact", context: "/gpt chat" });
 +  } catch (e) {
 +    return fail(pi, ctx, "/gpt chat", e);
 +  }
@@ -605,8 +622,8 @@ diff -ruN a/extensions/gpt-command.ts b/extensions/gpt-command.ts
 +  });
 +}
 diff -ruN a/package.json b/package.json
---- a/package.json	1985-10-25 22:15:00
-+++ b/package.json	2026-09-06 00:31:45
+--- a/package.json	2026-09-06 01:59:58
++++ b/package.json	2026-09-06 00:47:46
 @@ -20,7 +20,8 @@
    "pi": {
      "extensions": [
@@ -618,8 +635,8 @@ diff -ruN a/package.json b/package.json
      "skills": [
        "skills/chatgpt"
 diff -ruN a/skills/chatgpt/SKILL.md b/skills/chatgpt/SKILL.md
---- a/skills/chatgpt/SKILL.md	1985-10-25 22:15:00
-+++ b/skills/chatgpt/SKILL.md	2026-09-06 00:36:50
+--- a/skills/chatgpt/SKILL.md	2026-09-06 01:59:58
++++ b/skills/chatgpt/SKILL.md	2026-09-06 00:47:46
 @@ -57,7 +57,7 @@
    prompt_file:      "<path>",        # prepared UTF-8 prompt packet
    files:            ["<path>", ...], # local files supplied as review/context material
@@ -657,8 +674,8 @@ diff -ruN a/skills/chatgpt/SKILL.md b/skills/chatgpt/SKILL.md
    cases that genuinely need the full multi-section Pro report (quota is limited).
  - Tool output is PII-redacted (emails, tokens, phone numbers masked).
 diff -ruN a/src/models.ts b/src/models.ts
---- a/src/models.ts	1985-10-25 22:15:00
-+++ b/src/models.ts	2026-09-06 00:27:56
+--- a/src/models.ts	2026-09-06 01:59:58
++++ b/src/models.ts	2026-09-06 01:58:15
 @@ -7,14 +7,24 @@
    reasoningType: string;
  }
@@ -671,7 +688,7 @@ diff -ruN a/src/models.ts b/src/models.ts
 +// NO TIER MAY POINT AT A *-wm MODEL. gpt-6-astra-wm (shipped by PR #30) is a
 +// silent liar: at every effort the backend serves gpt-5-mini while echoing the
 +// requested slug in `default_model_slug` (measured 2026-09-05,
-+// docs/research/2026-09-06-chatgpt-web-vs-work-models.md). extra_high therefore
++// docs/research/2026-09-06-chatgpt-served-model-and-wm-downgrade.md). extra_high therefore
 +// resolves to gpt-5-6-thinking at max — the newest non-pro thinker that is
 +// CONFIRMED to serve its own model (resolved_model_slug=gpt-5-6-thinking). The
 +// no-*-wm invariant is enforced by conformance/tier1/gpt-models.test.ts;
@@ -702,7 +719,7 @@ diff -ruN a/src/models.ts b/src/models.ts
  
 diff -ruN a/src/served.ts b/src/served.ts
 --- a/src/served.ts	1969-12-31 14:00:00
-+++ b/src/served.ts	2026-09-06 00:28:26
++++ b/src/served.ts	2026-09-06 00:47:46
 @@ -0,0 +1,137 @@
 +// Served-model discipline for Command Governor's /gpt command.
 +//
@@ -842,8 +859,8 @@ diff -ruN a/src/served.ts b/src/served.ts
 +  }
 +}
 diff -ruN a/tests/models.test.ts b/tests/models.test.ts
---- a/tests/models.test.ts	1985-10-25 22:15:00
-+++ b/tests/models.test.ts	2026-09-06 00:32:01
+--- a/tests/models.test.ts	2026-09-06 01:59:58
++++ b/tests/models.test.ts	2026-09-06 00:47:46
 @@ -1,5 +1,38 @@
  import { describe, expect, test } from "bun:test";
 -import { resolveModel } from "../src/models.ts";

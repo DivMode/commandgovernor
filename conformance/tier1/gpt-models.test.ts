@@ -3,7 +3,7 @@
  *
  * PR #30 mapped extra_high → gpt-6-astra-wm, which echoes the requested slug in
  * default_model_slug while the backend actually serves gpt-5-mini at every
- * effort (docs/research/2026-09-06-chatgpt-web-vs-work-models.md). This test
+ * effort (docs/research/2026-09-06-chatgpt-served-model-and-wm-downgrade.md). This test
  * guards against that regression returning: every tier of INTELLIGENCE_MAP must
  * resolve to a real, non-*-wm slug, and extra_high (the default) must be the
  * honest newest thinker, gpt-5-6-thinking at max.

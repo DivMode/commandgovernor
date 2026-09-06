@@ -11,7 +11,7 @@ vendored source it is marked *Verified in source* and was read here.
 This document exists because `pins/packages/pi-gpt-0.4.3/src/models.ts`,
 `src/served.ts`, `extensions/gpt-command.ts`, the two conformance tests
 (`conformance/tier1/gpt-served-model.test.ts`, `gpt-models.test.ts`) and
-ADR 0011 all reference it as the authority for two decisions: **which model each
+ADR 0012 all reference it as the authority for two decisions: **which model each
 intelligence tier maps to**, and **how the served model is read and asserted**.
 
 ---
