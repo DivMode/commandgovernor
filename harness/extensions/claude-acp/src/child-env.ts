@@ -79,17 +79,41 @@ export const STRIPPED_ENV_KEYS = [
 /**
  * Settings forced on every adapter child.
  *
- * `CLAUDE_CODE_DISABLE_1M_CONTEXT` is the one that costs money if it is wrong:
- * a 1M-context turn is billed as Extra Usage on top of the plan, which this
- * product never spends. It is set here rather than passed per session so that
- * the adapter's own start-up probes of the CLI see it too. The model id is
- * likewise never given a `[1m]` suffix (see `models.ts`) — the window is Claude
- * Code's decision, made under this switch.
+ * Only one, and it is not about billing: it stops the child making update
+ * checks, MCP-registry lookups and telemetry calls that a governed run has no
+ * use for.
  */
 export const FORCED_CHILD_ENV: Readonly<Record<string, string>> = Object.freeze({
-	CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 });
+
+/**
+ * The long-context cap, which is OPT-IN and off by default.
+ *
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` clamps Claude Code to a 200K window. It
+ * was on by default in an earlier draft of this provider on the theory that a
+ * 1M turn spends the plan faster; that theory is unmeasured, and the cap has a
+ * measured cost — a smaller window compacts more often, and each compaction is
+ * itself a summarisation turn. So it is a setting a user turns on, not a
+ * default this code imposes.
+ *
+ * Measured on Claude Code 2.1.261 (2026-09-05, clean environment, no
+ * credential): the flag takes effect even when the model id carries an explicit
+ * `[1m]` suffix — `claude-sonnet-4-6[1m]` ran and reported `contextWindow:
+ * 200000` with `canonicalModel: claude-sonnet-4-6`. Without it, the same id
+ * failed the turn outright ("Usage credits required for 1M context"), spending
+ * zero tokens. So on an account with no usage credits the flag is what makes a
+ * `[1m]` id work at all; it is never silently more expensive.
+ *
+ * This provider never appends `[1m]` (see `models.ts`), so with the default off
+ * Claude Code simply chooses its own window.
+ */
+export const LONG_CONTEXT_DISABLE_KEY = "CLAUDE_CODE_DISABLE_1M_CONTEXT";
+
+export interface ChildEnvOptions {
+	/** Opt in to clamping Claude Code to a 200K window. Default: false. */
+	readonly disableLongContext?: boolean;
+}
 
 export const CREDENTIAL_REFUSAL =
 	"claude-acp: an Anthropic credential is configured in the harness. Command Governor runs Claude only on Claude Code's own login " +
@@ -103,7 +127,7 @@ export const CREDENTIAL_REFUSAL =
  * that case, so there is nothing to clean up and nothing that could reach the
  * API on the wrong billing path.
  */
-export function buildAcpChildEnv(base: NodeJS.ProcessEnv, resolved?: AuthResult): NodeJS.ProcessEnv {
+export function buildAcpChildEnv(base: NodeJS.ProcessEnv, resolved?: AuthResult, options: ChildEnvOptions = {}): NodeJS.ProcessEnv {
 	const headers = Object.entries(resolved?.auth.headers ?? {}).filter((entry): entry is [string, string] => entry[1] != null);
 	const authorization = headers.find(([name]) => name.toLowerCase() === "authorization")?.[1];
 	const bearerToken = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
@@ -116,6 +140,11 @@ export function buildAcpChildEnv(base: NodeJS.ProcessEnv, resolved?: AuthResult)
 	// passed, so merging it could only reintroduce a backend override.
 	const env: NodeJS.ProcessEnv = { ...base, ...FORCED_CHILD_ENV };
 	for (const key of STRIPPED_ENV_KEYS) delete env[key];
+	// Off unless asked for, and stripped rather than left to an inherited value:
+	// whether the window is capped is this configuration's decision, not the
+	// shell's.
+	delete env[LONG_CONTEXT_DISABLE_KEY];
+	if (options.disableLongContext) env[LONG_CONTEXT_DISABLE_KEY] = "1";
 	return env;
 }
 
@@ -132,8 +161,9 @@ export function buildAcpChildEnv(base: NodeJS.ProcessEnv, resolved?: AuthResult)
 export async function resolveAcpChildEnv(
 	registry: AnthropicAuthRegistry | null | undefined,
 	base: NodeJS.ProcessEnv = process.env,
+	options: ChildEnvOptions = {},
 ): Promise<NodeJS.ProcessEnv> {
-	return buildAcpChildEnv(base, registry ? await resolveAnthropicAuth(registry) : undefined);
+	return buildAcpChildEnv(base, registry ? await resolveAnthropicAuth(registry) : undefined, options);
 }
 
 async function resolveAnthropicAuth(registry: AnthropicAuthRegistry): Promise<AuthResult | undefined> {

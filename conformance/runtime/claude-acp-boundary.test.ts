@@ -142,11 +142,22 @@ describe("ACP-ENV: Claude runs only on Claude Code's own login, and never on Ext
 		assertNoCredential(pi.env, "pi/no credential");
 	});
 
-	it("ACP-005: the long-context switch is forced on in the child environment", async () => {
-		const result = await drive("env", { base: KEEP });
-		assert.equal(result.ok, true, result.error);
-		assert.equal(result.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1", "a 1M-context turn bills Extra Usage on top of the plan");
-		assert.equal(result.forced?.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1");
+	it("ACP-005: the 200K clamp is opt-in, off by default, and never inherited", async () => {
+		// Off by default. Capping the window has no measured allowance saving and
+		// makes compaction — itself a summarisation turn — happen more often, so it
+		// is a decision the user makes rather than one this code imposes.
+		const byDefault = await drive("env", { base: KEEP });
+		assert.equal(byDefault.ok, true, byDefault.error);
+		assert.equal(byDefault.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, undefined, "the 200K clamp must not be on by default");
+
+		// Not inherited either: whether the window is capped is the configuration's
+		// decision, not the surrounding shell's.
+		const inherited = await drive("env", { base: { ...KEEP, CLAUDE_CODE_DISABLE_1M_CONTEXT: "1" } });
+		assert.equal(inherited.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, undefined, "an inherited clamp reached the child");
+
+		// And it does reach the child when asked for, so the setting is real.
+		const optedIn = await drive("env", { base: KEEP, options: { disableLongContext: true } });
+		assert.equal(optedIn.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1", "the opt-in setting did not reach the child");
 	});
 
 	it("ACP-006: no registered model asks for an extended window, and the guard that says so can fail", async () => {

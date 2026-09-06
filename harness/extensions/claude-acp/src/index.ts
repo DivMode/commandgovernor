@@ -102,6 +102,8 @@ let branchPending = false;
 let piContext: ExtensionContext | undefined;
 let approvalPolicy: ApprovalPolicy = "ask";
 let adapterOverride: string | undefined;
+/** Opt-in 200K clamp; see child-env.ts for why it is not a default. */
+let disableLongContext = false;
 
 function endSession(reason: string): void {
 	if (!live) return;
@@ -181,7 +183,7 @@ async function startClient(cwd: string, registry: unknown): Promise<AcpClient> {
 	// The refusal happens HERE, before any child exists: a harness-held
 	// Anthropic credential must never reach a process, not merely be unused by
 	// one.
-	const env = await resolveAcpChildEnv(registry as Parameters<typeof resolveAcpChildEnv>[0], process.env);
+	const env = await resolveAcpChildEnv(registry as Parameters<typeof resolveAcpChildEnv>[0], process.env, { disableLongContext });
 	const entry = resolveAdapterEntry(adapterOverride);
 
 	authStatus = undefined;
@@ -495,6 +497,7 @@ export default function (pi: ExtensionAPI): void {
 	const config = readConfig(process.cwd(), (message) => process.stderr.write(`${message}\n`));
 	approvalPolicy = config.approval;
 	adapterOverride = config.adapterCommand;
+	disableLongContext = config.disableLongContext === true;
 
 	pi.on("session_start", (event, ctx) => {
 		piContext = ctx;

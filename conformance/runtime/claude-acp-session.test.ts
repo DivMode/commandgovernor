@@ -29,9 +29,9 @@
  *   ACP-104 after a process restart the session is restored NATIVELY by id
  *           (`session/resume`, or `session/load`), never rebuilt: no
  *           `session/new`, and no earlier turn's text on the wire.
- *   ACP-105 `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` reaches the adapter PROCESS.
- *           ACP-005 proves the env builder sets it; this proves a real child was
- *           started with it.
+ *   ACP-105 the environment strip reaches the adapter PROCESS. ACP-001 proves
+ *           the env builder strips; this proves a real child was started
+ *           stripped, and that the 200K clamp is not on by default.
  *   ACP-106 with no interactive surface, a permission request is REJECTED.
  *           A headless run has no user, and "ask" must not degrade to "yes".
  *   ACP-107 an adapter reporting that an API key would pay for the turn is
@@ -253,7 +253,7 @@ describe("ACP-SESSION: Claude owns the conversation; Prime never rebuilds it", (
 		assert.deepEqual(prompts(second), ["ACP-R2-BETA"], `the restart replayed history: ${JSON.stringify(prompts(second))}`);
 	});
 
-	it("ACP-105: the long-context switch reaches the adapter process itself", async () => {
+	it("ACP-105: the credential strip reaches the adapter process itself", async () => {
 		const log = newLog();
 		const sessions = join(fixture.root, "s105");
 		// The stub records its own environment at start-up, which is the only place
@@ -270,16 +270,19 @@ describe("ACP-SESSION: Claude owns the conversation; Prime never rebuilds it", (
 				CLAUDE_CODE_ENTRYPOINT: "cli",
 				ANTHROPIC_BASE_URL: "https://poison.example",
 				CLAUDE_CODE_USE_BEDROCK: "1",
+				CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
 			},
 			script: [{ command: { id: "t1", type: "prompt", message: "ACP-E1" } }],
 		});
 		const env = readLog(log).find((entry) => entry.kind === "child_env");
 		assert.ok(env, "the stub agent recorded no environment; the recording hook did not run");
 		const observed = (env as unknown as { env?: Record<string, string> }).env ?? {};
-		assert.equal(observed.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1", "the adapter process was started without the long-context switch");
 		for (const key of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK"]) {
 			assert.equal(observed[key], undefined, `${key} reached the adapter process`);
 		}
+		// The 200K clamp is opt-in, and an inherited one is not the opt-in: whether
+		// the window is capped is the project's configured decision.
+		assert.equal(observed.CLAUDE_CODE_DISABLE_1M_CONTEXT, undefined, "an inherited 200K clamp reached the adapter process");
 		// Control: the poison really was in the parent, so the four assertions
 		// above are about stripping rather than about an empty environment.
 		assert.equal(observed.CG_ACP_STUB_RECORD_ENV, "1", "the child inherited nothing at all; the stripping assertions prove nothing");

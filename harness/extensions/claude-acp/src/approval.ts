@@ -33,6 +33,13 @@ export interface ClaudeAcpConfig {
 	readonly approval: ApprovalPolicy;
 	/** Override the adapter command; otherwise the pinned one is used. */
 	readonly adapterCommand?: string;
+	/**
+	 * Clamp Claude Code to a 200K context window. Off by default: capping the
+	 * window has no measured allowance saving and it makes compaction — itself a
+	 * summarisation turn — happen more often. See `child-env.ts` for what was
+	 * measured about the flag.
+	 */
+	readonly disableLongContext?: boolean;
 }
 
 function isPolicy(value: unknown): value is ApprovalPolicy {
@@ -59,6 +66,7 @@ export function readConfig(cwd: string, warn: (message: string) => void = () => 
 		return {
 			approval: isPolicy(parsed.approval) ? parsed.approval : "ask",
 			...(typeof parsed.adapterCommand === "string" && parsed.adapterCommand.length > 0 ? { adapterCommand: parsed.adapterCommand } : {}),
+			...(parsed.disableLongContext === true ? { disableLongContext: true } : {}),
 		};
 	} catch (error) {
 		warn(`claude-acp: could not read ${CONFIG_RELATIVE_PATH} (${String((error as Error).message)}); using the default approval policy "ask".`);

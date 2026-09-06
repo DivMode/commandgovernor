@@ -40,10 +40,10 @@ function registryFor(spec) {
 }
 
 if (command === "env") {
-	const { resolveAcpChildEnv, STRIPPED_ENV_KEYS, FORCED_CHILD_ENV } = await import(src("child-env.ts"));
+	const { resolveAcpChildEnv, STRIPPED_ENV_KEYS, FORCED_CHILD_ENV, LONG_CONTEXT_DISABLE_KEY } = await import(src("child-env.ts"));
 	try {
-		const env = await resolveAcpChildEnv(registryFor(scenario.registry), scenario.base ?? {});
-		process.stdout.write(JSON.stringify({ ok: true, env, stripped: STRIPPED_ENV_KEYS, forced: FORCED_CHILD_ENV }));
+		const env = await resolveAcpChildEnv(registryFor(scenario.registry), scenario.base ?? {}, scenario.options ?? {});
+		process.stdout.write(JSON.stringify({ ok: true, env, stripped: STRIPPED_ENV_KEYS, forced: FORCED_CHILD_ENV, longContextKey: LONG_CONTEXT_DISABLE_KEY }));
 	} catch (error) {
 		process.stdout.write(JSON.stringify({ ok: false, refused: true, error: String(error?.message ?? error), stripped: STRIPPED_ENV_KEYS }));
 	}
