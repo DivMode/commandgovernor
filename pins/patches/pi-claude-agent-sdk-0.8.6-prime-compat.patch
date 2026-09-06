@@ -145,7 +145,7 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/config.
  
 diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.ts patched/src/index.ts
 --- a/src/index.ts	1985-10-25 22:15:00
-+++ b/src/index.ts	2026-09-05 00:07:39
++++ b/src/index.ts	2026-09-05 15:11:32
 @@ -1,6 +1,6 @@
  import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
  import * as piAi from "@earendil-works/pi-ai";
@@ -154,3 +154,81 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.t
  import { type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
  import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
  import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
+@@ -387,10 +387,36 @@
+  * prompt capture and shared Claude Code session belong to the interactive
+  * agent, not to an unrelated planner or summarizer. */
+ function isStandaloneRequest(context: Context, options?: SimpleStreamOptions): boolean {
+-	return options?.cacheRetention === "none"
+-		&& context.tools === undefined
++	const standaloneShape = context.tools === undefined
+ 		&& context.messages.length === 1
+ 		&& context.messages[0]?.role === "user";
++	if (!standaloneShape) return false;
++	if (options?.cacheRetention === "none") return true;
++
++	// Command Governor patch for Prime Agent: Prime never sets cacheRetention.
++	//
++	// Prime's own nested completions — `/compact` and autocompaction
++	// (core/compaction/compaction.js `generateSummary`,
++	// `generateTurnPrefixSummary`), branch summarisation and refinement — call
++	// pi-ai's `completeSimple` with `{ maxTokens, signal, apiKey, headers }` and
++	// nothing else, so `cacheRetention` keeps its "short" default. The string
++	// `cacheRetention` does not occur anywhere in Prime 0.9.1's core. Upstream's
++	// no-cache marker therefore never arrives, every one of those completions
++	// enters the resumable provider path, and `resolveOrDerive` throws on the
++	// 317-char SUMMARIZATION_SYSTEM_PROMPT that `before_agent_start` never
++	// recorded — surfacing to the user as "Compaction failed: prompt-capture: no
++	// capture for this 317-char system prompt". Measured 3/3.
++	//
++	// The second marker is the capture table itself: a system prompt that Pi/Prime
++	// never assembled through `before_agent_start` is, by construction, not an
++	// agent turn. This does not weaken the guard for the provider path. It only
++	// fires on the standalone shape above (no tools, one user message), and the
++	// standalone path passes `context.systemPrompt` to Claude Code verbatim — so
++	// nothing this exists to protect (context files, skills, custom instructions)
++	// can be dropped by taking it. An empty table is left to throw as before: zero
++	// known captures means `before_agent_start` never recorded at all, which is
++	// the second-package-root bug the error text names, not a nested completion.
++	return promptCaptures.size > 0 && !promptCaptures.canAccount(context.systemPrompt);
+ }
+ 
+ /** Failure text for an SDK result, or undefined when it succeeded. CC reports API failures
+@@ -1427,7 +1453,7 @@
+  * latter before touching prompt captures or resumable-session state. */
+ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+ 	if (isStandaloneRequest(context, options)) {
+-		debug(`provider: routing standalone cacheRetention=none request to isolated subprocess`);
++		debug(`provider: routing standalone request to isolated subprocess, cacheRetention=${options?.cacheRetention ?? "unset"} systemPromptLen=${context.systemPrompt?.length ?? 0} knownCaptures=${promptCaptures.size}`);
+ 		return standaloneStreamFn(model, context, options);
+ 	}
+ 
+diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/prompt-capture.ts patched/src/prompt-capture.ts
+--- a/src/prompt-capture.ts	1985-10-25 22:15:00
++++ b/src/prompt-capture.ts	2026-09-05 15:11:16
+@@ -175,6 +175,26 @@
+ 		return { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], inherited: embedded };
+ 	}
+ 
++	/**
++	 * Command Governor patch for Prime Agent: would `resolveOrDerive` account for
++	 * this system prompt — without throwing, and without recording a diagnostic?
++	 *
++	 * Upstream Pi has no caller for this: every request Pi routes here is either
++	 * an agent turn (whose prompt `before_agent_start` recorded) or a nested
++	 * completion Pi already flagged `cacheRetention: "none"`. Prime has a third
++	 * kind — a nested completion carrying a short system prompt of its own that
++	 * `before_agent_start` never sees, and that Prime does not flag — so the
++	 * provider entry point needs to ask the question before it commits to the
++	 * path that throws. Same three routes as `resolveOrDerive`, in the same
++	 * order, with no side effects.
++	 */
++	canAccount(systemPrompt?: string): boolean {
++		if (!systemPrompt) return false;
++		if (this.captures.has(systemPrompt)) return true;
++		if (this.reachableCaptures().some((node) => node.assembledPrompt === systemPrompt)) return true;
++		return this.findInheritedPrompts(systemPrompt, systemPrompt).length > 0;
++	}
++
+ 	get size(): number {
+ 		return this.captures.size;
+ 	}
