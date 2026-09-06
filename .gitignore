@@ -42,3 +42,6 @@ pins/current
 # under pins/patches/ are the source; scripts/bootstrap.sh extracts and patches
 # them into pins/packages/<name>-<version>/ for Prime to install by path.
 pins/packages/*/
+
+# Claude Code local session state (worktrees, scratch); never part of the product
+.claude/
