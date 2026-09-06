@@ -20,6 +20,11 @@
     "never a co-install; the conformance suite asserts the install root",
     "contains no @earendil-works/pi-coding-agent.",
     "",
+    "scripts/bootstrap.sh also maintains `substrate.currentLink` (pins/current) as",
+    "a symlink to `substrate.installRoot`, so an external wrapper can reference",
+    "`substrate.stableBinary` and survive a re-pin without an edit. The link is",
+    "derived and git-ignored; the pinned install root stays the authority.",
+    "",
     "Third-party package policy (packages[]): an entry MUST carry either an",
     "exact npm version (exactVersion) or a 40-character git commit SHA",
     "(resolvedSha), a license, a review date and the single concern it owns.",
@@ -33,59 +38,62 @@
   "substrate": {
     "name": "prime-agent",
     "displayName": "Prime Agent",
-    "version": "0.9.1",
-    "tag": "v0.9.1",
+    "version": "0.9.2",
+    "tag": "v0.9.2",
     "repository": "https://github.com/PrimeIntellect-ai/prime-agent",
-    "commit": "81ae3cb34d27d38ee37f9e205a1e73694993b344",
-    "commitNote": "Tag v0.9.1 resolves to this commit; verified via the GitHub API (git/ref/tags/v0.9.1) on 2026-09-04.",
+    "commit": "9c54a35dac3a2ad17910074d66664859ea175666",
+    "commitNote": "Tag v0.9.2 resolves to this commit; verified via the GitHub API (git/ref/tags/v0.9.2) on 2026-09-05. The release was published 2026-09-05T19:14:39Z.",
     "license": "MIT",
     "licenseNote": "MIT License, Copyright (c) 2025 Mario Zechner, Copyright (c) 2026 Prime Intellect. No distribution restriction blocks shipping it as the substrate.",
-    "releaseBaseUrl": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.1/",
-    "installRoot": "pins/prime-0.9.1",
-    "vendorDir": "pins/prime-0.9.1/vendor",
-    "binary": "pins/prime-0.9.1/node_modules/.bin/prime-agent",
+    "releaseBaseUrl": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.2/",
+    "installRoot": "pins/prime-0.9.2",
+    "vendorDir": "pins/prime-0.9.2/vendor",
+    "binary": "pins/prime-0.9.2/node_modules/.bin/prime-agent",
+    "currentLink": "pins/current",
+    "stableBinary": "pins/current/node_modules/.bin/prime-agent",
+    "stableBinaryNote": "Version-stable entry point. scripts/bootstrap.sh repoints the `pins/current` symlink at `installRoot` on every run, so an external wrapper (nix-config's `prime-agent`) can hardcode `stableBinary` and never need a per-release bump. The symlink is derived, not source: bootstrap regenerates it and git ignores it.",
     "daemonProtocol": {
       "name": "prime-agent.daemon",
       "version": 7,
-      "schemaRevision": 25
+      "schemaRevision": 26
     },
     "engines": {
       "node": ">=22.19.0"
     },
     "assets": [
       {
-        "name": "prime-agent-0.9.1.tgz",
+        "name": "prime-agent-0.9.2.tgz",
         "role": "wrapper",
         "npmName": "prime-agent",
-        "sha256": "573bce0cd004fc62052e9a924089941b7f39266ab71e66a94c85a1f9d35835ba",
-        "sha512": "sha512-qsqmeLacEIr+g62ZsKffICoS0W7hy4inzU0wD8ATKWTFT9VwPSPb/cFBBy4Omdzndct7qkAqFh6g/V+g8CDOvA==",
-        "bytes": 9803080
+        "sha256": "d649b9f0258c77de7d02aba33d786925ce41a36b601e8e24eef0f00bdc2f1f49",
+        "sha512": "sha512-TYPsbJoIYAOsGtGXEEWOGpCPQdgaEBvWwSUSIREFYhn2Ws3A/O+YSSigrBNm4oeEgqpRquVijkR5OM5IVOzMFw==",
+        "bytes": 9901800
       },
       {
-        "name": "prime-agent-core-0.9.1.tgz",
+        "name": "prime-agent-core-0.9.2.tgz",
         "role": "sibling",
         "npmName": "@earendil-works/pi-agent-core",
-        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.1/prime-agent-core-0.9.1.tgz",
-        "sha256": "fb6f3a5dcc8b69c5eeb3beff722b5e0f09885c14849db50bc1d7c0f1d064151c",
-        "sha512": "sha512-db0B1P5k57UU7jhyEvZIxkJ5ICG/yCKDB/4dUbw9E87TJDx5Qioy+dgr5KcbECjJfKDiqWy+HvYzMIDMizTY6g==",
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.2/prime-agent-core-0.9.2.tgz",
+        "sha256": "c28ae82eaceddf40a1860a21faa6f4a74d8a65d505b7052aa42d946ee36d5ba6",
+        "sha512": "sha512-mjrFu8xYvY+7o85GXHSXZiaton8s7q3X30bpfZoO/Z9zKMRplKlNm964wCr1mvAYmMN7+rGtb4A84S/cukyTEw==",
         "bytes": 59520
       },
       {
-        "name": "prime-agent-ai-0.9.1.tgz",
+        "name": "prime-agent-ai-0.9.2.tgz",
         "role": "sibling",
         "npmName": "@earendil-works/pi-ai",
-        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.1/prime-agent-ai-0.9.1.tgz",
-        "sha256": "11b5b4cf67b6bb2d3420a44fb69181bc9d94d81e69a2b4fde07eb9c99f5faf4f",
-        "sha512": "sha512-whZ00rxQB7FSH457ge+SoH3m60S3ciLfmIGWdlJs3AN7m6yr9nF4CLJ3sAs59494/a2ufEuaxSafj7ALdMqF3w==",
-        "bytes": 554911
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.2/prime-agent-ai-0.9.2.tgz",
+        "sha256": "251b211ef45cf20092d30e92ad89fabf6841da91563e5544dd41efe881df830c",
+        "sha512": "sha512-jTbsoxYGFLyGsj/CFTHadn+3KazDGz1HxfJvBgMN3nR/xb++9M1F3mDYOI+W1fOg2L5poUKQV8tqUmjsIhXjpA==",
+        "bytes": 557692
       },
       {
-        "name": "prime-agent-tui-0.9.1.tgz",
+        "name": "prime-agent-tui-0.9.2.tgz",
         "role": "sibling",
         "npmName": "@earendil-works/pi-tui",
-        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.1/prime-agent-tui-0.9.1.tgz",
-        "sha256": "4f3eaca2814944d3993073e0b88c0bde54a641ddb5132fbe107e392b997e38ec",
-        "sha512": "sha512-eCsBi6FTUkCI9n1OZvQpcoSrreYmFr7rTV2zpb1tbU69iBWOEkSMGThTZ0fmwF4W9HMuKKKcKfUT2RMqADXneA==",
+        "upstreamSpec": "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.2/prime-agent-tui-0.9.2.tgz",
+        "sha256": "3713552b9844584004d372f8cb8c98460d9a10982907758d483d493ab8521fe0",
+        "sha512": "sha512-aknMODGqPjJ1HGXM745VLbW6noxMMIZJcfJqz6FUJZFgPZp2AnNvVpK/5GAeDZ6R0OCfJN2NQMX7leWc0RGAlQ==",
         "bytes": 427760
       }
     ],
@@ -99,8 +107,8 @@
     },
     "updatePolicy": "Re-pin only through docs/prime-distribution.md's ritual: new tag -> commit verified via API -> assets downloaded and hashed -> pins.json, pins/SHA256SUMS and the install-root lockfile updated together -> scripts/conformance.sh green locally AND in the merge-gating harness job.",
     "conformance": "scripts/conformance.sh (credential-free; drives the pinned Prime through its own stock clients in isolated roots).",
-    "reviewedAt": "2026-09-04",
-    "reviewedBy": "docs/research/2026-09-04-zero-custom-code-proof.md"
+    "reviewedAt": "2026-09-05",
+    "reviewedBy": "docs/research/2026-09-04-zero-custom-code-proof.md (architecture, and the 0.9.1 measurements it rests on); re-pinned to v0.9.2 and re-proved on 2026-09-05 by scripts/bootstrap.sh and scripts/conformance.sh, including the live BRIDGE and D1/D2/D8 lanes."
   },
   "fallback": {
     "$comment": "Recorded, not installed. ADR 0009 §2 names upstream Pi as the first fallback if Prime fails.",
@@ -176,7 +184,7 @@
       "reviewedAt": "2026-09-05",
       "authority": "claude-model-provider",
       "registers": "model provider `claude-bridge` with nine Claude models (Fable 5.1/5, Opus 5/4.8/4.7/4.6, Sonnet 5/4.6, Haiku 4.5); no tools, no commands",
-      "note": "Runs the real Claude Code binary (the Agent SDK's bundled one, or `claude` on PATH via pathToClaudeCodeExecutable) as a Prime model provider with Prime's tools bridged through it: the T3 Code pattern inside Prime. Unpatched it does NOT load on Prime (measured with Prime's own loader 2026-09-05): it imports `@earendil-works/pi-ai/compat` (Prime has no compat export; getModels is on pi-ai's main entry), `CONFIG_DIR_NAME` (Prime defines `.prime/agent` but does not export it) and `ModelRegistry.getProviderAuth` (Prime's resolver is getApiKeyAndHeaders). The committed patch fixes those three and replaces upstream's credential injection with an enforced boundary: every inherited Claude/Anthropic variable is stripped from the child, and any Anthropic credential the harness resolves (API key, OAuth token, bearer) is REFUSED before a child is spawned; the child can only authenticate with Claude Code's own login (macOS Keychain). Prime never holds or forwards an Anthropic token. Enforced on the shipped module by conformance/runtime/claude-bridge-boundary.test.ts (BRIDGE-001…004) and at the product surface (a Prime-configured API key is refused before any Claude Code child exists, measured 2026-09-05). Measured after the patch: Prime's loader loads it; get_available_models lists provider claude-bridge with nine models; a run with --provider claude-bridge --model claude-haiku-4-5 and no Prime credential answered the exact probe token through the user's Claude Code login in two seconds, plan-billed. Before the boundary existed, a Claude Code child given an invalid API key was observed to hang; the refusal now happens before any child. Dependencies come from the committed lockfile at bootstrap."
+      "note": "Runs the real Claude Code binary (the Agent SDK's bundled one, or `claude` on PATH via pathToClaudeCodeExecutable) as a Prime model provider with Prime's tools bridged through it: the T3 Code pattern inside Prime. Unpatched it does NOT load on Prime (measured with Prime's own loader 2026-09-05): it imports `@earendil-works/pi-ai/compat` (Prime has no compat export; getModels is on pi-ai's main entry), `CONFIG_DIR_NAME` (Prime defines `.prime/agent` but does not export it) and `ModelRegistry.getProviderAuth` (Prime's resolver is getApiKeyAndHeaders). The committed patch fixes those three and replaces upstream's credential injection with an enforced boundary: every inherited Claude/Anthropic variable is stripped from the child, and any Anthropic credential the harness resolves (API key, OAuth token, bearer) is REFUSED before a child is spawned; the child can only authenticate with Claude Code's own login (macOS Keychain). Prime never holds or forwards an Anthropic token. Enforced on the shipped module by conformance/runtime/claude-bridge-boundary.test.ts (BRIDGE-001…004) and at the product surface (a Prime-configured API key is refused before any Claude Code child exists, measured 2026-09-05). Measured after the patch: Prime's loader loads it; get_available_models lists provider claude-bridge with nine models; a run with --provider claude-bridge --model claude-haiku-4-5 and no Prime credential answered the exact probe token through the user's Claude Code login in two seconds, plan-billed. Before the boundary existed, a Claude Code child given an invalid API key was observed to hang; the refusal now happens before any child. Dependencies come from the committed lockfile at bootstrap. Re-checked against Prime 0.9.2 at the 2026-09-05 re-pin: all four seams still needed — pi-ai still publishes no `./compat` export, prime-agent still re-exports only `getAgentDir` and `VERSION` from its config module, ModelRegistry still resolves credentials through `getApiKeyAndHeaders`, and the string `cacheRetention` still does not occur anywhere in Prime's core. The patch applied unchanged and BRIDGE-001…005 passed on 0.9.2, BRIDGE-005 live on claude-haiku-4-5."
     }
   ],
   "concerns": [
@@ -276,7 +284,7 @@
       "status": "unassigned",
       "phase": "upstream",
       "plannedOwner": "a Prime kernel-boundary host hook for rlm.bash (upstream), then npm:@gotgenes/pi-permission-system once it loads on Prime; OS containment of the kernel process meanwhile",
-      "note": "ADR 0008 invariant 7 has no enforcement point on Prime 0.9.1: the only built-in tool is ipython and bash() runs inside the kernel below every extension hook. Measured: the permission package does not load on Prime and, patched, cannot see kernel-side bash. No Command Governor extension can close this either."
+      "note": "ADR 0008 invariant 7 has no enforcement point on Prime 0.9.2: the only built-in tool is ipython (re-checked at the 0.9.2 re-pin: createAllToolDefinitions still returns ipython alone, and 0.9.2's new ACP MCP tools are supplied by an ACP client rather than by the host) and bash() runs inside the kernel below every extension hook. Measured: the permission package does not load on Prime and, patched, cannot see kernel-side bash. No Command Governor extension can close this either."
     },
     {
       "concern": "compaction-summary",

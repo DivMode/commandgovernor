@@ -8,7 +8,12 @@ which Prime's contribution gate closed automatically: their
 `CONTRIBUTING.md` routes all external bug reports through Discussions,
 and maintainers promote a Discussion to an Issue only once they accept it.
 Nobody at Prime has reviewed the report yet (re-checked 2026-09-04: open,
-zero replies, still present on Prime `main`). The text below is what was
+zero replies, still present on Prime `main`).
+**Still present on Prime 0.9.2** (re-checked at the 0.9.2 re-pin, 2026-09-05):
+`dist/modes/daemon/daemon-worker-client.js` still closes with a bare
+`new Error("Daemon worker socket closed")` and nothing types it, and
+`conformance/runtime/d2-no-duplicate-effect.test.ts` still passes — one
+response, not a success, and no re-issue. The text below is what was
 proposed. Command Governor no longer carries a guard for this defect: the
 2026-09-04 proof showed that no stock Prime client re-issues a mutation
 after worker loss, so the defect misreports but never duplicates on the

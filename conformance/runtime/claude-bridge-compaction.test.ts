@@ -22,7 +22,7 @@
  * `cacheRetention: "none"` and the bridge routes those to an isolated
  * subprocess, while Prime's `core/compaction/compaction.js` calls pi-ai's
  * `completeSimple` with `{ maxTokens, signal, apiKey, headers }` and nothing
- * else — the string `cacheRetention` does not occur anywhere in Prime 0.9.1's
+ * else — the string `cacheRetention` does not occur anywhere in Prime 0.9.2's
  * core — so every summarisation entered the resumable provider path and threw
  * on a system prompt `before_agent_start` never recorded. The fourth seam in
  * `pins/patches/pi-claude-agent-sdk-0.8.6-prime-compat.patch` routes it.

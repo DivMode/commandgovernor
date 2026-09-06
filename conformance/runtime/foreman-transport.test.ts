@@ -43,7 +43,9 @@ import { readPins, REPO_ROOT } from "../lib/repo.ts";
 const DRIVER = join(REPO_ROOT, "conformance", "lib", "foreman-transport-driver.mjs");
 const HOOKS = join(REPO_ROOT, "conformance", "lib", "foreman-transport-hooks.mjs");
 const PACKAGE_SPEC = "./pins/packages/pi-gpt-0.4.3";
-const PRIME_NODE_MODULES = join(REPO_ROOT, "pins", "prime-0.9.1", "node_modules");
+// The install root comes from the manifest; nothing outside pins.json may
+// hardcode the pinned version.
+const PRIME_NODE_MODULES = join(REPO_ROOT, readPins().substrate.installRoot, "node_modules");
 
 /** A delivery id in the skill's form: base32, so it always contains letters. */
 const DELIVERY_ID = "CG-D-47B3FJU5QW2EG43V";

@@ -18,7 +18,7 @@ Exact versions, hashes, repositories, licenses and owned concerns are in
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
-| Prime Agent (`prime-agent`, `@earendil-works/pi-agent-core`, `pi-ai`, `pi-tui` at Prime's line) | 0.9.1 | MIT (Mario Zechner 2025, Prime Intellect 2026) | <https://github.com/PrimeIntellect-ai/prime-agent> |
+| Prime Agent (`prime-agent`, `@earendil-works/pi-agent-core`, `pi-ai`, `pi-tui` at Prime's line) | 0.9.2 | MIT (Mario Zechner 2025, Prime Intellect 2026) | <https://github.com/PrimeIntellect-ai/prime-agent> |
 | `pi-tasks` | 0.2.5 | MIT | <https://github.com/nczz/pi-tasks> |
 | `@gotgenes/pi-subagents` | 21.4.0 | MIT | <https://github.com/gotgenes/pi-packages> |
 | `pi-pr-review` | 1.17.10 | MIT | <https://github.com/10ego/pi-pr-review> |

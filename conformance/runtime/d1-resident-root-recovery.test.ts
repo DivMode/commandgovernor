@@ -22,8 +22,9 @@
  *      same `activeSessionId`, and the session keeps serving work.
  *
  * What the killed root's `workerState` does in the meantime is RECORDED, not
- * asserted. On 0.9.1 the supervisor never returns it to `ready` on its own
- * (measured: `failed failed absent absent …`), but that is upstream behaviour,
+ * asserted. The supervisor never returns it to `ready` on its own — measured
+ * `failed failed absent absent …` on 0.9.1 and `failed` throughout on 0.9.2,
+ * which is the same fact reported two ways — but that is upstream behaviour,
  * not a product invariant — a future Prime that relaunched the root without
  * replaying the interrupted work would be fine, and is not a regression this
  * suite should turn red for. The invariants above hold either way, and the

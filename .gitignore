@@ -35,6 +35,9 @@ __pycache__/
 # reproduced from the committed lockfile. Neither is source.
 pins/*/vendor/
 pins/*/node_modules/
+# The version-stable entry point: a symlink to the pinned install root that
+# scripts/bootstrap.sh repoints on every run. Derived, never committed.
+pins/current
 # Vendored third-party packages: the committed tarball plus the committed patch
 # under pins/patches/ are the source; scripts/bootstrap.sh extracts and patches
 # them into pins/packages/<name>-<version>/ for Prime to install by path.

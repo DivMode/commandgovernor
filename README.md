@@ -8,7 +8,7 @@ for durable, foreman-led AI/software-engineering work.
 ## What it is
 
 ```text
-Prime Agent v0.9.1 (release assets verified against two checksum authorities)
+Prime Agent v0.9.2 (release assets verified against two checksum authorities)
   + pi-tasks                 durable task/evidence contract
   + @gotgenes/pi-subagents   delegation runtime; Command Governor's roles are its agent files
   + pi-pr-review             GitHub review lane with reviewed-head binding
@@ -90,9 +90,20 @@ scripts/conformance.sh      # prove the distribution on this machine
 
 For a project: copy `harness/settings.project.json` to
 `.prime/agent/settings.json` (Prime installs the pinned packages on startup)
-and `harness/agents/*.md` to `.pi/agents/`. Run `pins/prime-0.9.1/node_modules/.bin/prime-agent`
-from the project, or install the same release yourself and keep the
-`pins.json` version.
+and `harness/agents/*.md` to `.pi/agents/`. Run
+`pins/current/node_modules/.bin/prime-agent` from the project, or install the
+same release yourself and keep the `pins.json` version.
+
+**`pins/current` is the path to run, and the path anything outside this
+repository should reference.** It is a symlink `scripts/bootstrap.sh` repoints
+at the pinned install root (`pins/prime-0.9.2` today) on every run, so a
+re-pin never asks a wrapper, a shell alias or a launcher to be edited.
+Versioned install roots stay addressable —
+`pins/prime-0.9.2/node_modules/.bin/prime-agent` is the same binary — but a
+caller that names one is pinned to that release and will keep running it after
+the pin moves. The symlink is derived state: bootstrap writes it, git ignores
+it, and `pins.json`'s `substrate.installRoot` remains the authority for which
+release is pinned (`substrate.stableBinary` records the stable path).
 
 The skill `cg-conformance` explains bootstrap, the suite, and how to read a
 failure; the prompt `cg-review` is the independent-review procedure.

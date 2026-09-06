@@ -7,7 +7,10 @@
  * own checksum file as committed (`pins/SHA256SUMS`), the install-root
  * lockfile npm actually enforces, and the bytes on disk after bootstrap —
  * including what the installed binary says its own version is. A manifest that
- * agrees only with itself would prove nothing.
+ * agrees only with itself would prove nothing. The version-stable entry point
+ * (`pins/current`) is resolved here too, because it is the path used from
+ * outside this repository and a stale one leaves every version string in the
+ * repository reading correct while the previous release keeps running.
  *
  * The daemon protocol recorded here is checked against a LIVE supervisor in
  * `conformance/runtime/d8-explicit-session-path.test.ts`; there is nothing in
@@ -16,7 +19,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
@@ -52,6 +55,33 @@ describe("PIN: component manifest", () => {
 		assert.ok(substrate.vendorDir.startsWith(`${substrate.installRoot}/`), substrate.vendorDir);
 		assert.ok(substrate.binary.startsWith(`${substrate.installRoot}/`), substrate.binary);
 		assert.ok(substrate.installRoot.includes(substrate.version), `${substrate.installRoot} must be version-scoped so two pins cannot share a tree`);
+	});
+
+	/**
+	 * The version-stable entry point is what anything outside this repository
+	 * runs — the nix-config wrapper, a shell alias, a launcher — so a re-pin is
+	 * an edit here and nowhere else. That only holds while the symlink actually
+	 * follows the pin, and a stale one fails in the worst possible way: the
+	 * previous release keeps running and every version string in the repository
+	 * still reads correct. Resolve it and ask the binary at the end of it.
+	 */
+	it("resolves the version-stable entry point to the pinned install root", () => {
+		assert.ok(substrate.currentLink.startsWith("pins/"), substrate.currentLink);
+		assert.notEqual(substrate.currentLink, substrate.installRoot, "the stable name must not be the versioned install root itself");
+		assert.ok(!substrate.currentLink.includes(substrate.version), `${substrate.currentLink} must not carry a version, or it is not stable`);
+		assert.equal(substrate.stableBinary, `${substrate.currentLink}/node_modules/.bin/prime-agent`);
+
+		const link = join(REPO_ROOT, substrate.currentLink);
+		assert.ok(exists(link), `${substrate.currentLink} is missing; run scripts/bootstrap.sh`);
+		assert.ok(lstatSync(link).isSymbolicLink(), `${substrate.currentLink} must be a symlink, so bootstrap can repoint it`);
+		assert.equal(realpathSync(link), realpathSync(installRoot), `${substrate.currentLink} points somewhere other than ${substrate.installRoot}`);
+
+		// The link can resolve correctly to a tree with no install in it.
+		const stable = join(REPO_ROOT, substrate.stableBinary);
+		assert.ok(exists(stable), `${substrate.stableBinary} does not exist; run scripts/bootstrap.sh`);
+		const reported = spawnSync(stable, ["--version"], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(reported.status, 0, reported.stderr);
+		assert.equal(reported.stderr.trim(), substrate.version, `${substrate.stableBinary} reports a different version than pins.json records`);
 	});
 
 	it("records every asset with sha256 AND sha512, and the sha256 matches the release checksum file", () => {

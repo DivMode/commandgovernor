@@ -3,6 +3,12 @@
 **Target:** https://github.com/PrimeIntellect-ai/prime-agent/issues/new
 **Version:** `prime-agent@0.9.1` (npm), macOS 15 (Darwin 24.6.0), Node 24.19.0
 
+**Still present on 0.9.2** (re-checked at the 0.9.2 re-pin, 2026-09-05):
+`dist/modes/rpc/rpc-mode.js` has no `resume_queue` case — the command table is
+unchanged — and `_sessionInputPumpSuspended = true` is still assigned in the
+same two places in `dist/core/agent-session.js`. Nothing in the 0.9.2 release
+notes touches the rpc input pump.
+
 ---
 
 ## Summary

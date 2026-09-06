@@ -15,11 +15,12 @@ from it and compares them with what the installed daemon reports.
 
 | Field | Value |
 | --- | --- |
-| substrate | Prime Agent `v0.9.1`, commit `81ae3cb34d27d38ee37f9e205a1e73694993b344` |
+| substrate | Prime Agent `v0.9.2`, commit `9c54a35dac3a2ad17910074d66664859ea175666` |
 | license | MIT (Mario Zechner 2025, Prime Intellect 2026) |
-| daemon protocol | `prime-agent.daemon` v7, schema revision 25 |
-| assets | wrapper `prime-agent-0.9.1.tgz` plus siblings `prime-agent-core`, `prime-agent-ai`, `prime-agent-tui`, each with sha256 and sha512 |
-| install root | `pins/prime-0.9.1/` (committed `package.json`, `package-lock.json`, `.npmrc`; `vendor/` and `node_modules/` are derived and ignored) |
+| daemon protocol | `prime-agent.daemon` v7, schema revision 26 |
+| assets | wrapper `prime-agent-0.9.2.tgz` plus siblings `prime-agent-core`, `prime-agent-ai`, `prime-agent-tui`, each with sha256 and sha512 |
+| install root | `pins/prime-0.9.2/` (committed `package.json`, `package-lock.json`, `.npmrc`; `vendor/` and `node_modules/` are derived and ignored) |
+| stable entry point | `pins/current/node_modules/.bin/prime-agent` — `pins/current` is a symlink bootstrap repoints at the install root; derived and git-ignored |
 | fallback | upstream Pi v0.85.0, recorded, never co-installed |
 
 Prime is not on the npm registry. Its wrapper package names its three
@@ -82,9 +83,11 @@ in", measured). Then:
 prime-agent --provider claude-bridge --model claude-sonnet-5
 ```
 
-The vendored package carries a Prime compatibility patch (its
-`@earendil-works/pi-ai/compat` import, `CONFIG_DIR_NAME`, and Prime's
-`getApiKeyAndHeaders` in place of Pi's `getProviderAuth`) and one enforced
+The vendored package carries a Prime compatibility patch across four seams (its
+`@earendil-works/pi-ai/compat` import, `CONFIG_DIR_NAME`, Prime's
+`getApiKeyAndHeaders` in place of Pi's `getProviderAuth`, and routing the
+nested completions Prime never marks `cacheRetention: "none"` — compaction
+above all — by prompt capture instead) and one enforced
 behaviour change: the child is started with every inherited Anthropic
 variable stripped, and any Anthropic credential the harness resolves (API
 key, OAuth, bearer) is **refused** before a child is spawned. There is no
@@ -105,7 +108,7 @@ In order:
 1. `node` satisfies the floor in the manifest.
 2. The release's `SHA256SUMS` is fetched from the immutable GitHub release
    and must be byte-identical to the committed `pins/SHA256SUMS`.
-3. Each asset is downloaded into `pins/prime-0.9.1/vendor/` (or reused if
+3. Each asset is downloaded into `pins/prime-0.9.2/vendor/` (or reused if
    already present and correct) and verified against both the manifest and
    `SHA256SUMS`; the two must agree with each other first.
 4. `npm ci --ignore-scripts` in the install root (lockfile integrity for the
@@ -113,6 +116,12 @@ In order:
    (TypeScript and the Node type definitions only).
 5. The installed sibling versions and `prime-agent --version` (printed on
    stderr) must equal the pinned version; the co-install checks above run.
+6. `pins/current` is repointed at the install root and the binary reached
+   through it must report the pinned version too. This is the path anything
+   outside the repository should run — the nix-config wrapper, a shell alias,
+   a launcher — so that a re-pin is a change in this repository alone.
+   Bootstrap refuses to replace a `pins/current` that is not a symlink, so a
+   real directory left there is a failure rather than a silent deletion.
 
 Install scripts are ignored throughout. Prime's own `postinstall` is a
 no-op unless opt-in `PRIME_AGENT_BOOTSTRAP_*` variables are set, and the
@@ -162,9 +171,11 @@ A new Prime release is a new substrate until proven otherwise.
    `.npmrc` and a lockfile regenerated with
    `npm install --ignore-scripts --package-lock-only` against the vendored
    wrapper tarball; remove the previous install root; update
-   `pins/pins.json` (version, tag, commit, assets, protocol version and
-   schema revision as reported by `daemon_hello`) and replace
-   `pins/SHA256SUMS`.
+   `pins/pins.json` (version, tag, commit, assets, `installRoot`,
+   `vendorDir`, `binary`, and the protocol version and schema revision as
+   reported by `daemon_hello`) and replace `pins/SHA256SUMS`. `pins/current`
+   needs no edit: the next `scripts/bootstrap.sh` repoints it, which is the
+   whole reason external callers name it instead of the install root.
 4. Re-read the defect records under `docs/upstream/`. They are this
    repository's own records of substrate and package behaviour it works
    around, kept here whether or not anyone files them elsewhere; a release
