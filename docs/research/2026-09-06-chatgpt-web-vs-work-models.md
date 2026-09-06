@@ -264,6 +264,91 @@ not what gates the decision; the surface's capabilities are.
 
 ---
 
+## 8. Invoking the consultant from Prime (verified against Prime 0.9.2 + pinned packages)
+
+The web models are reachable **only** through `pi-gpt`'s `gpt_chat` tool — they
+are not a `/model` provider. `pi-gpt` registers no model provider (no
+`registerProvider`/`registerModel` in `extensions/*.ts`; `pins/pins.json`
+records it as registering *tools*, and the only provider in the product is
+`claude-bridge`, `harness/settings.project.json` `enabledModels:
+["claude-bridge/*"]`). So "how do we invoke the consultant" is a real design
+question with four mechanisms, and they differ sharply in determinism and token
+cost. Prime is pinned at **0.9.2** (`pins/current -> prime-0.9.2`,
+`pins.json` `prime-agent.version 0.9.2`).
+
+**1. A slash command runs code directly — no model turn.** `registerCommand(name,
+{ handler })` takes `handler: (args, ctx) => Promise<void>`
+(`pins/prime-0.9.2/node_modules/prime-agent/dist/core/extensions/types.d.ts:775-825`).
+The handler is plain code executed when the user types `/name`; the documented
+example just calls `ctx.ui.notify(...)` with no model involved
+(`docs/extensions.md:93`), and `pi-gpt`'s own `/gpt-observer` command is a code
+handler (`extensions/observer.ts:268`). It consumes a harness-model turn **only
+if it explicitly starts one** (`sendUserMessage`/`sendMessage` with
+`triggerTurn`, available on `ReplacedSessionContext`); a handler that calls the
+`pi-gpt` HTTP client and prints the reply spends **zero** harness-model tokens.
+A `/gpt review` handler can even compute the `git diff` itself in code and hand
+it to `gpt_chat` deterministically. **Verified.**
+
+**2. A skill or prompt only injects text; the model then acts — always a model
+turn.** Skills and prompt templates are prose addressed to the model, not code.
+`pi-gpt`'s `chatgpt` skill ("lets you (the agent) interact with a ChatGPT
+account"), the `cg-foreman` skill ("the rules below are the product"), and
+`harness/prompts/cg-review.md` are all instructions the model reads and decides
+to act on. There is no mechanism by which a skill or prompt deterministically
+executes a tool; invoking `gpt_chat` from a skill/prompt means the **model**
+issues the tool call, which costs a model turn. **Verified.**
+
+**3. A subagent's model can be pinned, but it runs ON a provider model —
+never on a web-chat model.** `@gotgenes/pi-subagents@21.4.0` (pinned) defines
+agent types in `.pi/agents/<name>.md` with YAML frontmatter that includes a
+`model` field (`provider/modelId` or a fuzzy name) and a `thinking` level
+(package README §"Agent file format", line 122), and it "automatically
+filter[s] to only available/configured models" (README §Features) — an
+unresolvable `model` string is rejected (README:307). So a reviewer subagent
+*can* be pinned to a work model and call `gpt_chat` as a tool. But it **cannot
+run on `gpt-6-astra-wm`**: that model is not in the session's model registry
+(no provider registers it), and on this product `enabledModels` is
+`claude-bridge/*` only. Command Governor's own roles deliberately inherit the
+parent's model (`harness/agents/implementer.md`: "provider choice is the
+user's, not the role file's"). A subagent that consults the web model therefore
+spends **work-model (Claude/Fable) tokens** on its own reasoning turns, plus the
+`gpt_chat` tool call. **Verified.**
+
+**4. `pi-pr-review@1.17.10` uses the session's work models, not any GPT-web
+model.** It is "parallel, model-agnostic AI code review" that runs reviewer
+passes as subagents on **configured provider models**
+(`/pr-review-config light=provider/model heavy=provider/model:high`; package
+README §"Configure models"), and "if the extension is unavailable, the prompt
+falls back to the current Pi session model" (README). Its shipped source
+(`x-prreview/package/{lib,extensions}`) has **zero** references to
+`gpt`/`chatgpt`/`codex`/`openai`/`pi-gpt`. So on this product its reviewers run
+on `claude-bridge` (Fable/Claude), never on the ChatGPT web surface.
+**Verified** against the npm tarball fetched 2026-09-06.
+
+### Ranked by determinism and token cost
+
+| Rank | Mechanism | Deterministic? | Work-model tokens | Notes |
+| --- | --- | --- | --- | --- |
+| **(a)** | **`/gpt` slash command** whose handler calls `pi-gpt` directly | **Yes** — code runs on the keystroke | **Zero** | The only path that spends no harness tokens. For `/gpt review` the handler builds the diff in code. Caveat: calling the client directly bypasses `pi-gpt`'s in-tool foreman guards, so route through the guarded tool path or replicate the guards (adapter eval §4). |
+| (b) | Harness model calls `gpt_chat` when asked in natural language | **No** — the model decides whether/how to call | Costs the harness/work model a turn to orchestrate | The default if nothing is built; fine as a fallback, wrong as the primary. |
+| (c) | A reviewer subagent/role that calls `gpt_chat` | Automatic within a flow, not deterministic | Costs a work model (Claude/Fable) the subagent runs on | Right for the *automatic in-loop* review, not for a user's one-shot consult. |
+
+### Recommendation
+
+Ship **(a) `/gpt` with subcommands as the primary** invocation — it is the only
+deterministic, zero-work-model-token path, and it matches the user's chosen
+shape: `/gpt research` → web Pro (`gpt-6-pro`/`deep_research_heavy`); `/gpt
+review` → `gpt-6-astra-wm` on the `git diff` the handler computes; `/gpt chat`
+→ model/effort selectable. Build it as a **new file inside the vendored
+`pi-gpt`** (so it can import `ConversationClient`/the guarded path by relative
+specifier and inherit the foreman guards — a separate `harness/` extension has
+no resolvable specifier into `pi-gpt/src`; adapter eval §4). A **skill should
+complement, not replace it**: the `chatgpt`/`cg-foreman` skills document the
+tool for the *automatic* in-agent path (option b/c), where the work model is
+already running and consulting the web model is part of its turn. Do **not**
+promote a skill or subagent to the primary user-facing consult path — both cost
+work-model tokens that the slash command avoids entirely.
+
 ## Sources
 
 - Account probe, read-only, 2026-09-06: `GET /backend-api/models`,
@@ -291,3 +376,17 @@ not what gates the decision; the surface's capabilities are.
   https://www.linkedin.com/posts/nicoleleffer_the-number-of-deep-research-credits-you-get-activity-7322750322785857536-uWhD
 - ChatGPT web vs app share the same models/tools:
   https://www.cometapi.com/is-the-web-chatgpt-any-different-from-the-app/
+- Prime 0.9.2 extension API:
+  `pins/prime-0.9.2/node_modules/prime-agent/dist/core/extensions/types.d.ts`
+  (`registerCommand`/`RegisteredCommand`, `ExtensionCommandContext`) and
+  `pins/prime-0.9.2/node_modules/prime-agent/docs/extensions.md`.
+- `@gotgenes/pi-subagents@21.4.0` README (npm tarball, fetched 2026-09-06) —
+  agent-file `model`/`thinking` frontmatter; model filtering to configured
+  providers.
+- `pi-pr-review@1.17.10` README + `lib/`,`extensions/` (npm tarball, fetched
+  2026-09-06) — model-agnostic reviewer passes over configured provider models;
+  no ChatGPT-web reference.
+- `harness/settings.project.json` (`enabledModels: ["claude-bridge/*"]`),
+  `harness/agents/*.md`, `harness/skills/*/SKILL.md`,
+  `pins/packages/pi-gpt-0.4.3/{skills/chatgpt/SKILL.md,extensions/observer.ts}`,
+  `pins/pins.json`.

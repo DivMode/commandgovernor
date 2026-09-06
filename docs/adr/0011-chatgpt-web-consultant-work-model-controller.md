@@ -91,6 +91,42 @@ That topology is impossible on this transport (no files, no shell, no local
 tools), not merely disfavoured. Any proposal that assumes it is rejected at the
 architecture stage.
 
+### 4a. The consultant is invoked by a slash command, not a skill or subagent
+
+The web models are reachable only through `pi-gpt`'s `gpt_chat` tool, not as a
+`/model` provider (`pi-gpt` registers no provider; `enabledModels` is
+`claude-bridge/*`). Of the four ways Prime 0.9.2 can drive that tool, only a
+**slash command handler runs code deterministically and spends zero
+work-model tokens** — verified against the pinned substrate and packages
+(`../research/2026-09-06-chatgpt-web-vs-work-models.md` §8):
+
+- **slash command** (`registerCommand`, `types.d.ts:775-825`) — code on the
+  keystroke, zero model turn unless it explicitly starts one;
+- **skill / prompt** — prose the model reads and acts on; always a model turn,
+  cannot call a tool deterministically;
+- **subagent** (`@gotgenes/pi-subagents`) — model is pinnable in agent-file
+  frontmatter but must be a *configured provider* model (so Claude/Fable here,
+  never a web-chat model); costs work-model tokens;
+- **the harness model deciding to call `gpt_chat`** — non-deterministic, costs
+  the work model a turn.
+
+Therefore Command Governor ships **`/gpt` with subcommands as the primary
+consult path** (the user's chosen shape): `/gpt research` → web Pro
+(`gpt-6-pro` / `deep_research_heavy`); `/gpt review` → `gpt-6-astra-wm` on the
+`git diff` the handler computes in code; `/gpt chat` → model/effort selectable.
+It is built as a **new file inside the vendored `pi-gpt`**, so it can reach the
+guarded tool path by relative import and inherit `pi-gpt`'s foreman guards
+rather than bypass them (adapter evaluation §4). A **skill complements but does
+not replace it**: the `chatgpt` / `cg-foreman` skills document the tool for the
+*automatic in-agent* path, where the work model is already running and the
+consultation is part of its turn. A skill or subagent is never promoted to the
+primary user consult path, because both spend work-model tokens the slash
+command avoids.
+
+`pi-pr-review` (pinned) is unaffected: it runs its reviewers on configured
+provider models (Claude/Fable here) and calls no ChatGPT-web model — verified
+from its source.
+
 ### 5. This is how the review invariant is met on capability grounds
 
 ADR 0008 §4.8 and ADR 0009 §16 require that an implementer cannot satisfy its
