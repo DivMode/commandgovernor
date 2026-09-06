@@ -62,6 +62,20 @@ the real Claude Code binary on its own Max-plan login and refuses any
 Anthropic credential the harness holds (BRIDGE-001…004); GPT runs through
 Prime's Codex login, which OpenAI endorses for third-party harnesses.
 
+Two measured facts about that bridge
+([the measurement](docs/research/2026-09-05-claude-bridge-cache-measurement.md)).
+**A Claude worker is allowed to finish, or is killed — it is not interrupted.**
+Aborting a worker mid-turn rebuilds and rotates its Claude Code session: the
+prompt cache goes to 0%, the whole prior conversation is re-imported, and the
+session id changes. That is inherent to how the bridge keeps Prime's history
+and Claude Code's session in step, and clean turns are unaffected (97% cache
+hit, against 99–100% for native `claude --resume`). **Prime's `/compact` works
+through the bridge**, which it did not before: Prime never marks its
+summarisation as a no-cache request, so the bridge used to route it into the
+resumable path and fail. The fourth seam in the vendored patch fixes it, and
+`conformance/runtime/claude-bridge-compaction.test.ts` (BRIDGE-005) holds it
+there.
+
 The ChatGPT Web foreman transport is the pinned `pi-gpt` package, driving
 ChatGPT's undocumented backend with the user's Codex login. It was adopted
 on the user's explicit acceptance of the account risk (ADR 0008 §8
