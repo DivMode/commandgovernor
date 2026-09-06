@@ -6,6 +6,13 @@
 - **Refines:** ADR 0008 §6–§8 (ChatGPT Web foreman transport), ADR 0009 §16–§17
   (independent review, ChatGPT foreman gate)
 - **Research:** [`../research/2026-09-06-chatgpt-web-vs-work-models.md`](../research/2026-09-06-chatgpt-web-vs-work-models.md)
+- **Companion:** ADR 0012 (`/gpt` command and the served-model no-fallback
+  rule) records the mechanism; this ADR records the boundary.
+- **Corrected 2026-09-06 (same day, before acceptance):** the first draft named
+  `gpt-6-astra-wm` as the review model. Live probing that followed showed the
+  chat lane silently serves `gpt-5-mini` for that slug and for `gpt-6-pro`
+  (research doc §3a). §3, §4a and §6 below are rewritten accordingly; the
+  architecture (§1, §2, §4, §5) is unchanged.
 
 ## Context
 
@@ -33,6 +40,17 @@ by the chat backend), so the difference is the **surface**, not the weights. The
 chat surface additionally exposes the Pro / deep-research tier (`gpt-6-pro`,
 `deep_research_heavy`) that the work surface does not offer as a controller
 model.
+
+**Listed is not served.** A slug in `GET /backend-api/models` says only that
+the request is accepted. On this credential the chat lane routes `gpt-6-astra-wm`
+(at every effort) and `gpt-6-pro` to `gpt-5-mini` while echoing the requested
+slug in `default_model_slug`; the truthful field is `resolved_model_slug`, then
+`model_slug` (research doc §3a). Only the metered `deep_research_heavy` lane has
+been observed to serve a real Pro model. Yet the user's ChatGPT app shows Astra
+Pro and a private GitHub connector on the same account, and the token probe
+reports every `context_connector_*` capability as `false`. The app's request
+therefore carries context this transport does not yet send; capturing and
+replicating it is the open investigation recorded in §7.
 
 Two facts about the chat surface's models bound how it should be used
 (measured 2026-09-06; version-sensitive, so dated):
@@ -71,18 +89,22 @@ tools) to get an answer, never to perform repository work. A chat-surface model
 is handed context explicitly (inlined files, a diff, a question); it returns
 text; the controller decides what to do with it.
 
-### 3. Two consultant jobs map to two models
+### 3. Two consultant jobs map to two lanes; the slugs are pins, not decisions
 
-- **Deep research → the web Pro / deep-research tier** (`gpt-6-pro` /
-  `deep_research_heavy`). Reserve it for genuine web research with citations,
-  because it is the only surface offering it at plan pricing and its budget is
-  the finite 250/month. Do not spend it on routine questions; when it is
+- **Deep research → the `deep_research_heavy` lane.** It is the only lane
+  observed to serve a real Pro model, it is the only plan-priced access to that
+  tier, and its budget is the finite 250/month. Reserve it for genuine web
+  research with citations; do not spend it on routine questions; when it is
   exhausted, do not retry before the reported reset.
-- **Independent review of finished work → the non-Pro web reasoning model**
-  (`gpt-6-astra-wm` at max effort — `pi-gpt`'s `extra_high` default). It is
-  effectively unmetered, and being a different model that cannot see the working
-  tree, it delivers a genuinely independent read of a diff the controller hands
-  it.
+- **Independent review of finished work → a non-Pro chat-lane model that is
+  truthfully served.** Being a different model that cannot see the working tree,
+  it delivers a genuinely independent read of a diff the controller hands it.
+  Which slug fills this role is a **pin** governed by ADR 0012 and re-grounded
+  by probe, never assumed from the model list: `gpt-6-astra-wm` is disqualified
+  (serves mini), and every reply's served model is asserted with no fallback.
+  As of 2026-09-06 the only non-Pro thinker verified to serve itself is
+  `gpt-5-6-thinking@max`; the user has not accepted it as the headline reviewer,
+  so the review pin stays **open** until the §7 investigation lands.
 
 ### 4. Never invert controller and consultant
 
@@ -111,9 +133,10 @@ work-model tokens** — verified against the pinned substrate and packages
   the work model a turn.
 
 Therefore Command Governor ships **`/gpt` with subcommands as the primary
-consult path** (the user's chosen shape): `/gpt research` → web Pro
-(`gpt-6-pro` / `deep_research_heavy`); `/gpt review` → `gpt-6-astra-wm` on the
-`git diff` the handler computes in code; `/gpt chat` → model/effort selectable.
+consult path** (the user's chosen shape): `/gpt research` → the
+`deep_research_heavy` lane; `/gpt review` → the pinned review model (§3, ADR
+0012) on the `git diff` the handler computes in code; `/gpt chat` → model/effort
+selectable. Every reply's served model is asserted (ADR 0012 §5).
 It is built as a **new file inside the vendored `pi-gpt`**, so it can reach the
 guarded tool path by relative import and inherit `pi-gpt`'s foreman guards
 rather than bypass them (adapter evaluation §4). A **skill complements but does
@@ -139,13 +162,33 @@ foreman's correlated ChatGPT reply as the acceptance record).
 ### 6. Model slugs and quotas are pins, dated and probe-grounded
 
 The default model policy lives in the vendored `pi-gpt` patch
-(`extra_high → gpt-6-astra-wm@max`, `pro → gpt-6-pro`,
-`instant → gpt-5-6-instant`; `pins/pins.json`). Slugs and quota numbers are
-version-sensitive and must be re-grounded on the account (`gpt_list_models` /
-`gpt_account_status`) rather than assumed. As measured 2026-09-06 the account is
-ChatGPT Pro; `gpt-6-astra-wm` and `gpt-6-pro` exist; a bare `gpt-6` slug does
-not; Deep Research is 250/month. The `pi-gpt@0.4.3` README's "40 per window"
-figure is stale.
+(`pins/pins.json` → `pins/patches/pi-gpt-0.4.3-foreman-guards.patch`,
+`src/models.ts`). Slugs and quota numbers are version-sensitive and must be
+re-grounded on the account (`gpt_list_models` / `gpt_account_status`, and a
+served-model read on a real reply) rather than assumed. As measured 2026-09-06
+the account is ChatGPT Pro; `gpt-6-astra-wm` and `gpt-6-pro` are listed but the
+chat lane serves `gpt-5-mini` for both; a bare `gpt-6` slug does not exist;
+Deep Research is 250/month. The `pi-gpt@0.4.3` README's "40 per window" figure
+is stale. **No tier may map to a `*-wm` slug** (ADR 0012 §5); the PR #30
+mapping `extra_high → gpt-6-astra-wm` that the first draft of this ADR cited
+was the regression ADR 0012 removes.
+
+### 7. Open investigation: real Astra Pro and the private GitHub connector
+
+The user's ChatGPT app reaches Astra Pro and a private-repository GitHub
+connector on this account; the token-driven transport does not (Context, and
+research doc §3a). This ADR does **not** decide the review pin until that gap
+is explained. The method of record is capture, not inference: obtain the app's
+own `POST /backend-api/conversation` request (HAR) while it uses Astra Pro with
+the GitHub connector, diff its model field, `system_hints`, connector metadata
+(`selected_github_repos`, `selected_all_github_repos`,
+`developer_mode_connector_ids`, `selected_mcp_sources`, `selected_sources`) and
+any workspace/gizmo/mode fields against `pi-gpt`'s `buildPayload`, replay the
+minimal unlocking request read-only, and confirm the served model from
+`resolved_model_slug`. Only a request verified that way may become the review
+pin. Rejected on the way here and not to be retried: `search` on the public
+repo as a stand-in for the private connector, and `gpt-5-6-thinking` as the
+headline reviewer by default.
 
 ## Relationship to prior ADRs
 
@@ -174,6 +217,11 @@ figure is stale.
 
 - The consultant surface can change without notice (undocumented backend); slugs
   and quotas must be re-probed, not trusted from memory or a stale README.
+- The backend can serve a lesser model than requested while echoing the
+  requested slug. Without the served-model assertion (ADR 0012) a "frontier"
+  review is silently a mini review; the assertion turns that into a loud error.
+- Until §7 closes, the review lane has no accepted pin. That is deliberate:
+  shipping a pin the user has rejected would be worse than an open one.
 - Deep Research is capped; heavy reliance on it will hit the 250/month wall.
 - Depends on the single Codex OAuth credential for both surfaces; if that login
   breaks, both the controller (Codex path) and the consultant break together.
@@ -199,5 +247,7 @@ Deep Research budget or under-uses the free review capacity.
 ## Acceptance
 
 Move this ADR from **Proposed** to **Accepted** only when the user confirms the
-consultant/controller split and the two-job mapping. Until then it records the
-verified capability boundary and the recommended use, and awaits the user.
+consultant/controller split (§1, §2, §4, §5) and the two-lane mapping (§3).
+Acceptance does **not** require the review pin to be decided: §3 records that
+pin as open and §7 records how it closes. Until the user confirms, this ADR
+records the verified capability boundary and awaits them.

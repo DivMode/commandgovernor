@@ -18,10 +18,18 @@ to `/Volumes/Data/Developer/commandgovernor`; `origin` is
   `~/.codex/auth.json` bearer token — `GET /backend-api/models`,
   `GET /backend-api/me`, `GET /backend-api/accounts/check/v4-2023-04-27`, and
   `POST /backend-api/conversation/init` (the same call `pi-gpt` uses to read the
-  Deep Research quota; it starts no chat turn). **No chat message was sent.**
-  The endpoints and headers are those hard-coded in
+  Deep Research quota; it starts no chat turn). **No chat message was sent**
+  by this probe. The endpoints and headers are those hard-coded in
   `pins/packages/pi-gpt-0.4.3/src/client.ts` and
   `pins/packages/pi-gpt-0.4.3/extensions/chatgpt.ts`.
+- **Served-model probes (later the same day, authoritative for what answers):**
+  real chat turns sent through `pi-gpt`'s own `ConversationClient` on the same
+  token, reading back the leaf assistant message's `resolved_model_slug` /
+  `model_slug` from `GET /backend-api/conversation/{id}`. These are the
+  measurements in §3a and they **supersede** the list-based inferences in §3
+  wherever the two disagree. The companion document
+  `2026-09-06-chatgpt-served-model-and-wm-downgrade.md` (ADR 0012) records the
+  same findings from the code's side.
 - **Vendored code (authoritative for what the chat surface can and cannot do):**
   the committed `pi-gpt@0.4.3` tarball under `pins/packages/`.
 - **Prior Command Governor research:**
@@ -62,7 +70,7 @@ and so cannot be the thing that does the work.
 | Runs shell / executes code locally | **Yes** | **No** |
 | Tool calls | Local harness tools (edit, shell, MCP, subagents) | **Only ChatGPT's own server-side tools** — `enabled_tools` per model is `tools, tools2, search, canvas, image_gen_tool_enabled` (probe); no local-tool channel exists on this path |
 | Model family reachable | OpenAI "work" models (and Fable via the bridge) | Everything the account lists — see §3 |
-| Deep-research / Pro reasoning model | Not the controller's job | **Yes** — `gpt-6-pro` / Deep Research, this is the surface that has them at plan pricing |
+| Deep-research / Pro reasoning model | Not the controller's job | **Yes** — the `deep_research_heavy` lane serves a real Pro model at plan pricing (§3a); chat-lane `gpt-6-pro` is listed but serves mini on this token |
 | Metering | Subscription/plan | Normal models effectively unmetered; Deep Research hard-capped — see §4 |
 | Role in the architecture | **Controller** — makes all tool calls, owns the working tree | **Consultant** — answers a question, cannot act on the repo |
 
@@ -101,25 +109,60 @@ Also present: `gpt-5-5`, `gpt-5-5-instant`, `gpt-5-6`, `gpt-5-5-thinking`,
 
 **Reconciling the user's stated ids against the account:**
 
-- `gpt-6-astra-wm` — **confirmed.** Title "GPT-6 Astra", full reasoning-effort
-  range. This is what `pi-gpt`'s default policy maps `medium/high/extra_high`
-  to (`src/models.ts`); it is the current work-model-grade chat model.
-- `gpt-6-pro` — **confirmed.** `reasoning_type: "pro"`, and notably it is the
-  only tier with `canvas` removed from its tool set — a signal that it is a
-  distinct product, not a drop-in "normal" model.
+- `gpt-6-astra-wm` — **listed, but not served** (§3a). Title "GPT-6 Astra",
+  full reasoning-effort range. PR #30 had mapped `medium/high/extra_high` to it
+  in `src/models.ts`; the served-model probes showed it answers as `gpt-5-mini`
+  at every effort, and ADR 0012 removed that mapping.
+- `gpt-6-pro` — **listed, but not served on the chat lane** (§3a).
+  `reasoning_type: "pro"`, and notably it is the only tier with `canvas` removed
+  from its tool set — a signal that it is a distinct product, not a drop-in
+  "normal" model.
 - `gpt-5-6-instant` — **confirmed.**
 - `gpt-6` (bare) — **not present.** There is no bare `gpt-6` slug; the gpt-6
   family appears only as `gpt-6-astra-wm` and `gpt-6-pro`. The bare-generation
   slugs the account exposes are `gpt-5-6` (title "GPT-5.6 Sol") and `gpt-5-5`.
   The user's "gpt-6" is a near-miss for `gpt-6-astra-wm`.
 
-**On the `-wm` suffix (hypothesis).** Every `-wm` slug (`gpt-5.5-wm`,
-`gpt-5.6-*-wm`, `gpt-6-astra-wm`) is `reasoning_type: "reasoning"` with the full
-min→max effort range, whereas the bare `gpt-5-6` / `gpt-5-5` are
-`reasoning_type: "auto"`. `-wm` therefore appears to mark the explicit
-reasoning/"work-model"-grade variant the backend exposes for programmatic
-selection. This is inference from the probe's shape, **not** a documented
-OpenAI fact.
+**On the `-wm` suffix.** Every `-wm` slug (`gpt-5.5-wm`, `gpt-5.6-*-wm`,
+`gpt-6-astra-wm`) is `reasoning_type: "reasoning"` with the full min→max effort
+range, whereas the bare `gpt-5-6` / `gpt-5-5` are `reasoning_type: "auto"`. The
+first draft of this document read that shape as "the explicit work-model-grade
+variant for programmatic selection". The served-model probes in §3a **refute
+that reading for this credential**: a `-wm` request is accepted and then routed
+to `gpt-5-mini`. What `-wm` means to the backend remains undocumented; what it
+does on this token is measured.
+
+### 3a. What each slug actually serves (served-model probes, 2026-09-06)
+
+A reply carries three model fields, and one of them is only an echo:
+`default_model_slug` repeats the requested slug; `resolved_model_slug` is the
+model the backend routed to; `model_slug` is the model that produced the
+message. The truthful served model is `resolved_model_slug`, then `model_slug`,
+never `default_model_slug`.
+
+| Request (chat lane, this token) | `default_model_slug` | served (`resolved_model_slug` / `model_slug`) |
+| --- | --- | --- |
+| `gpt-6-astra-wm` at min / standard / extended / max | `gpt-6-astra-wm` | **`gpt-5-mini`** |
+| `gpt-6-pro` | `gpt-6-pro` | **`gpt-5-mini`** |
+| `gpt-5-6-thinking` at max, non-trivial prompt | `gpt-5-6-thinking` | `gpt-5-6-thinking` |
+| any model, trivial prompt | (echo) | `gpt-5-mini` (a fast path intercepts) |
+
+Only the metered `deep_research_heavy` lane (`chat_type: deep_research_heavy`,
+`system_hints` research, 5–30 min per request, 250/month) has been observed to
+serve a real Pro model (`gpt-5-5-pro`). The same probe of account capabilities
+reported `plugins: false`, every `context_connector_*` flag `false`, and only
+`browsing: true`.
+
+**The contradiction that is still open.** The user's ChatGPT app, on this same
+account, shows Astra Pro and a private-repository GitHub connector and uses
+them. So the app's `POST /backend-api/conversation` carries something this
+transport does not send (workspace or work-mode context, connector selection,
+a gizmo/mode, or different headers). The list probe cannot see that; only a
+capture of the app's real request can. ADR 0011 §7 records the method.
+
+Consequences for this document: the "review → `gpt-6-astra-wm`" mapping in the
+first draft of §7 and §8 is withdrawn; the review slug is an open pin; and any
+consumer of a chat-lane reply must read and assert the served model (ADR 0012).
 
 ---
 
@@ -212,11 +255,21 @@ false and the product should not lean on it.
    heavy paths; normal reasoning models carry no counter or block.
 6. `gpt-6-pro` is a distinct `reasoning_type: "pro"` product with `canvas`
    removed — not a drop-in normal model.
+7. `default_model_slug` echoes the request; `resolved_model_slug` / `model_slug`
+   report what ran (§3a).
+8. On this token the chat lane serves `gpt-5-mini` for `gpt-6-astra-wm` (every
+   effort) and for `gpt-6-pro`; `gpt-5-6-thinking@max` serves itself on a
+   non-trivial prompt; the `deep_research_heavy` lane serves a real Pro model
+   (§3a).
+9. The token's capability probe reports `plugins: false` and every
+   `context_connector_*` flag `false`, while the user's app on the same account
+   shows Astra Pro and a private GitHub connector (§3a).
 
 **Hypothesis / unverified:**
 
-- The `-wm` suffix means the explicit reasoning/"work-model" variant (inferred
-  from the probe's shape).
+- Which request fields the ChatGPT app sends that unlock real Astra Pro and the
+  GitHub connector (workspace/work-mode context, connector selection metadata,
+  gizmo/mode, headers). Resolvable only by capturing the app's request.
 - Any 2026 API availability date for Pro/deep-research models (reported on the
   open web; past my cutoff).
 - A recent abuse-driven tightening of the Pro Deep Research cap, and the "$150
@@ -231,6 +284,11 @@ false and the product should not lean on it.
   subscription-only policy.
 - User id "gpt-6" — the account exposes `gpt-6-astra-wm` / `gpt-6-pro`, not a
   bare `gpt-6`.
+- "`-wm` marks the work-model-grade variant for programmatic selection" (this
+  document's first draft) — on this token a `-wm` request is served by
+  `gpt-5-mini` (§3a).
+- "Review → `gpt-6-astra-wm` at max effort" (first draft of §7/§8) — withdrawn
+  for the same reason; the review slug is an open pin (ADR 0011 §3, §7).
 
 ---
 
@@ -244,16 +302,19 @@ The product's dependence is sound once stated as a surface distinction:
   work happens.
 - **The chat surface is a consultant the controller calls.** Two jobs map to
   two models:
-  - **Deep research → the web Pro / deep-research tier** (`gpt-6-pro` /
-    `deep_research_heavy`). It has web browsing and citations, it is only
-    reachable at plan pricing through this surface, and its budget is the finite
-    250/month — so reserve it for genuine research, not routine questions.
-  - **Independent review of finished work → the non-Pro web reasoning model**
-    (`gpt-6-astra-wm` at max effort, `pi-gpt`'s `extra_high` default). It is
-    effectively unmetered, and because it is a different model that cannot see
-    the working tree, it gives a genuinely independent read of a diff the
-    controller hands it — which satisfies the ADR 0008 §4.8 / ADR 0009 §16
-    "implementer cannot self-approve" invariant on capability grounds.
+  - **Deep research → the `deep_research_heavy` lane.** It has web browsing
+    and citations, it is the only lane observed to serve a real Pro model, it
+    is only reachable at plan pricing through this surface, and its budget is
+    the finite 250/month — so reserve it for genuine research, not routine
+    questions.
+  - **Independent review of finished work → a non-Pro chat-lane model that is
+    truthfully served** (the slug is an open pin — §3a, ADR 0011 §3/§7; the
+    first draft's `gpt-6-astra-wm` is withdrawn because it serves mini).
+    Because it is a different model that cannot see the working tree, it gives
+    a genuinely independent read of a diff the controller hands it — which
+    satisfies the ADR 0008 §4.8 / ADR 0009 §16 "implementer cannot
+    self-approve" invariant on capability grounds. Every reply's served model
+    is asserted with no fallback (ADR 0012).
 - **Never the reverse.** A chat-surface model cannot be the controller: no
   files, no shell, no local tools. Any design that has ChatGPT "drive" and the
   work model "assist" is impossible on this transport, not merely undesirable.
@@ -337,9 +398,10 @@ on `claude-bridge` (Fable/Claude), never on the ChatGPT web surface.
 
 Ship **(a) `/gpt` with subcommands as the primary** invocation — it is the only
 deterministic, zero-work-model-token path, and it matches the user's chosen
-shape: `/gpt research` → web Pro (`gpt-6-pro`/`deep_research_heavy`); `/gpt
-review` → `gpt-6-astra-wm` on the `git diff` the handler computes; `/gpt chat`
-→ model/effort selectable. Build it as a **new file inside the vendored
+shape: `/gpt research` → the `deep_research_heavy` lane; `/gpt review` → the
+pinned review model (open pin, §3a) on the `git diff` the handler computes;
+`/gpt chat` → model/effort selectable; every reply's served model asserted
+(ADR 0012). Build it as a **new file inside the vendored
 `pi-gpt`** (so it can import `ConversationClient`/the guarded path by relative
 specifier and inherit the foreman guards — a separate `harness/` extension has
 no resolvable specifier into `pi-gpt/src`; adapter eval §4). A **skill should
