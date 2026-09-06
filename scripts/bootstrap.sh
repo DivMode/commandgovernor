@@ -9,6 +9,8 @@
 # three sibling packages are installed by npm from the lockfile, whose sha512
 # integrity values the conformance suite proves equal to the manifest's.
 # The version assertion happens after install, against the binary produced.
+# Last, `pins/current` is repointed at the pinned install root so an external
+# wrapper has one path that survives a re-pin (step 5).
 #
 # Nothing here depends on a `prime-agent` on PATH, and nothing is installed
 # globally (a guard on the supported Mac forbids `npm install -g` anyway).
@@ -61,6 +63,8 @@ install_root_rel=$(pins_field substrate.installRoot) || fail 'cannot read substr
 vendor_rel=$(pins_field substrate.vendorDir) || fail 'cannot read substrate.vendorDir'
 release_base=$(pins_field substrate.releaseBaseUrl) || fail 'cannot read substrate.releaseBaseUrl'
 checksum_asset=$(pins_field substrate.checksumAsset) || fail 'cannot read substrate.checksumAsset'
+current_link_rel=$(pins_field substrate.currentLink) || fail 'cannot read substrate.currentLink'
+stable_binary_rel=$(pins_field substrate.stableBinary) || fail 'cannot read substrate.stableBinary'
 install_root="$repo_root/$install_root_rel"
 vendor="$repo_root/$vendor_rel"
 
@@ -219,10 +223,58 @@ installed_version=$("$prime_bin" --version </dev/null 2>&1 | tr -d '\r' | tail -
 [ "$installed_version" = "$version" ] ||
 	fail "pinned prime-agent reports $installed_version, pins.json requires $version"
 
+# --- step 5: the version-stable entry point --------------------------------
+#
+# `pins/current` is a symlink to the pinned install root, repointed here on
+# every bootstrap. It exists so that something outside this repository -- the
+# nix-config wrapper that puts `prime-agent` on PATH -- can name one path that
+# survives a re-pin, instead of hardcoding `pins/prime-<version>` and silently
+# running the previous release after the pin moves.
+#
+# It is derived state, not source: git ignores it, and only this script writes
+# it. The link target is relative (`prime-0.9.x`, resolved inside pins/), so
+# the checkout can be moved or cloned without breaking it. Nothing in the
+# repository resolves the pin through it -- pins.json's installRoot stays the
+# authority, and this is checked to point at exactly that.
+
+install_root_name=${install_root_rel#pins/}
+case "$install_root_rel" in
+pins/*) ;;
+*) fail "substrate.installRoot must live under pins/, got $install_root_rel" ;;
+esac
+case "$install_root_name" in
+*/*) fail "substrate.installRoot must be a single directory under pins/, got $install_root_rel" ;;
+esac
+case "$current_link_rel" in
+pins/*/*) fail "substrate.currentLink must be a single entry under pins/, got $current_link_rel" ;;
+pins/*) ;;
+*) fail "substrate.currentLink must live under pins/, got $current_link_rel" ;;
+esac
+[ "$current_link_rel" != "$install_root_rel" ] ||
+	fail 'substrate.currentLink must differ from substrate.installRoot'
+[ "$stable_binary_rel" = "$current_link_rel/node_modules/.bin/prime-agent" ] ||
+	fail "substrate.stableBinary must be $current_link_rel/node_modules/.bin/prime-agent, got $stable_binary_rel"
+
+current_link="$repo_root/$current_link_rel"
+[ ! -e "$current_link" ] || [ -L "$current_link" ] ||
+	fail "$current_link_rel exists and is not a symlink; refusing to replace it"
+rm -f "$current_link"
+ln -s "$install_root_name" "$current_link" || fail "cannot create the $current_link_rel symlink"
+
+stable_binary="$repo_root/$stable_binary_rel"
+[ -x "$stable_binary" ] ||
+	fail "$stable_binary_rel is not executable after pointing $current_link_rel at $install_root_name"
+stable_version=$("$stable_binary" --version </dev/null 2>&1 | tr -d '\r' | tail -n 1) ||
+	fail "$stable_binary_rel --version failed"
+[ "$stable_version" = "$version" ] ||
+	fail "$stable_binary_rel reports $stable_version, pins.json requires $version"
+printf 'bootstrap: %s -> %s (version-stable entry point)\n' "$current_link_rel" "$install_root_name"
+
 cat <<EOT
 
 bootstrap: ok
   pinned prime-agent  $version
   binary              $install_root_rel/node_modules/.bin/prime-agent
+  stable path         $stable_binary_rel
   conformance         scripts/conformance.sh
 EOT

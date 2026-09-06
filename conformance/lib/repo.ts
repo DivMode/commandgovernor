@@ -93,12 +93,19 @@ export interface SubstratePin {
 	readonly commit: string;
 	readonly license: string;
 	readonly releaseBaseUrl: string;
-	/** Repo-relative install root, e.g. `pins/prime-0.9.1`. */
+	/** Repo-relative install root, e.g. `pins/prime-0.9.2`. */
 	readonly installRoot: string;
 	/** Repo-relative vendor directory holding the verified tarballs. */
 	readonly vendorDir: string;
 	/** Repo-relative path to the installed `prime-agent` binary. */
 	readonly binary: string;
+	/**
+	 * Repo-relative symlink that bootstrap points at `installRoot`, e.g.
+	 * `pins/current`. The version-stable name external wrappers reference.
+	 */
+	readonly currentLink: string;
+	/** Repo-relative `prime-agent` reached through `currentLink`. */
+	readonly stableBinary: string;
 	readonly daemonProtocol: DaemonProtocolPin;
 	readonly engines: { readonly node: string };
 	readonly assets: readonly PinnedAsset[];
@@ -232,6 +239,8 @@ export function readPins(path: string = PINS_JSON): PinRecord {
 			installRoot: asString(substrateDoc.installRoot, "substrate.installRoot"),
 			vendorDir: asString(substrateDoc.vendorDir, "substrate.vendorDir"),
 			binary: asString(substrateDoc.binary, "substrate.binary"),
+			currentLink: asString(substrateDoc.currentLink, "substrate.currentLink"),
+			stableBinary: asString(substrateDoc.stableBinary, "substrate.stableBinary"),
 			daemonProtocol: {
 				name: asString(protocolDoc.name, "substrate.daemonProtocol.name"),
 				version: asInteger(protocolDoc.version, "substrate.daemonProtocol.version"),

@@ -20,6 +20,7 @@ from it and compares them with what the installed daemon reports.
 | daemon protocol | `prime-agent.daemon` v7, schema revision 26 |
 | assets | wrapper `prime-agent-0.9.2.tgz` plus siblings `prime-agent-core`, `prime-agent-ai`, `prime-agent-tui`, each with sha256 and sha512 |
 | install root | `pins/prime-0.9.2/` (committed `package.json`, `package-lock.json`, `.npmrc`; `vendor/` and `node_modules/` are derived and ignored) |
+| stable entry point | `pins/current/node_modules/.bin/prime-agent` — `pins/current` is a symlink bootstrap repoints at the install root; derived and git-ignored |
 | fallback | upstream Pi v0.85.0, recorded, never co-installed |
 
 Prime is not on the npm registry. Its wrapper package names its three
@@ -113,6 +114,12 @@ In order:
    (TypeScript and the Node type definitions only).
 5. The installed sibling versions and `prime-agent --version` (printed on
    stderr) must equal the pinned version; the co-install checks above run.
+6. `pins/current` is repointed at the install root and the binary reached
+   through it must report the pinned version too. This is the path anything
+   outside the repository should run — the nix-config wrapper, a shell alias,
+   a launcher — so that a re-pin is a change in this repository alone.
+   Bootstrap refuses to replace a `pins/current` that is not a symlink, so a
+   real directory left there is a failure rather than a silent deletion.
 
 Install scripts are ignored throughout. Prime's own `postinstall` is a
 no-op unless opt-in `PRIME_AGENT_BOOTSTRAP_*` variables are set, and the
@@ -162,9 +169,11 @@ A new Prime release is a new substrate until proven otherwise.
    `.npmrc` and a lockfile regenerated with
    `npm install --ignore-scripts --package-lock-only` against the vendored
    wrapper tarball; remove the previous install root; update
-   `pins/pins.json` (version, tag, commit, assets, protocol version and
-   schema revision as reported by `daemon_hello`) and replace
-   `pins/SHA256SUMS`.
+   `pins/pins.json` (version, tag, commit, assets, `installRoot`,
+   `vendorDir`, `binary`, and the protocol version and schema revision as
+   reported by `daemon_hello`) and replace `pins/SHA256SUMS`. `pins/current`
+   needs no edit: the next `scripts/bootstrap.sh` repoints it, which is the
+   whole reason external callers name it instead of the install root.
 4. Re-read the defect records under `docs/upstream/`. They are this
    repository's own records of substrate and package behaviour it works
    around, kept here whether or not anyone files them elsewhere; a release
