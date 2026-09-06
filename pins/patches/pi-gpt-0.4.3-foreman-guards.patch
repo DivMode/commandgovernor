@@ -1,6 +1,38 @@
-diff -ru package/extensions/chatgpt.ts patched/extensions/chatgpt.ts
---- a/extensions/chatgpt.ts	1985-10-25 22:15:00
-+++ b/extensions/chatgpt.ts	2026-09-04 22:31:35
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-09-05 19:26:04
++++ b/README.md	2026-09-05 19:26:04
+@@ -43,8 +43,8 @@
+ ### Intelligence levels
+ 
+ For `normal` chats: `instant` → `medium` → `high` → `extra_high` → `pro`.
+-Higher levels use more capable models and deeper thinking. `pro` uses
+-`gpt-5-5-pro`. You can also pin a specific `model` and `thinking_effort`
++The default is `extra_high` (latest model, max thinking). `pro` uses
++`gpt-6-pro`. You can also pin a specific `model` and `thinking_effort`
+ (`min` / `standard` / `extended` / `max`).
+ 
+ ### Files
+diff -ruN a/extensions/chatgpt.ts b/extensions/chatgpt.ts
+--- a/extensions/chatgpt.ts	2026-09-05 19:26:04
++++ b/extensions/chatgpt.ts	2026-09-05 19:26:04
+@@ -22,7 +22,7 @@
+   type ChatType,
+   type Intelligence,
+ } from "../src/registry.ts";
+-import { resolveModel, INTELLIGENCE_LEVELS } from "../src/models.ts";
++import { resolveModel, INTELLIGENCE_LEVELS, DEFAULT_INTELLIGENCE } from "../src/models.ts";
+ import { prepareFiles, readTextFile, renderInlineFiles, uploadFile } from "../src/files.ts";
+ 
+ // ── DRH prompt sanitizer ────────────────────────────────────────────────
+@@ -250,7 +250,7 @@
+     async execute(_id, p, signal, onUpdate, ctx) {
+       const cwd = ctx.cwd;
+       const chatType = (p.chat_type as ChatType) || "normal";
+-      const intelligence = (p.intelligence as Intelligence) || "medium";
++      const intelligence = (p.intelligence as Intelligence) || DEFAULT_INTELLIGENCE;
+       const autoConfirm = p.auto_confirm !== false;
+ 
+       let prompt: string = (p.prompt as string) || "";
 @@ -496,11 +496,11 @@
        // continuation: find leaf message id of the existing conversation
        let parentId: string | undefined;
@@ -31,3 +63,98 @@ diff -ru package/extensions/chatgpt.ts patched/extensions/chatgpt.ts
        return done(result.text, result.conversationId || p.conversation_id || null, {
          model,
          intelligence: isAgent || p.model ? null : intelligence,
+diff -ruN a/skills/chatgpt/SKILL.md b/skills/chatgpt/SKILL.md
+--- a/skills/chatgpt/SKILL.md	2026-09-05 19:26:04
++++ b/skills/chatgpt/SKILL.md	2026-09-05 19:26:04
+@@ -57,7 +57,7 @@
+   prompt_file:      "<path>",        # prepared UTF-8 prompt packet
+   files:            ["<path>", ...], # local files supplied as review/context material
+   chat_type:        normal | agent | deep_research | deep_research_heavy,  # default normal
+-  intelligence:     instant | medium | high | extra_high | pro,            # default medium
++  intelligence:     instant | medium | high | extra_high | pro,            # default extra_high
+   model:            "<slug>",         # overrides the model for normal chats
+   thinking_effort:  min | standard | extended | max,  # explicit normal-chat effort
+   conversation_id:  "<id>",           # continue an existing thread
+@@ -83,8 +83,8 @@
+   `deep_research_heavy` = Pro-tier gpt-5-5-pro (5–30+ min, uses monthly quota);
+   `agent` = autonomous browsing/code (262K context, async).
+ - **intelligence** picks model + reasoning depth for normal chats:
+-  `instant` (no thinking) → `medium` → `high` → `extra_high` (max thinking) →
+-  `pro` (gpt-5-5-pro). Pass **model** + **thinking_effort** to pin both
++  `instant` (gpt-5-6-instant, no thinking) → `medium` → `high` → `extra_high`
++  (gpt-6-astra-wm, max thinking; the default) → `pro` (gpt-6-pro). Pass **model** + **thinking_effort** to pin both
+   explicitly; use an effort listed by `gpt_list_models`. Agent mode uses
+   `agent-mode`; Deep Research uses its own models.
+ - **conversation_id** continues a chat from `gpt_list_chats`. The tool returns
+@@ -112,7 +112,8 @@
+ 
+ ## Tips
+ 
+-- For a quick GPT-5 answer use `gpt_chat` with `chat_type=normal, intelligence=medium`.
++- The default is the latest model at max thinking. For a quick, shallow answer
++  use `gpt_chat` with `chat_type=normal, intelligence=instant`.
+ - For long web research use `deep_research`; reserve `deep_research_heavy` for
+   cases that genuinely need the full multi-section Pro report (quota is limited).
+ - Tool output is PII-redacted (emails, tokens, phone numbers masked).
+diff -ruN a/src/models.ts b/src/models.ts
+--- a/src/models.ts	2026-09-05 19:26:04
++++ b/src/models.ts	2026-09-05 19:26:04
+@@ -7,14 +7,17 @@
+   reasoningType: string;
+ }
+ 
+-// Default family: gpt-5-5 (latest at time of writing). `model` param overrides.
+-// Each level picks the reasoning depth that ChatGPT exposes for that family.
++// Command Governor: default to the latest family the account lists
++// (gpt_list_models, measured 2026-09-05) and to the deepest reasoning level.
++// `model` param overrides. Each level picks the reasoning depth that ChatGPT
++// exposes for that family. Instant has no gpt-6 variant, so it stays on 5.6.
++export const DEFAULT_INTELLIGENCE: Intelligence = "extra_high";
+ export const INTELLIGENCE_MAP: Record<Intelligence, ModelChoice> = {
+-  instant: { model: "gpt-5-5-instant", reasoningType: "none" },
+-  medium: { model: "gpt-5-5-thinking", thinkingEffort: "standard", reasoningType: "reasoning" },
+-  high: { model: "gpt-5-5-thinking", thinkingEffort: "extended", reasoningType: "reasoning" },
+-  extra_high: { model: "gpt-5-5-thinking", thinkingEffort: "max", reasoningType: "reasoning" },
+-  pro: { model: "gpt-5-5-pro", thinkingEffort: "extended", reasoningType: "pro" },
++  instant: { model: "gpt-5-6-instant", reasoningType: "none" },
++  medium: { model: "gpt-6-astra-wm", thinkingEffort: "standard", reasoningType: "reasoning" },
++  high: { model: "gpt-6-astra-wm", thinkingEffort: "extended", reasoningType: "reasoning" },
++  extra_high: { model: "gpt-6-astra-wm", thinkingEffort: "max", reasoningType: "reasoning" },
++  pro: { model: "gpt-6-pro", thinkingEffort: "standard", reasoningType: "pro" },
+ };
+ 
+ export const INTELLIGENCE_LEVELS = Object.keys(INTELLIGENCE_MAP) as Intelligence[];
+@@ -31,7 +34,7 @@
+       reasoningType: opts.thinkingEffort ? "reasoning" : "auto",
+     };
+   }
+-  const choice = INTELLIGENCE_MAP[opts.intelligence || "medium"];
++  const choice = INTELLIGENCE_MAP[opts.intelligence || DEFAULT_INTELLIGENCE];
+   return opts.thinkingEffort ? { ...choice, thinkingEffort: opts.thinkingEffort } : choice;
+ }
+ 
+diff -ruN a/tests/models.test.ts b/tests/models.test.ts
+--- a/tests/models.test.ts	2026-09-05 19:26:04
++++ b/tests/models.test.ts	2026-09-05 19:26:04
+@@ -1,5 +1,20 @@
+ import { describe, expect, test } from "bun:test";
+-import { resolveModel } from "../src/models.ts";
++import { resolveModel, DEFAULT_INTELLIGENCE } from "../src/models.ts";
++
++describe("defaults", () => {
++  test("no arguments resolve to the latest model at max effort", () => {
++    expect(resolveModel({})).toEqual({
++      model: "gpt-6-astra-wm",
++      thinkingEffort: "max",
++      reasoningType: "reasoning",
++    });
++  });
++
++  test("extra_high is the default intelligence", () => {
++    expect(DEFAULT_INTELLIGENCE).toBe("extra_high");
++    expect(resolveModel({ intelligence: DEFAULT_INTELLIGENCE })).toEqual(resolveModel({}));
++  });
++});
+ 
+ describe("explicit model reasoning effort", () => {
+   test("preserves an explicit model and thinking effort", () => {

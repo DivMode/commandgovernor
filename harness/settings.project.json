@@ -29,9 +29,16 @@
     "",
     "defaultThinkingLevel: the effort every new session starts at for every",
     "model, including Fable through the bridge (Prime's own default is medium).",
-    "Change it in-session with /effort; this is the declared default."
+    "Change it in-session with /effort; this is the declared default.",
+    "",
+    "enabledModels scopes /model, Ctrl+P and the configuration menu to the models this",
+    "product actually provides (claude-bridge). Without it Prime lists its entire built-in",
+    "catalog, including providers with no credential. User decision 2026-09-05."
   ],
   "defaultThinkingLevel": "high",
+  "enabledModels": [
+    "claude-bridge/*"
+  ],
   "packages": [
     "npm:pi-tasks@0.2.5",
     "npm:@gotgenes/pi-subagents@21.4.0",
