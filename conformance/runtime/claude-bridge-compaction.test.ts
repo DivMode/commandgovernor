@@ -4,7 +4,7 @@
  * LIVE and OPT-IN, for the same reason as `live-chatgpt.test.ts`: what is under
  * test is a real Claude Code child on the user's own login, and no mock can come
  * back negative about it. Haiku only; nothing leaves the machine but the three
- * short turns and one summarisation below.
+ * short turns and two summarisations below.
  *
  *   CG_LIVE=1 scripts/conformance.sh
  *   CG_LIVE=1 node --test conformance/runtime/claude-bridge-compaction.test.ts
@@ -31,6 +31,19 @@
  * package no `compaction` entry ever appears and the first assertion times out
  * with the failure text on the client's screen.
  *
+ * It runs the compaction TWICE, because the two are broken by different
+ * mistakes:
+ *
+ * - **warm worker** — the session that just ran turns, so the bridge's capture
+ *   table holds its prompt. This is what the unpatched bridge fails.
+ * - **cold worker** — `prime-agent -r <sessionFile>` after the resident worker
+ *   is SIGKILLed, with `/compact` as the new worker's FIRST action. Prime
+ *   reaches `emitBeforeAgentStart` only from user-turn preparation, so nothing
+ *   was ever recorded and the capture table is empty. An earlier draft of the
+ *   seam gated on `promptCaptures.size > 0` and would have left exactly this
+ *   path throwing the same 317-char error; nothing but a test that reaches a
+ *   cold worker can say so.
+ *
  * Two fixture decisions, each forced by a measured fact:
  *
  * 1. **The stock interactive client, not `--mode rpc`.** Prime suspends the
@@ -53,12 +66,13 @@ import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { listAgents, ptyCli, waitUntil, startRoot, type PrimeRoot, type PtyClient } from "../lib/prime.ts";
+import { alive, listAgents, ptyCli, reopenSaved, sleep, waitUntil, startRoot, type PrimeRoot, type PtyClient } from "../lib/prime.ts";
 import { readPins, REPO_ROOT } from "../lib/repo.ts";
 import { assertCleanTeardown } from "../lib/teardown.ts";
 
 const reason = process.env.CG_LIVE === "1" ? undefined : "opt-in: set CG_LIVE=1 to run a real Claude Code child on the user's own login";
 
+const BRIDGE_FLAGS = ["--provider", "claude-bridge", "--model", "claude-haiku-4-5", "-nc", "--no-themes"] as const;
 /** Small enough that any of these turns is already past the cut. */
 const KEEP_RECENT_TOKENS = 100;
 /** ~2 KB on ONE line: a newline inside a TUI prompt is Enter, not text. */
@@ -91,6 +105,18 @@ function sessionEntries(): SessionEntry[] {
 				return {};
 			}
 		});
+}
+
+function compactionEntries(): SessionEntry[] {
+	return sessionEntries().filter((entry) => entry.type === "compaction");
+}
+
+function assertLastCompactionCarriesASummary(expected: number): void {
+	const compactions = compactionEntries();
+	assert.equal(compactions.length, expected, `expected exactly ${expected} compaction entr(ies) in the transcript, found ${compactions.length}`);
+	const last = compactions[compactions.length - 1];
+	assert.equal(typeof last.summary, "string", "the compaction entry carries no summary");
+	assert.ok(String(last.summary).length > 0, "the compaction entry's summary is empty");
 }
 
 function assistantSaid(token: string): boolean {
@@ -149,11 +175,7 @@ describe("BRIDGE: Prime compaction through the vendored claude-bridge", { skip: 
 			JSON.stringify({ packages: [bridgeSource], compaction: { keepRecentTokens: KEEP_RECENT_TOKENS } }, null, 1),
 		);
 
-		client = ptyCli(
-			fixture,
-			["--provider", "claude-bridge", "--model", "claude-haiku-4-5", "--session-dir", fixture.sessionDir, "-nc", "--no-themes"],
-			{ name: "bridge-tui" },
-		);
+		client = ptyCli(fixture, [...BRIDGE_FLAGS, "--session-dir", fixture.sessionDir], { name: "bridge-tui" });
 		// Ready means the daemon says so, not that the screen has drawn: the
 		// package install on startup is what takes the time here.
 		await waitUntil(
@@ -169,7 +191,9 @@ describe("BRIDGE: Prime compaction through the vendored claude-bridge", { skip: 
 		if (fixture) assertCleanTeardown(await fixture.stop());
 	});
 
-	it("BRIDGE-005: /compact succeeds through the bridge, lands a compaction entry, and the session continues", async () => {
+	it("BRIDGE-005: /compact succeeds through the bridge, on a warm worker and on a cold one", async () => {
+		// --- warm worker: the capture table holds this session's own prompt ---
+
 		// Two turns: one for the summariser to summarise, one to keep.
 		await turn("Reply with exactly: BRIDGE005-T1", "BRIDGE005-T1");
 		await turn(`${FILLER} Ignore the filler. Reply with exactly: BRIDGE005-T2`, "BRIDGE005-T2");
@@ -178,15 +202,55 @@ describe("BRIDGE: Prime compaction through the vendored claude-bridge", { skip: 
 		// The durable record is the assertion. A failed compaction writes no
 		// entry at all, so this is what times out when the seam regresses — the
 		// client's own error text comes back with it.
-		await waitWithScreen(() => sessionEntries().some((entry) => entry.type === "compaction"), 300_000, "a compaction entry in Prime's transcript", 900);
-
-		const compactions = sessionEntries().filter((entry) => entry.type === "compaction");
-		assert.equal(compactions.length, 1, `expected exactly one compaction entry, found ${compactions.length}`);
-		assert.equal(typeof compactions[0].summary, "string", "the compaction entry carries no summary");
-		assert.ok(String(compactions[0].summary).length > 0, "the compaction entry's summary is empty");
+		await waitWithScreen(() => compactionEntries().length >= 1, 300_000, "a compaction entry in Prime's transcript", 900);
+		assertLastCompactionCarriesASummary(1);
 
 		// And the session keeps working across the history Prime just rewrote —
 		// the bridge's `session_compact` → REBUILD path.
 		await turn("Reply with exactly: BRIDGE005-OK", "BRIDGE005-OK");
+
+		// --- cold worker: the capture table is empty, and must not gate the route ---
+		//
+		// `emitBeforeAgentStart` is reached only from Prime's user-turn
+		// preparation, so a worker that is asked to compact before it has run a
+		// turn has recorded nothing. That is a real path — a supervisor reopens a
+		// saved session and the first thing it does is make room — and it is the
+		// case a `promptCaptures.size > 0` guard would have left broken, which is
+		// why it is asserted here rather than reasoned about in a comment.
+		const warm = await waitUntil(
+			() => {
+				const row = listAgents(fixture).sessions.find((candidate) => candidate.sessionId && candidate.sessionFile && candidate.workerPid);
+				return row;
+			},
+			60_000,
+			500,
+			"the live session's row, for its sessionFile and worker pid",
+		);
+		const sessionFile = String(warm.sessionFile);
+		const warmPid = Number(warm.workerPid);
+
+		client!.kill();
+		client = undefined;
+		assert.ok(alive(warmPid), `the resident worker ${warmPid} died before it could be killed`);
+		process.kill(warmPid, "SIGKILL");
+		await waitUntil(() => !alive(warmPid) || undefined, 30_000, 250, `worker ${warmPid} to die`);
+		fixture.note("SIGKILL resident worker", String(warmPid), "for the cold-worker compaction");
+		await sleep(2000);
+
+		// The stock resume, with its measured retry: a supervisor that is mid
+		// idle-shutdown kills the first client with a raw stack trace.
+		const back = await reopenSaved(fixture, sessionFile, String(warm.sessionId), {
+			name: "bridge-cold",
+			excludePid: warmPid,
+			flags: BRIDGE_FLAGS,
+			timeoutMs: 180_000,
+		});
+		client = back.client;
+		assert.notEqual(back.row.workerPid, warmPid, "the reopened session kept the old worker; it is not cold");
+
+		// `/compact` as this worker's FIRST action: no turn, so no capture.
+		await client.submit("/compact", 1500);
+		await waitWithScreen(() => compactionEntries().length >= 2, 300_000, "a SECOND compaction entry, written by a cold worker", 900);
+		assertLastCompactionCarriesASummary(2);
 	});
 });

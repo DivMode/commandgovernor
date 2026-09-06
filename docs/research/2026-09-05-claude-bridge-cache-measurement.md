@@ -229,9 +229,12 @@ shares its first 10 chars ... known keys=1
 immediately after the provider was entered — the `provider: routing standalone`
 line never appears.
 
-Three more Prime call sites have the same shape and would have failed the same
-way: `generateTurnPrefixSummary` (a split-turn compaction),
-`core/compaction/branch-summarization.js`, and `core/refinement/refinement.js`.
+**Four** more Prime call sites have the same shape and would have failed the
+same way: `generateTurnPrefixSummary` (a split-turn compaction, `compaction.js:586`),
+`core/compaction/branch-summarization.js:196`, and *both* refinement completions
+— `core/refinement/refinement.js:723` (`/refine`) and `:771` (the auto-refine
+review). Every one of them passes `{ maxTokens, signal, apiKey, headers }` and a
+system prompt of Prime's own.
 
 **Fix — the fourth seam.** `isStandaloneRequest` keeps upstream's marker and
 adds a second one: a system prompt the capture table cannot account for is, by
@@ -240,25 +243,53 @@ construction, not an agent turn.
 ```ts
 if (options?.cacheRetention === "none") return true;
 ...
-return promptCaptures.size > 0 && !promptCaptures.canAccount(context.systemPrompt);
+return Boolean(context.systemPrompt) && !promptCaptures.canAccount(context.systemPrompt);
 ```
 
 with a new non-throwing `PromptCaptures.canAccount` next to `resolveOrDerive`.
+The condition is exactly "`resolveOrDerive` would throw on this": a prompt it
+would have served — absent, empty, exact, revived or embedded — still takes the
+provider path and behaves as upstream.
+
 This does not weaken the prompt-capture guard for the provider path, and the
-reason is structural rather than a judgement call: the new branch only fires on
-the standalone shape (no tools, one user message), and the standalone path
-passes `context.systemPrompt` to Claude Code **verbatim** — so nothing the
-guard exists to protect (context files, skills, custom instructions) can be
-dropped by taking it. An empty capture table still throws, because zero known
-captures means `before_agent_start` never recorded at all, which is the
-second-package-root bug the error text names.
+reason is structural rather than a judgement call. `context.tools === undefined`
+already excludes every agent turn: pi-agent-core materialises the agent state's
+tools as an array (`createMutableAgentState`: `initialState?.tools?.slice() ?? []`)
+and `agent-loop.js` hands that same array to `streamSimple`, so an agent turn is
+`tools: []` at worst, never `undefined`. And the standalone path passes
+`context.systemPrompt` to Claude Code **verbatim**, so nothing the guard exists
+to protect (context files, skills, custom instructions) can be dropped by taking
+it.
+
+**An earlier draft of this seam also required `promptCaptures.size > 0`, and
+that was wrong.** Prime reaches `emitBeforeAgentStart` only from its user-turn
+preparation (`core/agent-session.js`), so a **cold worker** — `prime-agent -r
+<sessionFile>` and then `/compact` as its first action — has an empty table. The
+size term would have left exactly that path throwing the same 317-char error.
+It is removed, and the case is now asserted rather than argued (§9).
 
 **Verified.** `BRIDGE-005`
 (`conformance/runtime/claude-bridge-compaction.test.ts`) drives a real Prime
-session under the bridge with `keepRecentTokens` lowered, runs `/compact`, and
-requires a `compaction` entry with a non-empty summary in Prime's own
-transcript and a working turn after it. It passes with the seam and times out
-without it (§9).
+session under the bridge with `keepRecentTokens` lowered and compacts twice: on
+the **warm** worker that just ran turns, and on a **cold** worker reopened with
+`-r` after the resident worker was SIGKILLed, with `/compact` as its first
+action. Each must land a `compaction` entry carrying a non-empty summary in
+Prime's own transcript, and the warm phase must answer a turn afterwards. Three
+consecutive passes and two negative controls in §9.
+
+**Not covered by `tsc --noEmit`.** `tsconfig.json` has `"include": ["harness/**/*.ts",
+"conformance/**/*.ts"]` and `"exclude": [..., "pins"]`, so the vendored source
+this seam edits is outside the repository's typecheck — as all three earlier
+seams already were. It matters enough to say: a purely static type error in a
+seam would reach `main`. What does cover it is that Prime executes these files
+under Node's type stripping, so `BRIDGE-005` runs the exact patched module; and
+typechecking the vendored `src/` standalone (its own bundled `tsc`, `strict`,
+`nodenext`) reports **15 errors, all pre-existing** — two in `convert.ts`, three
+in `session-verify.ts`, and ten in `index.ts` of which nine are an
+`AssistantMessage | null` cluster and one is the existing `getModels` seam,
+whose symbol Prime's `pi-ai` exports at runtime but types differently. **Zero
+are in `prompt-capture.ts`, and none is at a line this seam touches.** Making
+that tree typecheck clean is an upstream change, not this branch's.
 
 ## 6. Defect (b) — an abort costs the whole cache and the session id
 
@@ -323,8 +354,23 @@ Each claim above has the observation that would falsify it:
 | --- | --- |
 | the bridge keeps the cache warm on clean turns | a `syncResult: path=rebuild` or a 0% hit on turn 2 — did not occur in 3 runs |
 | compaction was broken | a `compaction` entry in any of the three transcripts — 0 of 3 |
-| the seam fixes it | `BRIDGE-005`: with the seam disabled in the extracted package and nothing else changed, no compaction entry appeared in 300 s and the run failed; with it, the entry appears and the next turn answers |
+| the seam fixes it | `BRIDGE-005` passed three times in a row; with the seam disabled in the extracted package and nothing else changed, the **warm** phase timed out at 300 s with `Command failed: prompt-capture: no capture for this 317-char system prompt, and it embeds none of the 1 known` on the client's screen |
+| the `size > 0` term had to go | restoring only that term, with the rest of the seam intact, passes the warm phase and fails the **cold** one at 300 s with `it embeds none of the 0 known` — the empty capture table, named by the count |
 | an abort loses the cache | a non-zero `cache_read` on turn 3 — 0 in all three runs |
+
+One measurement in this document was itself unable to come back negative for a
+while, and it is worth recording. `BRIDGE-005`'s bulk prompt is 2126 bytes, and
+`conformance/lib/ptyrun.py` wrote keystrokes to the pty master in one
+`os.write()` whose return value was discarded. A raw-mode pty slave holds
+**1022** bytes — measured directly on this machine: 1022 goes through, 1023
+blocks — so that write parked the runner in the kernel, and the runner is the
+only thing draining the TUI's output. Whether the pair deadlocked was a race the
+TUI sometimes won. Three passing runs and one correctly-failing control were
+therefore luckier than they looked, and an independent reviewer's run of the
+same test hung on turn 2 without ever reaching `/compact` — which also silently
+disarms the negative control. The runner now buffers keystrokes, writes at most
+512 bytes at a time, only when `select()` reports the master writable, advances
+by what `os.write()` actually took, and keeps draining output between chunks.
 
 ## Sources
 

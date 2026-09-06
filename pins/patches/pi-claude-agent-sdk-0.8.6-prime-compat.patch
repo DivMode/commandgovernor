@@ -145,7 +145,7 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/config.
  
 diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.ts patched/src/index.ts
 --- a/src/index.ts	1985-10-25 22:15:00
-+++ b/src/index.ts	2026-09-05 15:11:32
++++ b/src/index.ts	2026-09-05 16:44:00
 @@ -1,6 +1,6 @@
  import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
  import * as piAi from "@earendil-works/pi-ai";
@@ -154,7 +154,7 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.t
  import { type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
  import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
  import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
-@@ -387,10 +387,36 @@
+@@ -387,10 +387,50 @@
   * prompt capture and shared Claude Code session belong to the interactive
   * agent, not to an unrelated planner or summarizer. */
  function isStandaloneRequest(context: Context, options?: SimpleStreamOptions): boolean {
@@ -170,30 +170,44 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.t
 +	//
 +	// Prime's own nested completions — `/compact` and autocompaction
 +	// (core/compaction/compaction.js `generateSummary`,
-+	// `generateTurnPrefixSummary`), branch summarisation and refinement — call
-+	// pi-ai's `completeSimple` with `{ maxTokens, signal, apiKey, headers }` and
-+	// nothing else, so `cacheRetention` keeps its "short" default. The string
-+	// `cacheRetention` does not occur anywhere in Prime 0.9.1's core. Upstream's
-+	// no-cache marker therefore never arrives, every one of those completions
-+	// enters the resumable provider path, and `resolveOrDerive` throws on the
-+	// 317-char SUMMARIZATION_SYSTEM_PROMPT that `before_agent_start` never
-+	// recorded — surfacing to the user as "Compaction failed: prompt-capture: no
-+	// capture for this 317-char system prompt". Measured 3/3.
++	// `generateTurnPrefixSummary`), branch summarisation
++	// (core/compaction/branch-summarization.js) and both refinement calls
++	// (core/refinement/refinement.js) — call pi-ai's `completeSimple` with
++	// `{ maxTokens, signal, apiKey, headers }` and nothing else, so
++	// `cacheRetention` keeps its "short" default. The string `cacheRetention`
++	// does not occur anywhere in Prime 0.9.1's core. Upstream's no-cache marker
++	// therefore never arrives, every one of those completions enters the
++	// resumable provider path, and `resolveOrDerive` throws on the 317-char
++	// SUMMARIZATION_SYSTEM_PROMPT that `before_agent_start` never recorded —
++	// surfacing to the user as "Compaction failed: prompt-capture: no capture
++	// for this 317-char system prompt". Measured 3/3.
 +	//
-+	// The second marker is the capture table itself: a system prompt that Pi/Prime
-+	// never assembled through `before_agent_start` is, by construction, not an
-+	// agent turn. This does not weaken the guard for the provider path. It only
-+	// fires on the standalone shape above (no tools, one user message), and the
-+	// standalone path passes `context.systemPrompt` to Claude Code verbatim — so
-+	// nothing this exists to protect (context files, skills, custom instructions)
-+	// can be dropped by taking it. An empty table is left to throw as before: zero
-+	// known captures means `before_agent_start` never recorded at all, which is
-+	// the second-package-root bug the error text names, not a nested completion.
-+	return promptCaptures.size > 0 && !promptCaptures.canAccount(context.systemPrompt);
++	// The second marker is the capture table: a system prompt that Pi/Prime never
++	// assembled through `before_agent_start` is, by construction, not an agent
++	// turn. The condition below is exactly "resolveOrDerive would throw on this",
++	// so a prompt it would have served (absent, empty, exact, revived, embedded)
++	// still takes the provider path and behaves as upstream.
++	//
++	// This does not weaken the guard for the provider path, and the reason is
++	// structural rather than a judgement call. `context.tools === undefined`
++	// already excludes every agent turn: pi-agent-core materialises the agent
++	// state's tools as an array (`initialState?.tools?.slice() ?? []`) and
++	// agent-loop hands that same array to `streamSimple`, so an agent turn is
++	// `tools: []` at worst, never undefined. And the standalone path passes
++	// `context.systemPrompt` to Claude Code VERBATIM, so nothing this guard
++	// exists to protect — context files, skills, custom instructions — can be
++	// dropped by taking it.
++	//
++	// Deliberately NOT also requiring a non-empty capture table. `emitBeforeAgentStart`
++	// is reached only from Prime's user-turn preparation (core/agent-session.js), so a
++	// cold worker — `prime-agent -r <session>` and then `/compact` as the first
++	// action — has an empty table and must still be routed. Guarding on table
++	// size would have kept exactly that case broken.
++	return Boolean(context.systemPrompt) && !promptCaptures.canAccount(context.systemPrompt);
  }
  
  /** Failure text for an SDK result, or undefined when it succeeded. CC reports API failures
-@@ -1427,7 +1453,7 @@
+@@ -1427,7 +1467,7 @@
   * latter before touching prompt captures or resumable-session state. */
  function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
  	if (isStandaloneRequest(context, options)) {
@@ -204,8 +218,8 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/index.t
  
 diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/prompt-capture.ts patched/src/prompt-capture.ts
 --- a/src/prompt-capture.ts	1985-10-25 22:15:00
-+++ b/src/prompt-capture.ts	2026-09-05 15:11:16
-@@ -175,6 +175,26 @@
++++ b/src/prompt-capture.ts	2026-09-05 16:44:00
+@@ -175,6 +175,31 @@
  		return { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], inherited: embedded };
  	}
  
@@ -221,6 +235,11 @@ diff -ru --exclude=node_modules --exclude=package-lock.json pristine/src/prompt-
 +	 * provider entry point needs to ask the question before it commits to the
 +	 * path that throws. Same three routes as `resolveOrDerive`, in the same
 +	 * order, with no side effects.
++	 *
++	 * An absent or empty prompt answers `false`, matching `resolveOrDerive`'s own
++	 * first line — but there it means "nothing to project", not "unaccountable",
++	 * and it does not throw. So `!canAccount(p)` is "resolveOrDerive would throw"
++	 * only for a truthy `p`; the caller carries that check.
 +	 */
 +	canAccount(systemPrompt?: string): boolean {
 +		if (!systemPrompt) return false;

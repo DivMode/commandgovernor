@@ -915,14 +915,18 @@ export async function reopenSaved(
 	fixture: PrimeRoot,
 	sessionFile: string,
 	sessionId: string,
-	options: { name?: string; excludePid?: number; attempts?: number; timeoutMs?: number } = {},
+	options: { name?: string; excludePid?: number; attempts?: number; timeoutMs?: number; flags?: readonly string[] } = {},
 ): Promise<ReopenResult> {
 	const name = options.name ?? "reopen";
 	const attempts = options.attempts ?? 3;
 	const timeoutMs = options.timeoutMs ?? 90_000;
+	// `flags` exists so a caller that needs a real provider (the live lane) gets
+	// the same measured retry behaviour rather than reimplementing it; the
+	// default is still the credential-free stock client every other test uses.
+	const flags = options.flags ?? STOCK_CLIENT_FLAGS;
 	const crashes: { attempt: number; tail: string }[] = [];
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {
-		const client = ptyCli(fixture, [...STOCK_CLIENT_FLAGS, "--session-dir", fixture.sessionDir, "-r", sessionFile], {
+		const client = ptyCli(fixture, [...flags, "--session-dir", fixture.sessionDir, "-r", sessionFile], {
 			name: `${name}-${attempt}`,
 		});
 		try {
