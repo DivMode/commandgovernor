@@ -153,6 +153,22 @@ done || exit 1
 printf 'bootstrap: npm ci --ignore-scripts in %s\n' "$install_root_rel"
 ( cd "$install_root" && npm ci --ignore-scripts ) || fail 'npm ci failed'
 
+# --- step 3-patch: the repository's substrate patches ------------------------
+# Prime is installed verbatim from the verified release and then carries the
+# committed deltas under pins/patches/ that pins.json substrate.patches lists.
+# Each is a `patch -p1` inside the install root, applied strictly: npm ci
+# has just recreated node_modules, so a patch that does not apply means the
+# release changed under it and must be re-based, not skipped. Every patch has
+# a record under docs/upstream/ and is asserted by conformance/tier1/pin.test.ts.
+substrate_patches=$(node -p '((require(process.argv[1]).substrate||{}).patches||[]).join(" ")' "$pins_json") ||
+	fail 'cannot read substrate.patches from pins.json'
+for patch_rel in $substrate_patches; do
+	[ -f "$repo_root/$patch_rel" ] || fail "substrate patch $patch_rel is missing"
+	( cd "$install_root" && patch -p1 --silent < "$repo_root/$patch_rel" ) ||
+		fail "substrate patch $patch_rel does not apply to $install_root_rel; re-base it against this release"
+	printf 'bootstrap: substrate patch %s applied in %s\n' "$patch_rel" "$install_root_rel"
+done
+
 # --- step 3a: vendored third-party packages --------------------------------
 # A package whose only source is an npm tarball from an author with no public
 # repository is vendored: the tarball is committed under pins/packages/, its

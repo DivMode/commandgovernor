@@ -1,0 +1,45 @@
+# Command Governor substrate patch for Prime Agent 0.9.2.
+#
+# Prime's interactive client asks the daemon for the model catalog and gets
+# back every built-in model (1289 on 0.9.2) plus the list of providers that
+# actually have credentials. `getAvailableConnectionModels()` applies that
+# list; `getCachedModelCandidates()`, which feeds /model, Ctrl+P and the
+# configuration menu, does not, so the picker shows the whole catalog and
+# tags the unusable rows "sign in". This patch makes the candidate list use
+# the filtered accessor. Same change in the built bundle (what the binary
+# runs) and in the unbundled module (what a reader greps).
+#
+# Record: docs/upstream/2026-09-05-prime-model-picker-lists-unconfigured-providers.md
+# Applied by scripts/bootstrap.sh from pins.json substrate.patches, with
+# `patch -p1` inside substrate.installRoot. The bundle chunk name is a
+# content hash and changes on every Prime release; re-base at each re-pin.
+diff -ruN a/node_modules/prime-agent/dist/bundle/chunk-XMZW7K3D.js b/node_modules/prime-agent/dist/bundle/chunk-XMZW7K3D.js
+--- a/node_modules/prime-agent/dist/bundle/chunk-XMZW7K3D.js	2026-09-05 19:47:58
++++ b/node_modules/prime-agent/dist/bundle/chunk-XMZW7K3D.js	2026-09-05 19:47:58
+@@ -54704,7 +54704,10 @@
+     for (const scoped of this.getScopedModelState()) {
+       modelsById.set(`${scoped.model.provider}/${scoped.model.id}`, scoped.model);
+     }
+-    for (const model of this.connectionModelCatalog) {
++    // Command Governor substrate patch: the daemon ships every built-in model
++    // and a separate list of configured providers; the picker, Ctrl+P and the
++    // configuration menu must see only models a configured provider can run.
++    for (const model of this.getAvailableConnectionModels()) {
+       modelsById.set(`${model.provider}/${model.id}`, model);
+     }
+     return [...modelsById.values()];
+diff -ruN a/node_modules/prime-agent/dist/modes/interactive/interactive-mode.js b/node_modules/prime-agent/dist/modes/interactive/interactive-mode.js
+--- a/node_modules/prime-agent/dist/modes/interactive/interactive-mode.js	2026-09-05 19:47:58
++++ b/node_modules/prime-agent/dist/modes/interactive/interactive-mode.js	2026-09-05 19:47:58
+@@ -6667,7 +6667,10 @@
+         for (const scoped of this.getScopedModelState()) {
+             modelsById.set(`${scoped.model.provider}/${scoped.model.id}`, scoped.model);
+         }
+-        for (const model of this.connectionModelCatalog) {
++        // Command Governor substrate patch: the daemon ships every built-in model
++        // and a separate list of configured providers; the picker, Ctrl+P and the
++        // configuration menu must see only models a configured provider can run.
++        for (const model of this.getAvailableConnectionModels()) {
+             modelsById.set(`${model.provider}/${model.id}`, model);
+         }
+         return [...modelsById.values()];

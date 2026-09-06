@@ -19,7 +19,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
@@ -136,6 +136,48 @@ describe("PIN: component manifest", () => {
 		const reported = spawnSync(process.execPath, [primeCliEntry(pins), "--version"], { encoding: "utf8", timeout: 60_000 });
 		assert.equal(reported.status, 0, reported.stderr);
 		assert.equal(reported.stderr.trim(), substrate.version, "the installed prime-agent reports a different version than pins.json records");
+	});
+
+	/**
+	 * The substrate is stock Prime plus the deltas pins.json names, and nothing
+	 * else. A patch file that exists but did not land leaves the shipped
+	 * behaviour running while the record says it was fixed, so ask the
+	 * installed tree: a reverse dry-run of each patch succeeds only when the
+	 * patched hunks are present verbatim. Then check the one behaviour the
+	 * current patch exists for, so a re-base that keeps the file applying but
+	 * drops the intent is still caught.
+	 */
+	it("carries every substrate patch pins.json names, applied on the installed tree, and no others", () => {
+		const patches = substrate.patches ?? [];
+		const onDisk = readdirSync(join(REPO_ROOT, "pins", "patches")).filter((name) => name.startsWith(`prime-${substrate.version}-`));
+		assert.deepEqual(
+			[...onDisk].sort(),
+			patches.map((patch) => patch.replace(/^pins\/patches\//, "")).sort(),
+			"every prime-<version>-*.patch under pins/patches must be listed in substrate.patches, and vice versa",
+		);
+		for (const patch of patches) {
+			assert.ok(patch.startsWith("pins/patches/"), `${patch} must live under pins/patches/`);
+			assert.ok(patch.includes(substrate.version), `${patch} must be named for the pinned version so a re-pin cannot apply a stale delta`);
+			assert.ok(exists(join(REPO_ROOT, patch)), `${patch} is missing`);
+			const reverse = spawnSync("patch", ["-p1", "-R", "--dry-run", "--silent", "-i", join(REPO_ROOT, patch)], {
+				cwd: installRoot,
+				encoding: "utf8",
+				timeout: 60_000,
+			});
+			assert.equal(reverse.status, 0, `${patch} is not applied on ${substrate.installRoot}; run scripts/bootstrap.sh\n${reverse.stdout}${reverse.stderr}`);
+		}
+
+		// The model picker must be fed only models a configured provider can run
+		// (docs/upstream/2026-09-05-prime-model-picker-lists-unconfigured-providers.md).
+		const bundleDir = join(installRoot, "node_modules", "prime-agent", "dist", "bundle");
+		const chunks = readdirSync(bundleDir).filter((name) => name.endsWith(".js"));
+		const candidateSources = chunks
+			.map((name) => readFileSync(join(bundleDir, name), "utf8"))
+			.map((source) => source.match(/getCachedModelCandidates\(\) \{[\s\S]*?return \[\.\.\.modelsById\.values\(\)\];/g) ?? [])
+			.flat();
+		assert.equal(candidateSources.length, 1, "exactly one getCachedModelCandidates in the shipped bundle");
+		assert.ok(candidateSources[0]?.includes("this.getAvailableConnectionModels()"), "the picker's candidate list must come from the configured-provider accessor");
+		assert.ok(!candidateSources[0]?.includes("this.connectionModelCatalog"), "the picker's candidate list must not read the raw daemon catalog");
 	});
 
 	it("installs Prime's own siblings at Prime's version and never co-installs upstream Pi", () => {

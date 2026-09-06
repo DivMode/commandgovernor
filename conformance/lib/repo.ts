@@ -106,6 +106,12 @@ export interface SubstratePin {
 	readonly currentLink: string;
 	/** Repo-relative `prime-agent` reached through `currentLink`. */
 	readonly stableBinary: string;
+	/**
+	 * Repo-relative patches bootstrap applies inside `installRoot` after
+	 * `npm ci`. The only deltas carried on the substrate itself; each has a
+	 * record under docs/upstream/.
+	 */
+	readonly patches?: readonly string[];
 	readonly daemonProtocol: DaemonProtocolPin;
 	readonly engines: { readonly node: string };
 	readonly assets: readonly PinnedAsset[];
@@ -248,6 +254,9 @@ export function readPins(path: string = PINS_JSON): PinRecord {
 			},
 			engines: { node: asString(enginesDoc.node, "substrate.engines.node") },
 			assets: asArray(substrateDoc.assets, "substrate.assets").map(readAsset),
+			...(substrateDoc.patches === undefined
+				? {}
+				: { patches: asArray(substrateDoc.patches, "substrate.patches").map((raw, index) => asString(raw, `substrate.patches[${index}]`)) }),
 		},
 		fallback: {
 			package: asString(fallbackDoc.package, "fallback.package"),
